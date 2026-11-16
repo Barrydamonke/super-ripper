@@ -70,7 +70,7 @@ def test_wrong_password(client, monkeypatch):
 
 def test_open_redirect_blocked(client):
     _setup(client)
-    for bad in ("//evil.example", "https://evil.example", "/\evil.example", ""):
+    for bad in ("//evil.example", "https://evil.example", r"/\evil.example", ""):
         client.cookies.clear()
         r = client.post("/login", data={"password": TEST_PASSWORD, "next": bad})
         assert r.headers["location"] == "/", bad
