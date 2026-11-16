@@ -6,10 +6,10 @@ Run with: uvicorn disc_ripper.app:create_app --factory
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, db, drives
@@ -20,6 +20,32 @@ from .web.deps import is_htmx
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _OPEN_PATHS = {"/healthz"}
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+_SECURITY_HEADERS = {
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
+def is_cross_origin(request: Request) -> bool:
+    """True for a state-changing request sent from another origin.
+
+    SameSite=Lax doesn't cover this: the other web UIs on the same server
+    (Unraid, Jellyfin, Radarr...) differ only by port, so they count as same-site.
+    """
+    if request.method in _SAFE_METHODS:
+        return False
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site is not None and fetch_site not in ("same-origin", "none"):
+        return True
+    origin = request.headers.get("origin")
+    if origin is not None:
+        if origin == "null":
+            return True
+        if urlsplit(origin).netloc.lower() != request.headers.get("host", "").lower():
+            return True
+    return False
 
 
 def _redirect(request: Request, target: str) -> Response:
@@ -70,9 +96,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.config = config
     app.state.sessions = auth.SessionManager(auth.load_or_create_secret(config.secret_key_path))
 
-    @app.middleware("http")
-    async def require_login(request: Request, call_next):
+    async def _guarded(request: Request, call_next) -> Response:
         request.state.logged_in = False
+        if is_cross_origin(request):
+            return PlainTextResponse("Cross-site request blocked.", status_code=403)
         path = request.url.path
         if path in _OPEN_PATHS or path.startswith("/static/"):
             return await call_next(request)
@@ -80,6 +107,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         if target is not None:
             return _redirect(request, target)
         return await call_next(request)
+
+    @app.middleware("http")
+    async def security(request: Request, call_next):
+        response = await _guarded(request, call_next)
+        for name, value in _SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        return response
 
     @app.get("/healthz")
     def healthz():

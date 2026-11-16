@@ -147,3 +147,12 @@ def test_node_status_no_device_behind_node(config, monkeypatch):
 
     monkeypatch.setattr(drives.os, "open", nxio)
     assert drives.node_status(config.dev_root, "sg1") == "missing"
+
+
+def test_duplicate_serials_get_distinct_ids(config, add_sg):
+    # Cheap drives can report the same factory-default serial.
+    add_sg(config.sysfs_root, 1, sr=0, vpd_serial=b"\x05\x80\x00\x040000")
+    add_sg(config.sysfs_root, 2, sr=1, vpd_serial=b"\x05\x80\x00\x040000")
+    found = drives.discover(config.sysfs_root)
+    assert len({d.id for d in found}) == 2
+    assert all(d.id_source == "port" for d in found)

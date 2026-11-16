@@ -333,7 +333,8 @@ The container can drive your optical drives and run shell tools, so a compromise
 - One admin password on the UI, even behind Tailscale (sessions via a signed cookie).
 - Reachable only on the LAN and over Tailscale (host plugin); never port-forwarded.
 - `/api/busy` uses its own shared secret, separate from the admin password.
-- Devices passed with `--device`, no `--privileged`, no Docker socket mount.
+- Drives reach the container through `--device-cgroup-rule` and nodes the entrypoint creates (see Device handling); no `--privileged`, no Docker socket mount. The app then runs as 99:100 with no capabilities and `no_new_privs` set.
+- State-changing requests from another origin are refused (the other web UIs on the server count as same-site, so SameSite cookies alone don't cover them), and pages can't be framed.
 - Jellyfin, Radarr and Sonarr API keys stored in config, never returned by the API or written to logs.
 - Child processes run with fixed argument lists, never through a shell built from user input (disc labels, titles and music tags are untrusted text).
 - Output files owned by `nobody:users` (99:100).

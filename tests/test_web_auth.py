@@ -102,3 +102,27 @@ def test_logout(logged_in_client):
     assert r.headers["location"] == "/login"
     r = logged_in_client.get("/drives")
     assert r.headers["location"] == "/login?next=/drives"
+
+
+def test_cross_origin_post_rejected(logged_in_client):
+    # Another web UI on the same box (other port) is same-site, so SameSite=Lax alone doesn't stop it.
+    r = logged_in_client.post("/logout", headers={"Origin": "http://testserver:8080"})
+    assert r.status_code == 403
+    r = logged_in_client.post("/drives/rescan", headers={"Sec-Fetch-Site": "same-site"})
+    assert r.status_code == 403
+    r = logged_in_client.post("/login", data={"password": "x"}, headers={"Origin": "http://evil.example"})
+    assert r.status_code == 403
+    # still logged in: nothing above went through
+    assert logged_in_client.get("/settings").status_code == 200
+
+
+def test_same_origin_post_allowed(logged_in_client):
+    r = logged_in_client.post(
+        "/drives/rescan",
+        headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"},
+    )
+    assert r.status_code == 200
+
+
+def test_frames_denied(client):
+    assert client.get("/setup").headers["X-Frame-Options"] == "DENY"

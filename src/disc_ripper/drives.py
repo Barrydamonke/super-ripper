@@ -11,7 +11,8 @@ import errno
 import os
 import re
 import sqlite3
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -136,7 +137,20 @@ def discover(sysfs_root: Path) -> list[DiscoveredDrive]:
                 ),
             )
         )
-    return [d for _, d in sorted(found, key=lambda item: item[0])]
+    ordered = [d for _, d in sorted(found, key=lambda item: item[0])]
+    # Two drives reporting the same serial/WWID (e.g. a factory default) would
+    # merge into one record; give those drives port-based IDs instead.
+    counts = Counter(d.id for d in ordered)
+    return [
+        replace(
+            d,
+            id=f"port:{_port_name(class_dir / d.sg_name / 'device', d.sg_name)}:{d.model}",
+            id_source="port",
+        )
+        if counts[d.id] > 1
+        else d
+        for d in ordered
+    ]
 
 
 def node_status(dev_root: Path, name: str | None) -> NodeStatus:

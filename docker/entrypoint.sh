@@ -16,7 +16,10 @@ if [ "$(id -u)" = "0" ]; then
     mkdir -p "$CONFIG_DIR"
     chown "$PUID:$PGID" "$CONFIG_DIR"
     umask "$UMASK"
-    exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups "$@"
+    # Drop every capability for good (bounding set) and block setuid binaries
+    # (no_new_privs), so the app can never get back to root's CAP_MKNOD.
+    exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups \
+        --no-new-privs --bounding-set=-all --inh-caps=-all "$@"
 fi
 
 umask "$UMASK"
