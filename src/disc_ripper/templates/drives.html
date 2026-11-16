@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Drives - Disc Ripper{% endblock %}
+{% block content %}
+<h1>Drives</h1>
+<p>
+  <button hx-post="/drives/rescan" hx-target="#drive-table" hx-swap="outerHTML">Rescan</button>
+  <span class="hint">Drives are identified by serial number, so labels follow the drive even if its sr/sg number changes.</span>
+</p>
+{% include "_drive_table.html" %}
+{% endblock %}

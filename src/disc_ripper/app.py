@@ -5,7 +5,6 @@ Run with: uvicorn disc_ripper.app:create_app --factory
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -14,16 +13,13 @@ from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, db, drives
+from .clock import utc_now
 from .config import AppConfig, load_config
-from .web import auth_routes, drive_routes
+from .web import auth_routes, drive_routes, settings_routes
 from .web.deps import is_htmx
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _OPEN_PATHS = {"/healthz"}
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _redirect(request: Request, target: str) -> Response:
@@ -96,4 +92,5 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(_PACKAGE_DIR / "static")), name="static")
     app.include_router(auth_routes.router)
     app.include_router(drive_routes.router)
+    app.include_router(settings_routes.router)
     return app

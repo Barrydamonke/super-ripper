@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Settings - Disc Ripper{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+{% if message %}<p class="ok">{{ message }}</p>{% endif %}
+{% if errors %}<p class="error">Nothing was saved. Fix the fields marked below.</p>{% endif %}
+<form method="post" action="/settings">
+  {% for d in definitions %}
+  <div>
+    {% if d.kind == "bool" %}
+      <label><input type="checkbox" name="{{ d.key }}" {% if values[d.key] %}checked{% endif %}> {{ d.label }}</label>
+    {% else %}
+      <label>{{ d.label }}{% if d.unit %} ({{ d.unit }}){% endif %}
+        <input type="text" name="{{ d.key }}" value="{{ values[d.key] }}"{% if d.kind in ("int", "float") %} inputmode="decimal"{% endif %}>
+      </label>
+    {% endif %}
+    {% if errors.get(d.key) %}<span class="error">{{ errors[d.key] }}</span>{% endif %}
+    <div class="hint">{{ d.help }}</div>
+  </div>
+  {% endfor %}
+  <button type="submit">Save settings</button>
+</form>
+
+<h2>Change password</h2>
+{% if password_message %}<p class="ok">{{ password_message }}</p>{% endif %}
+{% if password_error %}<p class="error">{{ password_error }}</p>{% endif %}
+<form method="post" action="/settings/password">
+  <label>Current password <input type="password" name="current" autocomplete="current-password" required></label>
+  <label>New password <input type="password" name="new" autocomplete="new-password" required></label>
+  <label>Confirm new password <input type="password" name="confirm" autocomplete="new-password" required></label>
+  <button type="submit">Change password</button>
+</form>
+<p class="hint">Changing the password logs out every other browser.</p>
+{% endblock %}

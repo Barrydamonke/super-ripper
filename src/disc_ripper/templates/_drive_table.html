@@ -1,0 +1,34 @@
+<div id="drive-table">
+{% if not items %}
+  <p>No optical drives found. On the server, check that the drives show up in <code>/proc/sys/dev/cdrom/info</code>, then press Rescan.</p>
+{% else %}
+  <table>
+    <thead>
+      <tr><th>Drive</th><th>ID</th><th>Device nodes</th><th>Label and enabled</th></tr>
+    </thead>
+    <tbody>
+    {% for item in items %}
+      {% set row = item.row %}
+      <tr>
+        <td>{{ row.vendor }} {{ row.model }}<br><span class="hint">firmware {{ row.revision or "?" }}</span></td>
+        <td><code>{{ row.id }}</code><br><span class="hint">from {{ row.id_source }}</span></td>
+        <td>
+          {% for node in item.nodes %}
+            <code>{{ node.name }}</code>: <span class="{{ 'ok' if node.status == 'ok' else 'error' }}">{{ node.status }}</span><br>
+          {% endfor %}
+          {% for hint in item.hints %}<span class="error">{{ hint }}</span><br>{% endfor %}
+        </td>
+        <td>
+          <form hx-post="/drives/update" hx-target="#drive-table" hx-swap="outerHTML">
+            <input type="hidden" name="drive_id" value="{{ row.id }}">
+            <input type="text" name="label" value="{{ row.label }}" maxlength="40" placeholder="e.g. Blu-ray">
+            <label class="inline"><input type="checkbox" name="enabled" {% if row.enabled %}checked{% endif %}> enabled</label>
+            <button type="submit">Save</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+</div>
