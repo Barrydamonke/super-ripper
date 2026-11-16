@@ -63,3 +63,25 @@ def make_sg(
 @pytest.fixture
 def add_sg():
     return make_sg
+
+
+TEST_PASSWORD = "test-password"
+
+
+@pytest.fixture
+def client(config):
+    from fastapi.testclient import TestClient
+
+    from disc_ripper.app import create_app
+
+    with TestClient(create_app(config), follow_redirects=False) as c:
+        yield c
+
+
+@pytest.fixture
+def logged_in_client(client):
+    r = client.post("/setup", data={"password": TEST_PASSWORD, "confirm": TEST_PASSWORD})
+    assert r.status_code == 303
+    r = client.post("/login", data={"password": TEST_PASSWORD, "next": "/"})
+    assert r.status_code == 303
+    return client
