@@ -125,3 +125,25 @@ def test_node_status(config):
     assert drives.node_status(config.dev_root, "sr0") == "missing"
     (config.dev_root / "sr0").write_text("")
     assert drives.node_status(config.dev_root, "sr0") == "ok"
+
+
+def test_node_status_open_denied(config, monkeypatch):
+    (config.dev_root / "sg1").write_text("")
+
+    def deny(*a, **k):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(drives.os, "open", deny)
+    assert drives.node_status(config.dev_root, "sg1") == "no-access"
+
+
+def test_node_status_no_device_behind_node(config, monkeypatch):
+    import errno
+
+    (config.dev_root / "sg1").write_text("")
+
+    def nxio(*a, **k):
+        raise OSError(errno.ENXIO, "No such device or address")
+
+    monkeypatch.setattr(drives.os, "open", nxio)
+    assert drives.node_status(config.dev_root, "sg1") == "missing"

@@ -7,6 +7,7 @@ drive's WWID, then to the SATA port it is plugged into.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import sqlite3
@@ -146,6 +147,17 @@ def node_status(dev_root: Path, name: str | None) -> NodeStatus:
         return "missing"
     if not os.access(path, os.R_OK | os.W_OK):
         return "no-access"
+    # Opening the node also catches a missing --device-cgroup-rule (EPERM), which
+    # file permissions alone don't show. O_NONBLOCK: don't wait for a disc.
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except PermissionError:
+        return "no-access"
+    except OSError as exc:
+        if exc.errno in (errno.ENXIO, errno.ENODEV):
+            return "missing"
+        return "ok"  # e.g. no medium: the node itself is usable
+    os.close(fd)
     return "ok"
 
 

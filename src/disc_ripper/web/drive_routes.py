@@ -17,7 +17,7 @@ router = APIRouter()
 
 NODE_HINTS = {
     "missing": "Not passed into the container – check the template's device rules, then restart the container.",
-    "no-access": "No permission – the node's group must be PGID.",
+    "no-access": "No permission – check the template's two --device-cgroup-rule entries, and that the node's group is PGID.",
 }
 ABSENT_HINT = "Not detected at last scan."
 
