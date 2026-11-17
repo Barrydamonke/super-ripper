@@ -1,0 +1,6 @@
+.venv/
+.devconfig/
+__pycache__/
+*.pyc
+.pytest_cache/
+schedule info.md
