@@ -154,3 +154,42 @@ def test_drive_lock_is_shared(config):
     m = media.MediaMonitor(config, RecordingNotifier())
     assert m.drive_lock("serial:A") is m.drive_lock("serial:A")
     assert m.drive_lock("serial:A") is not m.drive_lock("serial:B")
+
+
+def test_busy_drive_lock_does_not_block_other_drives(config, setup):
+    import threading
+    import time
+
+    fakes = {"sr0": FakeDrive(["disc"]), "sr1": FakeDrive(["disc"])}
+    m = monitor(config, fakes, RecordingNotifier())
+    lock = m.drive_lock("serial:A")
+    lock.acquire()  # e.g. a probe thread stuck on a damaged disc
+    try:
+        start = time.monotonic()
+        asyncio.run(m.poll_once(first=True))
+        assert time.monotonic() - start < 1.0
+    finally:
+        lock.release()
+    assert fakes["sr0"].status_calls == 0
+    assert row(setup, "serial:B")["media_state"] == "disc"
+    assert row(setup, "serial:A")["media_state"] == "unknown"  # untouched
+
+
+def test_hung_status_call_times_out(config, setup):
+    import time
+
+    class Hung(FakeDrive):
+        def drive_status(self):
+            time.sleep(1.0)
+            return "disc"
+
+    fakes = {"sr0": Hung(["disc"]), "sr1": FakeDrive(["empty"])}
+    m = media.MediaMonitor(config, RecordingNotifier(), drive_factory=lambda p: fakes[p.name], status_timeout=0.2)
+    m.probe = lambda drive: drive.probe_result
+    async def timed():
+        start = time.monotonic()
+        await m.poll_once(first=True)
+        return time.monotonic() - start  # (asyncio.run then waits for the stuck thread)
+
+    assert asyncio.run(timed()) < 0.9
+    assert row(setup, "serial:B")["media_state"] == "empty"

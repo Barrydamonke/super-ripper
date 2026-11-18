@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hmac
 import math
 import sqlite3
@@ -22,6 +23,7 @@ from .deps import templates
 router = APIRouter()
 
 KEEPALIVE_SECONDS = 15.0
+EJECT_LOCK_TIMEOUT = 5.0
 DEFAULT_TEST_MINUTES = 20
 MINUTES_RANGE = (1, 360)
 SIZE_GB_RANGE = (0.0, 500.0)
@@ -133,9 +135,14 @@ async def _drive_action(request: Request, drive_id: str, action: str) -> str | N
     path = request.app.state.config.dev_root / row["sr_name"]
 
     def run():
-        with svc.monitor.drive_lock(drive_id):
+        lock = svc.monitor.drive_lock(drive_id)
+        if not lock.acquire(timeout=EJECT_LOCK_TIMEOUT):
+            raise OSError(errno.EBUSY, "the drive is busy (still reading the disc?)")
+        try:
             drive = svc.drive_factory(path)
             drive.eject() if action == "eject" else drive.close_tray()
+        finally:
+            lock.release()
 
     try:
         await asyncio.to_thread(run)

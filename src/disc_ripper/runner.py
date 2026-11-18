@@ -43,7 +43,7 @@ class JobContext:
         self._last_write = now
         finish = estimated_finish.isoformat(timespec="seconds") if estimated_finish else None
         await self._runner.db(jobs.set_progress, self.job_id, min(max(progress, 0.0), 1.0), message, finish)
-        await self._runner.notifier.drive_changed(self.drive_id)
+        await self._runner.notify(self.drive_id)
 
     async def sleep(self, seconds: float) -> None:
         await asyncio.sleep(seconds * self._runner.time_scale)
@@ -94,6 +94,15 @@ class JobRunner:
         self._wakeups: dict[str, asyncio.Event] = {}
         self._running: dict[int, asyncio.Task] = {}
         self._user_cancelled: set[int] = set()
+        # Space check + start as one step, so two drives can't both claim the same space.
+        self._start_lock = asyncio.Lock()
+
+    async def notify(self, drive_id: str) -> None:
+        """Push a drive's card to browsers. A rendering problem must never stop a job."""
+        try:
+            await self.notifier.drive_changed(drive_id)
+        except Exception:
+            log.exception("jobs: notifying %s failed", drive_id)
 
     def _call(self, fn, *args, **kwargs):
         conn = db.connect(self.config.db_path)
@@ -127,15 +136,18 @@ class JobRunner:
         result = await self.db(jobs.cancel_queued, job_id, utc_now())
         if result == "cancelled":
             row = await self.db(jobs.get, job_id)
-            await self.notifier.drive_changed(row["drive_id"])
+            await self.notify(row["drive_id"])
             self.wake(row["drive_id"])
             return True
+        if result != "running":
+            return False
+        # Running: its handler task may not exist yet (the worker is between start
+        # and creating it); _run checks this set once it does.
+        self._user_cancelled.add(job_id)
         task = self._running.get(job_id)
-        if result == "running" and task is not None and not task.done():
-            self._user_cancelled.add(job_id)
+        if task is not None and not task.done():
             task.cancel()
-            return True
-        return False
+        return True
 
     async def stop(self) -> None:
         workers = list(self._workers.values())
@@ -166,25 +178,37 @@ class JobRunner:
 
     async def _worker(self, drive_id: str) -> None:
         while True:
-            self._wakeups[drive_id].clear()
-            job = await self.db(jobs.next_job, drive_id)
-            if job is None:
-                await self._wait(drive_id, None)
-                continue
-            reason = await self.db(self._space_check, job["needs_bytes"])
-            if reason is not None:
-                if job["state"] != "waiting_space" or job["message"] != reason:
-                    await self.db(jobs.wait_space, job["id"], reason)
-                    await self.notifier.drive_changed(drive_id)
+            try:
+                await self._step(drive_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # a flaky disk or locked database must not end the queue for good
+                log.exception("jobs: worker for %s hit an error; retrying", drive_id)
                 await self._wait(drive_id, self.recheck_seconds)
-                continue
-            await self._run(drive_id, job)
+
+    async def _step(self, drive_id: str) -> None:
+        self._wakeups[drive_id].clear()
+        job = await self.db(jobs.next_job, drive_id)
+        if job is None:
+            await self._wait(drive_id, None)
+            return
+        async with self._start_lock:
+            reason = await self.db(self._space_check, job["needs_bytes"])
+            started = reason is None and await self.db(jobs.start, job["id"], utc_now())
+        if reason is not None:
+            if job["state"] != "waiting_space" or job["message"] != reason:
+                await self.db(jobs.wait_space, job["id"], reason)
+                await self.notify(drive_id)
+            await self._wait(drive_id, self.recheck_seconds)
+            return
+        if not started:
+            return  # cancelled while we were checking; take the next one
+        await self._run(drive_id, job)
 
     async def _run(self, drive_id: str, job) -> None:
         job_id = job["id"]
-        await self.db(jobs.start, job_id, utc_now())
         self.space.invalidate()  # the job is about to write into /work
-        await self.notifier.drive_changed(drive_id)
+        await self.notify(drive_id)
         log.info("jobs: started #%s (%s) on %s", job_id, job["kind"], drive_id)
         handler = self.handlers.get(job["kind"])
         if handler is None:
@@ -193,6 +217,8 @@ class JobRunner:
         ctx = JobContext(self, job_id, drive_id, json.loads(job["params"]))
         task = asyncio.create_task(handler(ctx), name=f"job {job_id}")
         self._running[job_id] = task
+        if job_id in self._user_cancelled:
+            task.cancel()  # cancelled before the task existed
         try:
             await task
         except asyncio.CancelledError:
@@ -215,4 +241,4 @@ class JobRunner:
     async def _finish(self, drive_id: str, job_id: int, state: jobs.FinalState, error: str | None) -> None:
         await self.db(jobs.finish, job_id, state, utc_now(), error=error)
         log.info("jobs: #%s %s%s", job_id, state, f": {error}" if error else "")
-        await self.notifier.drive_changed(drive_id)
+        await self.notify(drive_id)

@@ -247,3 +247,127 @@ def test_test_job_reports_estimate(config, conn):
         await r.stop()
 
     asyncio.run(main())
+
+
+class SlowSpace(FakeSpace):
+    def __init__(self, delay, answers=None, raise_first=None):
+        super().__init__(answers)
+        self.delay = delay
+        self.raise_first = raise_first
+
+    def check(self, *args):
+        import time
+
+        time.sleep(self.delay)
+        if self.raise_first is not None:
+            error, self.raise_first = self.raise_first, None
+            raise error
+        return super().check(*args)
+
+
+def test_cancel_while_worker_is_picking_up_job(config, conn):
+    j = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 2}, now="t")
+
+    async def main():
+        r = make_runner(config, space=SlowSpace(0.3))
+        r.sync_workers({"serial:A"})
+        await asyncio.sleep(0.1)  # the worker is inside the space check
+        assert await r.cancel(j) is True
+        await asyncio.sleep(0.6)
+        await r.stop()
+
+    asyncio.run(main())
+    row = jobs.get(conn, j)
+    assert row["state"] == "cancelled"
+    assert row["started_at"] is None
+
+
+def test_worker_survives_space_check_error(config, conn):
+    j = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 1}, now="t")
+
+    async def main():
+        r = make_runner(config, space=SlowSpace(0, raise_first=OSError(5, "EIO")), recheck_seconds=0.05)
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, j) == ["done"])
+        await r.stop()
+
+    asyncio.run(main())
+
+
+def test_worker_survives_notifier_error_after_start(config, conn):
+    first = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 1}, now="t")
+    second = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 1}, now="t")
+
+    class FlakyNotifier(RecordingNotifier):
+        failed = False
+
+        async def drive_changed(self, drive_id):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("template blew up")
+
+    async def main():
+        r = runner.JobRunner(config, FlakyNotifier(), FakeSpace(), time_scale=0.001, recheck_seconds=0.05)
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, second) == ["done"])
+        await r.stop()
+
+    asyncio.run(main())
+    assert states(conn, first)[0] in ("done", "failed")
+
+
+def test_space_check_and_start_are_atomic(config, conn, tmp_path):
+    from types import SimpleNamespace
+
+    from disc_ripper.space import GB, SpaceChecker
+
+    a = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 2}, needs_bytes=40 * GB, now="t")
+    b = jobs.enqueue(conn, "serial:B", "test", {"duration_s": 2}, needs_bytes=40 * GB, now="t")
+    real = SpaceChecker(
+        tmp_path, statvfs=lambda p: SimpleNamespace(f_bavail=10**9, f_frsize=4096), size_fn=lambda p: 0
+    )
+
+    class Slowed:
+        def check(self, *args):
+            import time
+
+            time.sleep(0.1)  # widen the race between the two drives
+            return real.check(*args)
+
+        def invalidate(self):
+            real.invalidate()
+
+    both_running = []
+
+    async def main():
+        r = make_runner(config, space=Slowed(), recheck_seconds=0.05)
+        r.sync_workers({"serial:A", "serial:B"})
+
+        def check():
+            if states(conn, a, b) == ["running", "running"]:
+                both_running.append(True)
+            return states(conn, a, b) == ["done", "done"]
+
+        await wait_until(check, timeout=10)
+        await r.stop()
+
+    asyncio.run(main())
+    assert not both_running  # 40 + 40 GB never fits the default 60 GB budget
+
+
+def test_cancel_between_start_and_task_creation(config, conn):
+    j = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 2}, now="t")
+
+    class SlowNotifier(RecordingNotifier):
+        async def drive_changed(self, drive_id):
+            await asyncio.sleep(0.3)
+
+    async def main():
+        r = runner.JobRunner(config, SlowNotifier(), FakeSpace(), time_scale=0.001)
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, j) == ["running"])
+        assert await r.cancel(j) is True  # the handler task doesn't exist yet
+        await wait_until(lambda: states(conn, j) == ["cancelled"], timeout=5)
+        await r.stop()
+
+    asyncio.run(main())

@@ -21,6 +21,7 @@ from .config import AppConfig
 from .events import Notifier
 
 log = logging.getLogger(__name__)
+_BUSY = object()
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class MediaMonitor:
         drive_factory: Callable[[Path], CdDrive] = CdDrive,
         interval: float = 3.0,
         probe_timeout: float = 30.0,
+        status_timeout: float = 10.0,
         on_insert: Callable[[str], Awaitable[None]] | None = None,
     ):
         self.config = config
@@ -46,6 +48,7 @@ class MediaMonitor:
         self.drive_factory = drive_factory
         self.interval = interval
         self.probe_timeout = probe_timeout
+        self.status_timeout = status_timeout
         self.on_insert = on_insert
         self.probe = discprobe.probe
         self._locks: dict[str, threading.Lock] = {}
@@ -68,13 +71,24 @@ class MediaMonitor:
         finally:
             conn.close()
 
-    def _status(self, target: _Target) -> str:
-        with self.drive_lock(target.drive_id):
-            return self.drive_factory(self.config.dev_root / target.sr_name).drive_status()
+    def _locked(self, target: _Target, fn):
+        """Run fn(drive) under the drive's lock, or return _BUSY if it is held.
 
-    def _probe(self, target: _Target) -> tuple[str, str]:
-        with self.drive_lock(target.drive_id):
-            return self.probe(self.drive_factory(self.config.dev_root / target.sr_name))
+        Never wait for the lock: a probe stuck on a damaged disc (or an eject)
+        would otherwise stall polling of every drive."""
+        lock = self.drive_lock(target.drive_id)
+        if not lock.acquire(blocking=False):
+            return _BUSY
+        try:
+            return fn(self.drive_factory(self.config.dev_root / target.sr_name))
+        finally:
+            lock.release()
+
+    def _status(self, target: _Target):
+        return self._locked(target, lambda drive: drive.drive_status())
+
+    def _probe(self, target: _Target):
+        return self._locked(target, self.probe)
 
     def _store(self, drive_id: str, state: str, disc_type: str | None, label: str) -> bool:
         conn = db.connect(self.config.db_path)
@@ -85,10 +99,15 @@ class MediaMonitor:
 
     async def _poll_drive(self, target: _Target, first: bool) -> None:
         try:
-            state = await asyncio.to_thread(self._status, target)
+            state = await asyncio.wait_for(asyncio.to_thread(self._status, target), self.status_timeout)
+        except TimeoutError:
+            log.warning("media: %s did not answer within %gs", target.drive_id, self.status_timeout)
+            state = "unknown"
         except Exception:  # one bad drive must not stop the others
             log.exception("media: status of %s failed", target.drive_id)
             state = "unknown"
+        if state is _BUSY:
+            return  # someone else is using the drive; look again next round
         disc_type: str | None = None
         label = ""
         inserted = state == "disc" and (first or target.previous != "disc")
@@ -96,9 +115,10 @@ class MediaMonitor:
             return  # already probed; nothing to do while the disc stays in
         if inserted:
             try:
-                disc_type, label = await asyncio.wait_for(
-                    asyncio.to_thread(self._probe, target), self.probe_timeout
-                )
+                result = await asyncio.wait_for(asyncio.to_thread(self._probe, target), self.probe_timeout)
+                if result is _BUSY:
+                    return  # probe next round
+                disc_type, label = result
             except Exception:
                 log.exception("media: probing %s failed", target.drive_id)
                 disc_type, label = "unknown", ""

@@ -60,16 +60,24 @@ def next_job(conn: sqlite3.Connection, drive_id: str) -> sqlite3.Row | None:
     ).fetchone()
 
 
-def start(conn: sqlite3.Connection, job_id: int, now: str) -> None:
+def start(conn: sqlite3.Connection, job_id: int, now: str) -> bool:
+    """Mark a queued job running. False if it was cancelled meanwhile."""
     with conn:
-        conn.execute(
-            "UPDATE jobs SET state = 'running', started_at = ?, message = '' WHERE id = ?", (now, job_id)
+        cur = conn.execute(
+            "UPDATE jobs SET state = 'running', started_at = ?, message = '' "
+            "WHERE id = ? AND state IN ('queued', 'waiting_space')",
+            (now, job_id),
         )
+    return cur.rowcount == 1
 
 
 def wait_space(conn: sqlite3.Connection, job_id: int, message: str) -> None:
     with conn:
-        conn.execute("UPDATE jobs SET state = 'waiting_space', message = ? WHERE id = ?", (message, job_id))
+        conn.execute(
+            "UPDATE jobs SET state = 'waiting_space', message = ? "
+            "WHERE id = ? AND state IN ('queued', 'waiting_space')",
+            (message, job_id),
+        )
 
 
 def finish(

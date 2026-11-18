@@ -64,7 +64,8 @@ class SpaceChecker:
         if self._statvfs is None:
             return "Waiting for cache space: free space can't be read on this platform."
         st = self._statvfs(self.work_dir)
-        free = st.f_bavail * st.f_frsize
+        # Running jobs may not have written their data yet; count it as already used.
+        free = st.f_bavail * st.f_frsize - running_bytes
         if free - needs_bytes < min_free_gb * GB:
             return f"Waiting for cache space: {needs}, cache would drop below the {min_free_gb:g} GB minimum free."
         return None

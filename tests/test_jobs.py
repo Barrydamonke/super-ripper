@@ -112,3 +112,14 @@ def test_running_jobs_and_bytes(conn):
     assert jobs.running_bytes(conn) == 10
     [row] = jobs.running_jobs(conn)
     assert (row["id"], row["drive_label"], row["drive_model"]) == (a, "Blu-ray", "BD-RE WH16NS40")
+
+
+def test_start_only_from_queued_or_waiting(conn):
+    j = jobs.enqueue(conn, "serial:A", "test", {}, now="t")
+    jobs.cancel_queued(conn, j, "t1")
+    assert jobs.start(conn, j, "t2") is False
+    assert jobs.get(conn, j)["state"] == "cancelled"
+    jobs.wait_space(conn, j, "waiting")
+    assert jobs.get(conn, j)["state"] == "cancelled"
+    k = jobs.enqueue(conn, "serial:A", "test", {}, now="t")
+    assert jobs.start(conn, k, "t3") is True

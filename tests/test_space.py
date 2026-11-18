@@ -61,3 +61,10 @@ def test_tree_size(tmp_path):
     (tmp_path / "a" / "f").write_bytes(b"x" * 1000)
     (tmp_path / "g").write_bytes(b"x" * 24)
     assert space.tree_size(tmp_path) == 1024
+
+
+def test_min_free_counts_running_reservations(tmp_path):
+    # 60 GB free, a running job has reserved 40 GB it hasn't written yet.
+    c, _ = checker(tmp_path, free_gb=60)
+    assert c.check(10 * GB, 40 * GB, 1000, 20) is not None
+    assert c.check(10 * GB, 0, 1000, 20) is None
