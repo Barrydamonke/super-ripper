@@ -1,0 +1,123 @@
+"""Poll each drive for discs going in and out.
+
+There is no udev inside the container, so every few seconds each enabled drive
+is asked CDROM_DRIVE_STATUS. When a disc appears it is probed for its type and
+label. Drives busy with a job that holds the drive are left alone.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import db, discprobe, drives, jobs
+from .cdrom import CdDrive
+from .clock import utc_now
+from .config import AppConfig
+from .events import Notifier
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _Target:
+    drive_id: str
+    sr_name: str
+    previous: str
+
+
+class MediaMonitor:
+    def __init__(
+        self,
+        config: AppConfig,
+        notifier: Notifier,
+        *,
+        drive_factory: Callable[[Path], CdDrive] = CdDrive,
+        interval: float = 3.0,
+        probe_timeout: float = 30.0,
+        on_insert: Callable[[str], Awaitable[None]] | None = None,
+    ):
+        self.config = config
+        self.notifier = notifier
+        self.drive_factory = drive_factory
+        self.interval = interval
+        self.probe_timeout = probe_timeout
+        self.on_insert = on_insert
+        self.probe = discprobe.probe
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def drive_lock(self, drive_id: str) -> threading.Lock:
+        """One lock per drive, shared by polling, probing and eject."""
+        with self._locks_guard:
+            return self._locks.setdefault(drive_id, threading.Lock())
+
+    def _targets(self) -> list[_Target]:
+        conn = db.connect(self.config.db_path)
+        try:
+            return [
+                _Target(row["id"], row["sr_name"], row["media_state"])
+                for row in drives.list_drives(conn)
+                if row["present"] and row["enabled"] and row["sr_name"]
+                and not jobs.running_uses_drive(conn, row["id"])
+            ]
+        finally:
+            conn.close()
+
+    def _status(self, target: _Target) -> str:
+        with self.drive_lock(target.drive_id):
+            return self.drive_factory(self.config.dev_root / target.sr_name).drive_status()
+
+    def _probe(self, target: _Target) -> tuple[str, str]:
+        with self.drive_lock(target.drive_id):
+            return self.probe(self.drive_factory(self.config.dev_root / target.sr_name))
+
+    def _store(self, drive_id: str, state: str, disc_type: str | None, label: str) -> bool:
+        conn = db.connect(self.config.db_path)
+        try:
+            return drives.set_media(conn, drive_id, state, disc_type, label, utc_now())
+        finally:
+            conn.close()
+
+    async def _poll_drive(self, target: _Target, first: bool) -> None:
+        try:
+            state = await asyncio.to_thread(self._status, target)
+        except Exception:  # one bad drive must not stop the others
+            log.exception("media: status of %s failed", target.drive_id)
+            state = "unknown"
+        disc_type: str | None = None
+        label = ""
+        inserted = state == "disc" and (first or target.previous != "disc")
+        if state == "disc" and not inserted:
+            return  # already probed; nothing to do while the disc stays in
+        if inserted:
+            try:
+                disc_type, label = await asyncio.wait_for(
+                    asyncio.to_thread(self._probe, target), self.probe_timeout
+                )
+            except Exception:
+                log.exception("media: probing %s failed", target.drive_id)
+                disc_type, label = "unknown", ""
+        changed = await asyncio.to_thread(self._store, target.drive_id, state, disc_type, label)
+        if changed:
+            log.info("media: %s -> %s %s %r", target.drive_id, state, disc_type or "", label)
+            await self.notifier.drive_changed(target.drive_id)
+        if inserted and not first and target.previous != "disc" and self.on_insert:
+            await self.on_insert(target.drive_id)
+
+    async def poll_once(self, *, first: bool = False) -> None:
+        for target in await asyncio.to_thread(self._targets):
+            await self._poll_drive(target, first)
+
+    async def run(self) -> None:
+        await self.poll_once(first=True)
+        while True:
+            await asyncio.sleep(self.interval)
+            try:
+                await self.poll_once()
+            except Exception:
+                log.exception("media: poll failed")
