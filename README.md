@@ -2,7 +2,7 @@
 
 A single Docker container for Unraid that rips, encodes and burns discs from its own web UI. The design is in [Disc Ripper – Design Plan.md](Disc%20Ripper%20%E2%80%93%20Design%20Plan.md).
 
-Current state: **step 1 (skeleton)**. You can log in, see the optical drives (identified by serial number), label them, and edit settings. Ripping comes in later steps.
+Current state: **step 1 (skeleton)**. You can log in, see the optical drives (identified by serial number, or by SATA port if the drive reports none), label them, and edit settings. Ripping comes in later steps.
 
 ## Install on Unraid
 

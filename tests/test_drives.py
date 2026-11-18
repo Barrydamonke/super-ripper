@@ -156,3 +156,116 @@ def test_duplicate_serials_get_distinct_ids(config, add_sg):
     found = drives.discover(config.sysfs_root)
     assert len({d.id for d in found}) == 2
     assert all(d.id_source == "port" for d in found)
+
+
+# IDENTIFY data from the user's drives (/sys/class/ata_device/devN.0/id, first 100 words).
+BH10LS38_ID = """\
+85c0 0000 0000 0000 0000 0000 0000 0000
+0000 0000 4b39 4543 4152 4234 3731 3920
+2020 2020 2020 2020 0000 0000 0000 312e
+3033 2020 2020 484c 2d44 542d 5354 2042
+"""
+IHAS124_ID = """\
+85c0 0000 0000 0000 0000 0000 0000 0000
+0000 0000 3335 3234 3732 3820 324d 3837
+3531 3530 3232 3236 0000 0000 0000 434c
+"""
+EMPTY_ID = "0000 " * 256
+
+
+def test_read_ata_serial():
+    assert drives.read_ata_serial(BH10LS38_ID) == "K9ECARB4719"
+    assert drives.read_ata_serial(IHAS124_ID) == "3524728 2M8751502226"
+    assert drives.read_ata_serial(EMPTY_ID) is None
+    assert drives.read_ata_serial("") is None
+    assert drives.read_ata_serial("zzzz " * 20) is None
+
+
+def _ata_drive(sysfs_root, add_sg, n, port, ident, *, target=0, devno=0):
+    port_dir = sysfs_root / "devices" / "pci0000:00" / f"ata{port}"
+    device = port_dir / f"host{port}" / f"target{port}:0:{target}" / f"{port}:0:{target}:0"
+    add_sg(sysfs_root, n, sr=n, device_dir=device)
+    id_dir = port_dir / f"link{port}" / f"dev{port}.{devno}" / "ata_device" / f"dev{port}.{devno}"
+    id_dir.mkdir(parents=True)
+    (id_dir / "id").write_text(ident)
+
+
+needs_linux_sysfs = pytest.mark.skipif(
+    os.name == "nt", reason="needs symlinks and ':' in names (Linux sysfs layout)"
+)
+
+
+@needs_linux_sysfs
+def test_serial_from_ata_identify(config, add_sg):
+    _ata_drive(config.sysfs_root, add_sg, 1, 1, BH10LS38_ID)
+    _ata_drive(config.sysfs_root, add_sg, 3, 3, IHAS124_ID)
+    found = drives.discover(config.sysfs_root)
+    assert [(d.id, d.id_source) for d in found] == [
+        ("serial:K9ECARB4719", "serial"),
+        ("serial:3524728 2M8751502226", "serial"),
+    ]
+    assert found[0].port_id == "port:ata1:BD-RE WH16NS40"
+
+
+@needs_linux_sysfs
+def test_blank_ata_identify_falls_back_to_port(config, add_sg):
+    _ata_drive(config.sysfs_root, add_sg, 1, 2, EMPTY_ID)
+    [d] = drives.discover(config.sysfs_root)
+    assert d.id == "port:ata2:BD-RE WH16NS40"
+
+
+@needs_linux_sysfs
+def test_ata_identify_picks_device_by_target(config, add_sg):
+    # PATA master/slave: two ATA devices on one port; the SCSI target number picks one.
+    _ata_drive(config.sysfs_root, add_sg, 1, 1, BH10LS38_ID, target=1, devno=1)
+    id_dir = config.sysfs_root / "devices" / "pci0000:00" / "ata1" / "link1" / "dev1.0" / "ata_device" / "dev1.0"
+    id_dir.mkdir(parents=True)
+    (id_dir / "id").write_text(IHAS124_ID)
+    [d] = drives.discover(config.sysfs_root)
+    assert d.id == "serial:K9ECARB4719"
+
+
+@needs_linux_sysfs
+def test_vpd_serial_wins_over_ata_identify(config, add_sg):
+    _ata_drive(config.sysfs_root, add_sg, 1, 1, BH10LS38_ID)
+    vpd = config.sysfs_root / "class" / "scsi_generic" / "sg1" / "device" / "vpd_pg80"
+    vpd.write_bytes(SERIAL)
+    [d] = drives.discover(config.sysfs_root)
+    assert d.id == "serial:ABC123"
+
+
+def _found(drive_id, port_id, source="serial"):
+    return drives.DiscoveredDrive(
+        id=drive_id, id_source=source, vendor="HL-DT-ST", model="BD-RE BH10LS38", revision="1.03",
+        sg_name="sg1", sr_name="sr0", sg_dev=(21, 1), sr_dev=(11, 0), port_id=port_id,
+    )
+
+
+def test_sync_moves_label_from_port_id_to_serial(conn):
+    port_id = "port:ata1:BD-RE BH10LS38"
+    drives.sync(conn, [_found(port_id, port_id, "port")], "t1")
+    drives.update_drive(conn, port_id, label="Blu-ray", enabled=False)
+
+    drives.sync(conn, [_found("serial:K9ECARB4719", port_id)], "t2")
+    [row] = drives.list_drives(conn)
+    assert row["id"] == "serial:K9ECARB4719"
+    assert row["id_source"] == "serial"
+    assert row["label"] == "Blu-ray"
+    assert row["enabled"] == 0
+    assert row["first_seen"] == "t1"
+    assert row["present"] == 1
+
+
+def test_sync_does_not_merge_into_existing_serial_row(conn):
+    port_id = "port:ata1:BD-RE BH10LS38"
+    drives.sync(conn, [_found("serial:K9ECARB4719", port_id)], "t1")
+    drives.update_drive(conn, "serial:K9ECARB4719", label="Blu-ray", enabled=True)
+    # a stale port row for the same port (e.g. a different drive used to be there)
+    drives.sync(conn, [_found(port_id, port_id, "port")], "t2")
+    drives.update_drive(conn, port_id, label="Old", enabled=True)
+
+    drives.sync(conn, [_found("serial:K9ECARB4719", port_id)], "t3")
+    rows = {r["id"]: r for r in drives.list_drives(conn)}
+    assert rows["serial:K9ECARB4719"]["label"] == "Blu-ray"
+    assert rows[port_id]["label"] == "Old"
+    assert rows[port_id]["present"] == 0
