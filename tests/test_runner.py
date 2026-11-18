@@ -1,0 +1,249 @@
+import asyncio
+
+import pytest
+
+from disc_ripper import db, drives, jobs, runner
+
+
+class RecordingNotifier:
+    def __init__(self):
+        self.drives = []
+
+    async def drive_changed(self, drive_id):
+        self.drives.append(drive_id)
+
+    async def guard_changed(self):
+        pass
+
+
+class FakeSpace:
+    def __init__(self, answers=None):
+        self.answers = list(answers or [])
+        self.calls = []
+
+    def check(self, needs_bytes, running_bytes, budget_gb, min_free_gb):
+        self.calls.append((needs_bytes, running_bytes, budget_gb, min_free_gb))
+        return self.answers.pop(0) if self.answers else None
+
+    def invalidate(self):
+        pass
+
+
+@pytest.fixture
+def conn(config, add_sg):
+    add_sg(config.sysfs_root, 1, sr=0, vpd_serial=b"\x05\x80\x00\x01A")
+    add_sg(config.sysfs_root, 2, sr=1, vpd_serial=b"\x05\x80\x00\x01B")
+    c = db.connect(config.db_path)
+    db.migrate(c)
+    drives.sync(c, drives.discover(config.sysfs_root), "t0")
+    yield c
+    c.close()
+
+
+def make_runner(config, space=None, handlers=None, **kw):
+    return runner.JobRunner(
+        config, RecordingNotifier(), space or FakeSpace(), handlers=handlers or runner.HANDLERS,
+        time_scale=0.001, **kw,
+    )
+
+
+async def wait_until(predicate, timeout=5.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("timed out waiting")
+        await asyncio.sleep(0.005)
+
+
+def states(conn, *ids):
+    return [jobs.get(conn, i)["state"] for i in ids]
+
+
+def test_runs_jobs_one_at_a_time_in_order(config, conn):
+    a1 = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 2}, now="t")
+    a2 = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 2}, now="t")
+    seen_both_running = []
+
+    async def main():
+        r = make_runner(config)
+        r.sync_workers({"serial:A"})
+
+        def check():
+            s = states(conn, a1, a2)
+            if s == ["running", "running"]:
+                seen_both_running.append(True)
+            return s == ["done", "done"]
+
+        await wait_until(check)
+        await r.stop()
+
+    asyncio.run(main())
+    assert not seen_both_running
+    first, second = jobs.get(conn, a1), jobs.get(conn, a2)
+    assert second["started_at"] >= first["finished_at"]
+    assert first["progress"] == 1.0
+
+
+def test_two_drives_run_in_parallel(config, conn):
+    async def slow(ctx):
+        await asyncio.sleep(0.2)
+
+    a = jobs.enqueue(conn, "serial:A", "slow", {}, now="t")
+    b = jobs.enqueue(conn, "serial:B", "slow", {}, now="t")
+
+    async def main():
+        r = make_runner(config, handlers={"slow": slow})
+        r.sync_workers({"serial:A", "serial:B"})
+        await wait_until(lambda: states(conn, a, b) == ["running", "running"])
+        await wait_until(lambda: states(conn, a, b) == ["done", "done"])
+        await r.stop()
+
+    asyncio.run(main())
+
+
+def test_waiting_space_blocks_queue_then_runs(config, conn):
+    big = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 1}, needs_bytes=50, now="t")
+    small = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 1}, now="t")
+    space = FakeSpace(["Waiting for cache space: needs 50"])
+
+    async def main():
+        r = make_runner(config, space=space, recheck_seconds=60)
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, big)[0] == "waiting_space")
+        assert jobs.get(conn, big)["message"] == "Waiting for cache space: needs 50"
+        await asyncio.sleep(0.05)
+        assert states(conn, small) == ["queued"]  # stays behind the waiting job
+        r.wake("serial:A")
+        await wait_until(lambda: states(conn, big, small) == ["done", "done"])
+        await r.stop()
+
+    asyncio.run(main())
+    assert space.calls[0] == (50, 0, 60, 20)
+
+
+def test_waiting_space_rechecks_on_timer(config, conn):
+    big = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 1}, needs_bytes=50, now="t")
+
+    async def main():
+        r = make_runner(config, space=FakeSpace(["wait"]), recheck_seconds=0.05)
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, big) == ["done"])
+        await r.stop()
+
+    asyncio.run(main())
+
+
+def test_cancel_running_job(config, conn):
+    long = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 100000}, now="t")
+    nxt = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 1}, now="t")
+
+    async def main():
+        r = make_runner(config)
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, long) == ["running"])
+        assert await r.cancel(long) is True
+        await wait_until(lambda: states(conn, long, nxt) == ["cancelled", "done"])
+        assert await r.cancel(long) is False
+        await r.stop()
+
+    asyncio.run(main())
+
+
+def test_cancel_queued_job(config, conn):
+    j = jobs.enqueue(conn, "serial:A", "test", {}, now="t")
+
+    async def main():
+        r = make_runner(config)
+        assert await r.cancel(j) is True
+
+    asyncio.run(main())
+    assert states(conn, j) == ["cancelled"]
+
+
+def test_handler_error_marks_failed(config, conn):
+    async def boom(ctx):
+        raise RuntimeError("boom")
+
+    j = jobs.enqueue(conn, "serial:A", "boom", {}, now="t")
+    unknown = jobs.enqueue(conn, "serial:A", "nonsense", {}, now="t")
+
+    async def main():
+        r = make_runner(config, handlers={"boom": boom})
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, j, unknown) == ["failed", "failed"])
+        await r.stop()
+
+    asyncio.run(main())
+    assert jobs.get(conn, j)["error"] == "boom"
+    assert jobs.get(conn, unknown)["error"] == "Unknown job kind: nonsense"
+
+
+def test_stop_marks_running_interrupted(config, conn):
+    j = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 100000}, now="t")
+
+    async def main():
+        r = make_runner(config)
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, j) == ["running"])
+        await r.stop()
+
+    asyncio.run(main())
+    row = jobs.get(conn, j)
+    assert row["state"] == "interrupted"
+    assert row["message"] == jobs.INTERRUPTED_MESSAGE
+
+
+def test_sync_workers_removes_drive(config, conn):
+    j = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 100000}, now="t")
+
+    async def main():
+        r = make_runner(config)
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, j) == ["running"])
+        r.sync_workers(set())
+        await wait_until(lambda: states(conn, j) == ["interrupted"])
+        await r.stop()
+
+    asyncio.run(main())
+
+
+def test_progress_throttled(config, conn, monkeypatch):
+    writes = []
+    real = jobs.set_progress
+
+    def counting(*args, **kwargs):
+        writes.append(args[2])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(jobs, "set_progress", counting)
+
+    async def chatty(ctx):
+        for i in range(100):
+            await ctx.report(i / 100, f"step {i}")
+        await ctx.report(1.0, "done")
+
+    j = jobs.enqueue(conn, "serial:A", "chatty", {}, now="t")
+
+    async def main():
+        r = make_runner(config, handlers={"chatty": chatty})
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, j) == ["done"])
+        await r.stop()
+
+    asyncio.run(main())
+    assert len(writes) <= 3
+    assert writes[-1] == 1.0
+
+
+def test_test_job_reports_estimate(config, conn):
+    j = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 200}, now="t")
+
+    async def main():
+        r = make_runner(config)
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: jobs.get(conn, j)["estimated_finish"] is not None)
+        row = jobs.get(conn, j)
+        assert row["message"].startswith("Test job: 3m")
+        await r.stop()
+
+    asyncio.run(main())
