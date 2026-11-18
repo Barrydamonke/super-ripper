@@ -43,8 +43,8 @@ def http_get(url: str, timeout: float) -> bytes:
 def _try(url: str, fetch: Fetcher, timeout: float, pick: Callable[[object], object]) -> tuple[list | None, str]:
     try:
         data = pick(json.loads(fetch(url, timeout)))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-        return None, f"{url}: {exc}"
+    except Exception as exc:  # untrusted remote input: HTTP errors, bad JSON, RecursionError...
+        return None, f"{url}: {exc!r}"
     if parse_schedule(data) is None:
         return None, f"{url}: not a valid 7-day schedule"
     return data, ""

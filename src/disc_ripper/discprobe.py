@@ -24,6 +24,7 @@ CDS_DATA_2 = 102
 CDS_XA_2_1 = 103
 CDS_XA_2_2 = 104
 CDS_MIXED = 105
+_DATA_STATUSES = {CDS_DATA_1, CDS_DATA_2, CDS_XA_2_1, CDS_XA_2_2}
 
 SECTOR = 2048
 LABEL_MAX = 64
@@ -133,6 +134,9 @@ def probe(target: ProbeTarget) -> tuple[DiscType, str]:
         return "audio", ""
     if status == CDS_MIXED:
         return "mixed", ""
+    if status not in _DATA_STATUSES:
+        # CDS_NO_INFO / CDS_NO_DISC: e.g. a blank CD-R or DVD-R whose TOC can't be read.
+        return "unknown", ""
 
     try:
         media = media_kind(target.get_configuration())
@@ -143,6 +147,7 @@ def probe(target: ProbeTarget) -> tuple[DiscType, str]:
     label = ""
     video_ts = False
     iso = None
+    iso_failed = False
     try:
         iso = iso9660_pvd(target.read_sector(16))
         if iso is not None:
@@ -150,6 +155,7 @@ def probe(target: ProbeTarget) -> tuple[DiscType, str]:
             video_ts = _has_video_ts(target, iso[1], iso[2])
     except (OSError, struct.error) as exc:
         log.info("ISO 9660 read failed: %s", exc)
+        iso_failed = True
     if not label:
         try:
             label = udf_label(target.read_sector) or ""
@@ -159,6 +165,8 @@ def probe(target: ProbeTarget) -> tuple[DiscType, str]:
     if media == "bd":
         return "bluray", label
     if media == "dvd":
+        if iso_failed:
+            return "unknown", label  # can't tell DVD-Video from a data DVD
         return ("dvd" if video_ts else "data"), label
     if media == "cd":
         return "data", label

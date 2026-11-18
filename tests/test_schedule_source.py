@@ -101,3 +101,17 @@ def test_current_guard_uses_grace_setting(conn):
 def test_current_guard_without_cache(conn):
     now = datetime(2026, 11, 16, 20, 0, tzinfo=ZoneInfo("Europe/London"))
     assert schedule_source.current_guard(conn, now).phase == "no_schedule"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [__import__("http.client").client.InvalidURL("nonnumeric port"), __import__("http.client").client.BadStatusLine("x")],
+)
+def test_fetch_http_exceptions_are_errors(error):
+    raw, msg = schedule_source.fetch_schedule(STATUS, "", fake_fetch({STATUS: error}))
+    assert raw is None and STATUS in msg
+
+
+def test_fetch_deeply_nested_json_is_error():
+    raw, msg = schedule_source.fetch_schedule("", PI, fake_fetch({PI: b"[" * 100000}))
+    assert raw is None and PI in msg

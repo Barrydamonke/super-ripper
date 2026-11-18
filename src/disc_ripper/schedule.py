@@ -8,10 +8,12 @@ next calendar day, so an overnight window ends under yesterday's entry.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -67,21 +69,39 @@ def parse_schedule(data: object) -> list[DayEntry] | None:
     return entries
 
 
-def _at(day: date, hhmm: str, now: datetime) -> datetime:
+def _zone(now: datetime) -> tzinfo:
+    """The zone schedule times are in. A fixed offset (datetime.now().astimezone())
+    doesn't know about clock changes, so prefer the container's TZ."""
+    if isinstance(now.tzinfo, ZoneInfo):
+        return now.tzinfo
+    name = os.environ.get("TZ", "").lstrip(":")
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return now.tzinfo
+
+
+def _at(day: date, hhmm: str, zone: tzinfo) -> datetime:
     hour, minute = (int(part) for part in hhmm.split(":"))
-    return datetime.combine(day, time(hour, minute), tzinfo=now.tzinfo)
+    # fold=0: a time repeated when the clocks go back means its first occurrence;
+    # a time skipped when they go forward lands an hour later.
+    return datetime.combine(day, time(hour, minute), tzinfo=zone).astimezone(timezone.utc)
 
 
 def windows_near(entries: list[DayEntry], now: datetime) -> list[Window]:
-    """Windows from the entries for today and the two days before, by start."""
+    """Windows (in UTC) from the entries for today and the two days before, by start."""
+    zone = _zone(now)
+    today = now.astimezone(zone).date()
     windows = []
     for back in (2, 1, 0):
-        day = now.date() - timedelta(days=back)
+        day = today - timedelta(days=back)
         entry = entries[day.weekday()]
         if not entry.start:
             continue
         end_day = day + timedelta(days=1) if entry.end_next_day else day
-        windows.append(Window(_at(day, entry.start, now), _at(end_day, entry.end, now)))
+        windows.append(Window(_at(day, entry.start, zone), _at(end_day, entry.end, zone)))
     return sorted(windows, key=lambda w: w.start)
 
 
@@ -89,6 +109,9 @@ def guard_state(entries: list[DayEntry] | None, now: datetime, grace: timedelta)
     if entries is None:
         return GuardState("no_schedule", None, None)
     windows = windows_near(entries, now)
+    # Compare and add grace in UTC: wall-clock arithmetic is off by an hour
+    # across a clock change.
+    now = now.astimezone(timezone.utc)
     for window in windows:
         if window.start <= now < window.end:
             return GuardState("in_window", window.end, window.end + grace)

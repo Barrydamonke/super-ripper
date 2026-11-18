@@ -95,3 +95,16 @@ def test_grace_max():
     with pytest.raises(settings.SettingsError) as exc:
         settings.parse_form({**VALID_FORM, "shutdown_grace_hours": "4"})
     assert exc.value.errors["shutdown_grace_hours"] == "Must be at most 3.5."
+
+
+def test_stored_value_above_max_is_clamped(conn):
+    # Step 1 allowed a grace of up to 11 h; the guard must never exceed 3.5 h.
+    conn.execute("INSERT INTO settings (key, value) VALUES ('shutdown_grace_hours', '8')")
+    conn.commit()
+    assert settings.get(conn, "shutdown_grace_hours") == 3.5
+    assert settings.get_all(conn)["shutdown_grace_hours"] == 3.5
+
+
+def test_url_with_bad_port_rejected():
+    with pytest.raises(settings.SettingsError):
+        settings.parse_form({**VALID_FORM, "schedule_status_url": "http://backend:30o1/status"})

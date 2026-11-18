@@ -117,3 +117,32 @@ def test_latest_window_wins():
     g = schedule.guard_state(s, at(17, 19), GRACE)
     assert g.phase == "in_window"
     assert g.scheduled_end == at(17, 23)
+
+
+UTC = __import__("datetime").timezone.utc
+
+
+def test_grace_is_real_time_across_clock_change():
+    # Europe/London falls back at 02:00 BST on 2026-10-25 (Sunday).
+    s = week(saturday=("18:00", "23:00"))
+    now = datetime(2026, 10, 24, 20, 0, tzinfo=LONDON)
+    g = schedule.guard_state(s, now, timedelta(hours=3.5))
+    assert g.scheduled_end == datetime(2026, 10, 24, 22, 0, tzinfo=UTC)  # 23:00 BST
+    assert g.grace_ends_at == datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+
+
+def test_repeated_hour_after_window_end_is_draining():
+    s = week(saturday=("18:00", "01:30", True))
+    second_0110 = datetime(2026, 10, 25, 1, 10, tzinfo=LONDON, fold=1)  # 01:10 GMT
+    g = schedule.guard_state(s, second_0110, GRACE)
+    assert g.phase == "draining"
+    assert g.scheduled_end == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)  # 01:30 BST
+
+
+def test_fixed_offset_now_uses_local_zone(monkeypatch):
+    # The app passes datetime.now().astimezone(), which has a fixed offset.
+    monkeypatch.setenv("TZ", "Europe/London")
+    s = week(saturday=("18:00", "23:00"))
+    now = datetime(2026, 10, 25, 1, 0, tzinfo=UTC).astimezone(__import__("datetime").timezone(timedelta(0)))
+    g = schedule.guard_state(s, now, GRACE)
+    assert g.scheduled_end == datetime(2026, 10, 24, 22, 0, tzinfo=UTC)

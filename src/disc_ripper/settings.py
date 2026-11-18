@@ -92,10 +92,23 @@ def _write(conn: sqlite3.Connection, key: str, value: Any) -> None:
     )
 
 
+def _clamp(definition: SettingDef, value: Any) -> Any:
+    """Stored values predate the current limits (step 1 allowed a grace of 11 h)."""
+    if definition.kind not in ("int", "float"):
+        return value
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return definition.default
+    if definition.minimum is not None and value < definition.minimum:
+        value = definition.minimum
+    if definition.maximum is not None and value > definition.maximum:
+        value = definition.maximum
+    return value
+
+
 def get(conn: sqlite3.Connection, key: str) -> Any:
     definition = _BY_KEY[key]  # KeyError for unknown keys
     found, value = _read(conn, key)
-    return value if found else definition.default
+    return _clamp(definition, value) if found else definition.default
 
 
 def get_all(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -138,6 +151,7 @@ def _parse_url(text: str) -> str:
         raise ValueError(_URL_ERROR)
     try:
         parts = urlsplit(text)
+        parts.port  # noqa: B018 (raises ValueError for a non-numeric or out-of-range port)
     except ValueError:
         raise ValueError(_URL_ERROR) from None
     if parts.scheme not in ("http", "https") or not parts.netloc:

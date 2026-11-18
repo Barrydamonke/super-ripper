@@ -162,4 +162,17 @@ def test_probe_unreadable_sectors_still_classifies():
             raise OSError(5, "Input/output error")
 
     assert discprobe.probe(Broken(profile=0x41)) == ("bluray", "")
-    assert discprobe.probe(Broken(profile=0x10)) == ("data", "")
+
+
+def test_probe_dvd_unreadable_filesystem_is_unknown():
+    class Broken(FakeTarget):
+        def read_sector(self, lba):
+            raise OSError(5, "Input/output error")
+
+    # Can't tell DVD-Video from a data DVD without the filesystem.
+    assert discprobe.probe(Broken(profile=0x10)) == ("unknown", "")
+
+
+def test_probe_blank_or_no_info_status_is_unknown():
+    assert discprobe.probe(FakeTarget(status=0, profile=0x11)) == ("unknown", "")
+    assert discprobe.probe(FakeTarget(status=1, profile=0x09)) == ("unknown", "")
