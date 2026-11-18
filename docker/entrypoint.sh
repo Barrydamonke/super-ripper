@@ -9,7 +9,11 @@ UMASK="${UMASK:-0002}"
 PORT="${PORT:-8580}"
 CONFIG_DIR="${CONFIG_DIR:-/config}"
 
-set -- uvicorn disc_ripper.app:create_app --factory --host 0.0.0.0 --port "$PORT"
+# Open /events streams never close on their own; without a timeout uvicorn would
+# wait on them at shutdown until Docker kills it, and running jobs would never be
+# marked interrupted.
+set -- uvicorn disc_ripper.app:create_app --factory --host 0.0.0.0 --port "$PORT" \
+    --timeout-graceful-shutdown 10
 
 if [ "$(id -u)" = "0" ]; then
     python -m disc_ripper.devnodes

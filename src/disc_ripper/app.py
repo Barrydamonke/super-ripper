@@ -5,6 +5,7 @@ Run with: uvicorn disc_ripper.app:create_app --factory
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -15,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from . import auth, db, drives
 from .clock import utc_now
 from .config import AppConfig, load_config
+from .services import Services
 from .web import auth_routes, drive_routes, settings_routes
 from .web.deps import is_htmx
 
@@ -92,8 +94,21 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     finally:
         conn.close()
 
-    app = FastAPI(title="Disc Ripper", docs_url=None, redoc_url=None, openapi_url=None)
+    services = Services(config)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if config.run_background:
+            await services.start()
+        try:
+            yield
+        finally:
+            if config.run_background:
+                await services.stop()
+
+    app = FastAPI(title="Disc Ripper", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.config = config
+    app.state.services = services
     app.state.sessions = auth.SessionManager(auth.load_or_create_secret(config.secret_key_path))
 
     async def _guarded(request: Request, call_next) -> Response:

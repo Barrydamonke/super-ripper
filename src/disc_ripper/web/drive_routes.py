@@ -66,6 +66,7 @@ def drives_rescan(
     config: AppConfig = Depends(get_config),
 ):
     drives.sync(conn, drives.discover(config.sysfs_root), utc_now())
+    request.app.state.services.refresh_drives()
     return _table(request, conn, config)
 
 
@@ -80,4 +81,5 @@ def drives_update(
 ):
     if not drives.update_drive(conn, drive_id, label=label, enabled=enabled is not None):
         return HTMLResponse('<p class="error">Unknown drive.</p>', status_code=404)
+    request.app.state.services.refresh_drives()
     return _table(request, conn, config)
