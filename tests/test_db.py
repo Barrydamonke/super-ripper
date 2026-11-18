@@ -46,9 +46,9 @@ def _tables(conn):
 def test_migrate_fresh_db(config):
     conn = db.connect(config.db_path)
     try:
-        assert db.migrate(conn) == 1
+        assert db.migrate(conn) == 2
         assert {"settings", "drives"} <= _tables(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     finally:
         conn.close()
 
@@ -59,7 +59,47 @@ def test_migrate_is_idempotent(config):
         db.migrate(conn)
         conn.execute("INSERT INTO settings (key, value) VALUES ('k', '1')")
         conn.commit()
-        assert db.migrate(conn) == 1
+        assert db.migrate(conn) == 2
         assert conn.execute("SELECT value FROM settings WHERE key='k'").fetchone()[0] == "1"
+    finally:
+        conn.close()
+
+
+def test_load_config_step2_fields(tmp_path):
+    cfg = load_config({"WORK_DIR": str(tmp_path / "w"), "BUSY_SECRET": "s3cret"})
+    assert cfg.work_dir == tmp_path / "w"
+    assert cfg.busy_secret == "s3cret"
+    assert cfg.run_background is True
+    defaults = load_config({})
+    assert defaults.work_dir == Path("/work")
+    assert defaults.busy_secret == ""
+
+
+def test_migration_0002_from_step1_db(config):
+    from importlib import resources
+
+    conn = db.connect(config.db_path)
+    try:
+        sql = (resources.files("disc_ripper") / "migrations" / "0001_initial.sql").read_text(encoding="utf-8")
+        conn.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = 1;\nCOMMIT;")
+        conn.execute(
+            "INSERT INTO drives (id, id_source, label, first_seen, last_seen) "
+            "VALUES ('port:ata1:X', 'port', 'Blu-ray', 't', 't')"
+        )
+        conn.commit()
+
+        assert db.migrate(conn) == 2
+        row = conn.execute("SELECT * FROM drives").fetchone()
+        assert row["media_state"] == "unknown"
+        assert row["disc_type"] is None
+        assert row["disc_label"] == ""
+        assert row["label"] == "Blu-ray"
+
+        conn.execute(
+            "INSERT INTO jobs (drive_id, kind, state, created_at) VALUES ('port:ata1:X', 'test', 'queued', 't')"
+        )
+        conn.execute("UPDATE drives SET id = 'serial:new' WHERE id = 'port:ata1:X'")
+        conn.commit()
+        assert conn.execute("SELECT drive_id FROM jobs").fetchone()[0] == "serial:new"
     finally:
         conn.close()

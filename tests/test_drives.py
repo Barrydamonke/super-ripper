@@ -269,3 +269,18 @@ def test_sync_does_not_merge_into_existing_serial_row(conn):
     assert rows["serial:K9ECARB4719"]["label"] == "Blu-ray"
     assert rows[port_id]["label"] == "Old"
     assert rows[port_id]["present"] == 0
+
+
+def test_set_media_reports_change(config, conn, add_sg):
+    add_sg(config.sysfs_root, 1, vpd_serial=SERIAL)
+    drives.sync(conn, drives.discover(config.sysfs_root), "t0")
+    assert drives.set_media(conn, "serial:ABC123", "disc", "dvd", "MOVIE", "t1") is True
+    assert drives.set_media(conn, "serial:ABC123", "disc", "dvd", "MOVIE", "t2") is False
+    [row] = drives.list_drives(conn)
+    assert row["media_changed_at"] == "t1"
+    assert drives.set_media(conn, "serial:ABC123", "disc", "dvd", "OTHER", "t3") is True
+    [row] = drives.list_drives(conn)
+    assert (row["media_state"], row["disc_type"], row["disc_label"], row["media_changed_at"]) == (
+        "disc", "dvd", "OTHER", "t3",
+    )
+    assert drives.set_media(conn, "serial:nope", "empty", None, "", "t4") is False

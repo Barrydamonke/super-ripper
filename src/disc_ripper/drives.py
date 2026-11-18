@@ -258,3 +258,23 @@ def update_drive(conn: sqlite3.Connection, drive_id: str, *, label: str, enabled
             (label.strip()[:LABEL_MAX], 1 if enabled else 0, drive_id),
         )
     return cur.rowcount == 1
+
+
+def set_media(
+    conn: sqlite3.Connection,
+    drive_id: str,
+    state: str,
+    disc_type: str | None,
+    label: str,
+    now: str,
+) -> bool:
+    """Record a drive's media state. True if anything changed."""
+    with conn:
+        cur = conn.execute(
+            """
+            UPDATE drives SET media_state = ?, disc_type = ?, disc_label = ?, media_changed_at = ?
+            WHERE id = ? AND NOT (media_state = ? AND disc_type IS ? AND disc_label = ?)
+            """,
+            (state, disc_type, label, now, drive_id, state, disc_type, label),
+        )
+    return cur.rowcount == 1

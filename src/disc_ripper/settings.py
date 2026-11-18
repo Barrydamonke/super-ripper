@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 INTERNAL_PREFIX = "internal."
 _TRUE_VALUES = {"on", "true", "1"}
@@ -21,7 +22,7 @@ _TRUE_VALUES = {"on", "true", "1"}
 class SettingDef:
     key: str
     label: str
-    kind: Literal["int", "float", "bool", "path"]
+    kind: Literal["int", "float", "bool", "path", "url"]
     default: Any
     unit: str = ""
     minimum: float | None = None
@@ -43,9 +44,19 @@ SETTINGS: tuple[SettingDef, ...] = (
         help="Start ripping the main title as soon as a disc is scanned, unless it is held.",
     ),
     SettingDef(
-        "shutdown_grace_hours", "Shutdown grace period", "float", 3, "hours", 0, 11,
+        "shutdown_grace_hours", "Shutdown grace period", "float", 3, "hours", 0, 3.5,
         "How long past the scheduled end jobs may delay shutdown. "
-        "unraid-backend's safety cap must stay longer than this.",
+        "unraid-backend stops waiting for the ripper 4 hours after a shutdown request, "
+        "so this must stay below that.",
+    ),
+    SettingDef(
+        "schedule_status_url", "Schedule source (unraid-backend /status)", "url", "",
+        help="Where to read the power schedule, e.g. http://192.168.1.10:3001/status. "
+        "Blank: skip.",
+    ),
+    SettingDef(
+        "schedule_pi_url", "Schedule fallback (Pi /schedule)", "url", "",
+        help="Used when the source above can't be read, e.g. http://192.168.1.20:8090/schedule.",
     ),
     SettingDef(
         "raw_retention_hours", "Raw rip retention", "int", 24, "hours", 1, 720,
@@ -95,6 +106,8 @@ def _parse_one(definition: SettingDef, raw: str | None) -> Any:
     if definition.kind == "bool":
         return raw is not None and raw.strip().lower() in _TRUE_VALUES
     text = (raw or "").strip()
+    if definition.kind == "url":
+        return _parse_url(text)
     if definition.kind == "path":
         if not text.startswith("/"):
             raise ValueError("Must be an absolute path starting with /.")
@@ -113,6 +126,23 @@ def _parse_one(definition: SettingDef, raw: str | None) -> Any:
     if definition.maximum is not None and value > definition.maximum:
         raise ValueError(f"Must be at most {definition.maximum:g}.")
     return value
+
+
+_URL_ERROR = "Must be blank or an http:// or https:// URL."
+
+
+def _parse_url(text: str) -> str:
+    if not text:
+        return ""
+    if any(c.isspace() for c in text):
+        raise ValueError(_URL_ERROR)
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        raise ValueError(_URL_ERROR) from None
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError(_URL_ERROR)
+    return text
 
 
 def parse_form(form: Mapping[str, str]) -> dict[str, Any]:
