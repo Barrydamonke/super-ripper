@@ -8,3 +8,11 @@ th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #ddd;
 .ok { color: #1b5e20; }
 .hint { color: #555; font-size: .9em; }
 form.inline { display: inline; }
+.drive-card { border: 1px solid #ccc; border-radius: 6px; padding: .5rem 1rem; margin: 1rem 0; }
+.card-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline; }
+.card-head h2 { margin: .25rem 0; font-size: 1.2rem; }
+.card-head .actions { margin-left: auto; }
+.job { margin: .4rem 0; }
+.job progress { width: 12rem; vertical-align: middle; }
+label.inline { display: inline; margin: 0; }
+.test-job { margin-top: .5rem; }

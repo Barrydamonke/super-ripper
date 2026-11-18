@@ -17,11 +17,11 @@ from . import auth, db, drives
 from .clock import utc_now
 from .config import AppConfig, load_config
 from .services import Services
-from .web import auth_routes, drive_routes, settings_routes
+from .web import auth_routes, dashboard_routes, drive_routes, settings_routes
 from .web.deps import is_htmx
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_OPEN_PATHS = {"/healthz"}
+_OPEN_PATHS = {"/healthz", "/api/busy"}  # /api/busy has its own secret
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
@@ -134,12 +134,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def healthz():
         return {"status": "ok"}
 
-    @app.get("/")
-    def root():
-        return RedirectResponse("/drives", status_code=303)
-
     app.mount("/static", StaticFiles(directory=str(_PACKAGE_DIR / "static")), name="static")
     app.include_router(auth_routes.router)
+    app.include_router(dashboard_routes.router)
     app.include_router(drive_routes.router)
     app.include_router(settings_routes.router)
     return app

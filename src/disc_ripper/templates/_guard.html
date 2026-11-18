@@ -1,1 +1,14 @@
-<section id="guard">{{ guard.phase }}</section>
+{% if guard.phase == "no_schedule" %}
+  <p class="error">No schedule could be read. The shutdown guard only knows whether a job is running. Set the schedule URLs in <a href="/settings">Settings</a>.</p>
+{% else %}
+  <p>
+    <strong>Schedule:</strong>
+    {% if today and today.start %}today {{ today.start }}–{{ today.end }}{% if today.end_next_day %} (next day){% endif %}{% else %}nothing scheduled today{% endif %}
+    ·
+    {% if guard.phase == "in_window" %}On schedule until {{ guard.scheduled_end|hm }}; jobs may run until {{ guard.grace_ends_at|hm }}
+    {% elif guard.phase == "draining" %}Draining: scheduled end was {{ guard.scheduled_end|hm }}; jobs may run until {{ guard.grace_ends_at|hm }}
+    {% else %}Outside scheduled hours{% endif %}
+    (grace {{ grace_hours }} h)
+  </p>
+  <p class="hint">From {{ cached.source }}, fetched {{ cached.fetched_at|hm }}.</p>
+{% endif %}
