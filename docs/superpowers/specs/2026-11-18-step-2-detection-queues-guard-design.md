@@ -264,8 +264,10 @@ it always stays under unraid-backend's 4-hour cap (help text says so).
 - `GET /events` (login required) streams `text/event-stream`. On connect it
   sends the current state of every drive card and the schedule panel, then
   changes as they happen, plus a comment line every 15 s as a keep-alive.
-- Events carry rendered HTML fragments. Event names: `drive-<n>` (the dashboard
-  position of the drive, so names stay valid identifiers) and `guard`.
+- Events carry rendered HTML fragments. Event names: `drive-<key>` (`<key>` = the
+  first 10 hex characters of the SHA-1 of the drive ID: stable across rescans
+  and a valid identifier, unlike the raw ID with its colons and spaces) and
+  `guard`.
 - Front end: vendored htmx SSE extension (`htmx-ext-sse`, pinned version), with
   `sse-swap` on each card. On reconnect the server's initial burst brings the
   page back up to date.
