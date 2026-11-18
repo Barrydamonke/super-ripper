@@ -51,11 +51,4 @@
   </div>
 {% endif %}
 
-<form hx-post="/jobs/test" hx-target="#drive-{{ key }}" class="test-job">
-  <input type="hidden" name="drive_id" value="{{ drive.id }}">
-  Add test job:
-  <label class="inline"><input type="text" name="minutes" value="{{ default_minutes }}" size="4" inputmode="numeric"> min</label>
-  <label class="inline"><input type="text" name="size_gb" value="0" size="4" inputmode="decimal"> GB</label>
-  <button type="submit">Queue</button>
-  {% if new_job_past_grace %}<div class="error">A {{ default_minutes }}-minute job would finish after the grace period ends ({{ guard.grace_ends_at|hm }}).</div>{% endif %}
-</form>
+{% if new_job_past_grace %}<p class="error">A {{ default_minutes }}-minute test job would finish after the grace period ends ({{ guard.grace_ends_at|hm }}).</p>{% endif %}

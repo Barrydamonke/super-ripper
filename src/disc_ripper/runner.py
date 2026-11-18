@@ -25,6 +25,7 @@ from .space import SpaceChecker
 log = logging.getLogger(__name__)
 
 PROGRESS_INTERVAL = 1.0
+CANCEL_WAIT_SECONDS = 3.0
 
 
 class JobContext:
@@ -94,6 +95,7 @@ class JobRunner:
         self._wakeups: dict[str, asyncio.Event] = {}
         self._running: dict[int, asyncio.Task] = {}
         self._user_cancelled: set[int] = set()
+        self._finished: dict[int, asyncio.Event] = {}
         # Space check + start as one step, so two drives can't both claim the same space.
         self._start_lock = asyncio.Lock()
 
@@ -147,6 +149,13 @@ class JobRunner:
         task = self._running.get(job_id)
         if task is not None and not task.done():
             task.cancel()
+        finished = self._finished.get(job_id)
+        if finished is not None:
+            # Let the caller (the cancel button) render the card after the state is written.
+            try:
+                await asyncio.wait_for(finished.wait(), CANCEL_WAIT_SECONDS)
+            except TimeoutError:
+                pass
         return True
 
     async def stop(self) -> None:
@@ -206,6 +215,14 @@ class JobRunner:
         await self._run(drive_id, job)
 
     async def _run(self, drive_id: str, job) -> None:
+        job_id = job["id"]
+        self._finished[job_id] = asyncio.Event()
+        try:
+            await self._run_job(drive_id, job)
+        finally:
+            self._finished.pop(job_id).set()
+
+    async def _run_job(self, drive_id: str, job) -> None:
         job_id = job["id"]
         self.space.invalidate()  # the job is about to write into /work
         await self.notify(drive_id)

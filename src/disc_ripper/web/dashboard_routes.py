@@ -108,11 +108,11 @@ async def _card(request: Request, drive_id: str, *, error: str | None = None, st
 def _dashboard_sync(conn) -> dict:
     now = datetime.now().astimezone()
     cards = [
-        {"key": drive_key(row["id"]), "html": render_drive_card(conn, row, now)}
+        {"key": drive_key(row["id"]), "drive_id": row["id"], "html": render_drive_card(conn, row, now)}
         for row in drives.list_drives(conn)
         if row["present"] and row["enabled"]
     ]
-    return {"cards": cards, "guard_html": render_guard(conn, now)}
+    return {"cards": cards, "guard_html": render_guard(conn, now), "default_minutes": DEFAULT_TEST_MINUTES}
 
 
 @router.get("/")

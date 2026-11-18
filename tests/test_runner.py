@@ -371,3 +371,18 @@ def test_cancel_between_start_and_task_creation(config, conn):
         await r.stop()
 
     asyncio.run(main())
+
+
+def test_cancel_running_job_returns_after_state_is_written(config, conn):
+    j = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 100000}, now="t")
+
+    async def main():
+        r = make_runner(config)
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, j) == ["running"])
+        assert await r.cancel(j) is True
+        # The cancel route renders the card right after this; it must not show "running".
+        assert states(conn, j) == ["cancelled"]
+        await r.stop()
+
+    asyncio.run(main())

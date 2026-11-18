@@ -193,3 +193,31 @@ def test_hung_status_call_times_out(config, setup):
 
     assert asyncio.run(timed()) < 0.9
     assert row(setup, "serial:B")["media_state"] == "empty"
+
+
+def test_monitor_survives_errors_in_first_poll(config, setup):
+    fakes = {"sr0": FakeDrive(["empty", "disc"]), "sr1": FakeDrive(["empty"])}
+
+    class Flaky(RecordingNotifier):
+        calls = 0
+
+        async def drive_changed(self, drive_id):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("template blew up")
+            await super().drive_changed(drive_id)
+
+    notifier = Flaky()
+    m = media.MediaMonitor(config, notifier, drive_factory=lambda p: fakes[p.name], interval=0.01)
+    m.probe = lambda drive: drive.probe_result
+
+    async def main():
+        task = asyncio.create_task(m.run())
+        await asyncio.sleep(0.3)
+        assert not task.done()
+        task.cancel()
+
+    asyncio.run(main())
+    # Drive B was still handled in the first round, and A's insert was seen later.
+    assert row(setup, "serial:B")["media_state"] == "empty"
+    assert row(setup, "serial:A")["media_state"] == "disc"

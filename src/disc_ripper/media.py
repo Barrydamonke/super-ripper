@@ -131,10 +131,16 @@ class MediaMonitor:
 
     async def poll_once(self, *, first: bool = False) -> None:
         for target in await asyncio.to_thread(self._targets):
-            await self._poll_drive(target, first)
+            try:
+                await self._poll_drive(target, first)
+            except Exception:  # e.g. database locked, a render error: carry on with the next drive
+                log.exception("media: polling %s failed", target.drive_id)
 
     async def run(self) -> None:
-        await self.poll_once(first=True)
+        try:
+            await self.poll_once(first=True)
+        except Exception:
+            log.exception("media: first poll failed")
         while True:
             await asyncio.sleep(self.interval)
             try:

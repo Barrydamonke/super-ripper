@@ -204,3 +204,18 @@ def test_event_stream_forwards_and_pings(dash, monkeypatch):
     chunks = asyncio.run(main())
     assert "event: guard\ndata: <p>new</p>\n\n" in chunks
     assert ": ping\n\n" in chunks
+
+
+def test_live_card_does_not_contain_the_form(dash):
+    # The card is replaced every second while a job runs; a form inside it would reset as you type.
+    client, conn = dash
+    row = conn.execute("SELECT * FROM drives WHERE id = 'serial:A'").fetchone()
+    from datetime import datetime
+
+    html = dashboard_routes.render_drive_card(conn, row, datetime.now().astimezone())
+    assert 'name="minutes"' not in html
+    page = client.get("/").text
+    assert page.count('name="minutes"') == 1
+    form_at = page.index('name="minutes"')
+    wrapper_end = page.index("</div>", page.index(f'sse-swap="drive-{KEY}"'))
+    assert form_at > wrapper_end

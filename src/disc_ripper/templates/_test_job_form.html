@@ -1,0 +1,8 @@
+{# Outside the live card: the card is replaced every second while a job runs. #}
+<form hx-post="/jobs/test" hx-target="#drive-{{ card.key }}" class="test-job">
+  <input type="hidden" name="drive_id" value="{{ card.drive_id }}">
+  Add test job:
+  <label class="inline"><input type="text" name="minutes" value="{{ default_minutes }}" size="4" inputmode="numeric"> min</label>
+  <label class="inline"><input type="text" name="size_gb" value="0" size="4" inputmode="decimal"> GB</label>
+  <button type="submit">Queue</button>
+</form>

@@ -93,6 +93,12 @@ class Services:
     async def guard_changed(self) -> None:
         self.broker.publish("guard", await asyncio.to_thread(self._render_guard))
 
+    async def _guard_changed_safely(self) -> None:
+        try:
+            await self.guard_changed()
+        except Exception:  # a render error must not end the loop that keeps the panel current
+            log.exception("schedule: updating the schedule panel failed")
+
     # -- drives and workers ----------------------------------------------------
 
     def _active_drive_ids(self) -> set[str]:
@@ -141,14 +147,14 @@ class Services:
             elif not error and self._schedule_error:
                 log.info("schedule: fetched again")
             self._schedule_error = error
-            await self.guard_changed()
+            await self._guard_changed_safely()
             await asyncio.sleep(SCHEDULE_REFRESH_SECONDS)
 
     async def _guard_loop(self) -> None:
         # Phases change with the clock, not only when the schedule is fetched.
         while True:
             await asyncio.sleep(GUARD_TICK_SECONDS)
-            await self.guard_changed()
+            await self._guard_changed_safely()
 
     async def start(self) -> None:
         _configure_logging()

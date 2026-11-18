@@ -78,3 +78,28 @@ def test_drive_changed_publishes_card(config, add_sg):
 
     asyncio.run(main())
     conn.close()
+
+
+def test_guard_loop_survives_render_error(config, add_sg, monkeypatch):
+    import asyncio
+
+    _prepare(config, add_sg).close()
+    monkeypatch.setattr(services, "GUARD_TICK_SECONDS", 0.01)
+    svc = services.Services(config)
+    calls = []
+
+    async def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("render failed")
+
+    svc.guard_changed = flaky
+
+    async def main():
+        task = asyncio.create_task(svc._guard_loop())
+        await asyncio.sleep(0.2)
+        assert not task.done()
+        task.cancel()
+
+    asyncio.run(main())
+    assert len(calls) > 2
