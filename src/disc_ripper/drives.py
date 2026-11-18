@@ -1,8 +1,9 @@
 """Find optical drives in sysfs and keep the drives table in step.
 
 Drives are identified by serial number, never by their srX/sgX number, which
-can change between boots. If the serial can't be read the ID falls back to the
-drive's WWID, then to the SATA port it is plugged into.
+can change between boots. The serial comes from SCSI VPD page 0x80, or for SATA
+drives from the ATA IDENTIFY data libata exposes in sysfs. If neither has one
+the ID falls back to the drive's WWID, then to the SATA port it is plugged into.
 """
 
 from __future__ import annotations
@@ -36,6 +37,9 @@ class DiscoveredDrive:
     sr_name: str | None
     sg_dev: tuple[int, int]
     sr_dev: tuple[int, int] | None
+    # The port-based ID this drive would get without a serial. Used to carry a
+    # label over from a row created before the serial could be read.
+    port_id: str = ""
 
 
 def _read_text(path: Path) -> str | None:
@@ -64,6 +68,45 @@ def read_vpd_serial(data: bytes) -> str | None:
     return serial if serial and serial.isprintable() else None
 
 
+def read_ata_serial(text: str) -> str | None:
+    """Serial number from libata's ata_device/devN.M/id (IDENTIFY data as hex words).
+
+    Words 10-19 hold the serial; ATA strings store two characters per word,
+    high byte first.
+    """
+    words = text.split()
+    if len(words) < 20:
+        return None
+    try:
+        raw = b"".join(int(w, 16).to_bytes(2, "big") for w in words[10:20])
+    except ValueError:
+        return None
+    serial = raw.decode("ascii", errors="ignore").strip(" \x00\t\r\n")
+    return serial if serial and serial.isprintable() else None
+
+
+def _ata_identify_serial(device: Path) -> str | None:
+    """Find the libata device behind a SCSI device and read its serial."""
+    parts = Path(os.path.realpath(device)).parts
+    port_index = next((i for i, part in enumerate(parts) if _ATA_PORT.match(part)), None)
+    if port_index is None:
+        return None
+    port_dir = Path(*parts[: port_index + 1])
+    candidates = sorted(port_dir.glob("link*/dev*/ata_device/dev*/id"))
+    if len(candidates) > 1:
+        # PATA master/slave share a port: the SCSI target number is the ATA device number.
+        hctl = next((part for part in reversed(parts) if _HCTL.match(part)), None)
+        if hctl is None:
+            return None
+        target = hctl.split(":")[2]
+        candidates = [c for c in candidates if c.parent.name.rsplit(".", 1)[-1] == target]
+        if len(candidates) != 1:
+            return None
+    if not candidates:
+        return None
+    return read_ata_serial(_read_text(candidates[0]) or "")
+
+
 def _port_name(device: Path, sg_name: str) -> str:
     parts = Path(os.path.realpath(device)).parts
     for part in parts:
@@ -80,12 +123,18 @@ def _identify(device: Path, sg_name: str, model: str) -> tuple[str, Literal["ser
         serial = read_vpd_serial((device / "vpd_pg80").read_bytes())
     except OSError:
         serial = None
+    if not serial:
+        serial = _ata_identify_serial(device)
     if serial:
         return f"serial:{serial}", "serial"
     wwid = _read_text(device / "wwid")
     if wwid:
         return f"wwid:{wwid}", "wwid"
-    return f"port:{_port_name(device, sg_name)}:{model}", "port"
+    return _port_id(device, sg_name, model), "port"
+
+
+def _port_id(device: Path, sg_name: str, model: str) -> str:
+    return f"port:{_port_name(device, sg_name)}:{model}"
 
 
 def _find_sr(device: Path) -> tuple[str | None, tuple[int, int] | None]:
@@ -134,6 +183,7 @@ def discover(sysfs_root: Path) -> list[DiscoveredDrive]:
                     sr_name=sr_name,
                     sg_dev=sg_dev,
                     sr_dev=sr_dev,
+                    port_id=_port_id(device, sg_dir.name, model),
                 ),
             )
         )
@@ -141,16 +191,7 @@ def discover(sysfs_root: Path) -> list[DiscoveredDrive]:
     # Two drives reporting the same serial/WWID (e.g. a factory default) would
     # merge into one record; give those drives port-based IDs instead.
     counts = Counter(d.id for d in ordered)
-    return [
-        replace(
-            d,
-            id=f"port:{_port_name(class_dir / d.sg_name / 'device', d.sg_name)}:{d.model}",
-            id_source="port",
-        )
-        if counts[d.id] > 1
-        else d
-        for d in ordered
-    ]
+    return [replace(d, id=d.port_id, id_source="port") if counts[d.id] > 1 else d for d in ordered]
 
 
 def node_status(dev_root: Path, name: str | None) -> NodeStatus:
@@ -179,6 +220,16 @@ def sync(conn: sqlite3.Connection, found: list[DiscoveredDrive], now: str) -> No
     with conn:
         conn.execute("UPDATE drives SET present = 0")
         for d in found:
+            if d.port_id and d.id != d.port_id:
+                # The drive used to have a port-based ID (e.g. before its serial
+                # could be read): keep that row, label and all, under the new ID.
+                conn.execute(
+                    """
+                    UPDATE drives SET id = ? WHERE id = ?
+                    AND NOT EXISTS (SELECT 1 FROM drives WHERE id = ?)
+                    """,
+                    (d.id, d.port_id, d.id),
+                )
             conn.execute(
                 """
                 INSERT INTO drives (id, id_source, vendor, model, revision, sg_name, sr_name,

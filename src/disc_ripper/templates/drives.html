@@ -4,7 +4,7 @@
 <h1>Drives</h1>
 <p>
   <button hx-post="/drives/rescan" hx-target="#drive-table" hx-swap="outerHTML">Rescan</button>
-  <span class="hint">Drives are identified by serial number, so labels follow the drive even if its sr/sg number changes.</span>
+  <span class="hint">Drives are identified by serial number where they report one, so labels follow the drive even if its sr/sg number changes. A drive shown "from port" is identified by the SATA port it is plugged into, so its label stays with that port.</span>
 </p>
 {% include "_drive_table.html" %}
 {% endblock %}
