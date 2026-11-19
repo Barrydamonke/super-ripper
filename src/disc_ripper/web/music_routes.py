@@ -117,12 +117,15 @@ async def _resolve(request: Request, job_id: int, make_plan, *, allow_duplicate=
     """Build a plan (in a thread), file it, and go back to the Music page."""
 
     def run(conn):
-        rip = cd_rips.get(conn, job_id)
-        if rip is None or rip["state"] != "needs_look":
+        if not cdrip.claim(conn, job_id):
             raise cdrip.ResolveError("This rip isn't waiting for a look any more.")
-        plan = make_plan(conn, rip)
-        return cdrip.file_resolved(conn, job_id, plan, request.app.state.config.music_dir,
-                                   allow_duplicate=allow_duplicate)
+        try:
+            plan = make_plan(conn, cd_rips.get(conn, job_id))
+            return cdrip.file_resolved(conn, job_id, plan, request.app.state.config.music_dir,
+                                       allow_duplicate=allow_duplicate)
+        except BaseException:
+            cdrip.release_claim(conn, job_id)
+            raise
 
     try:
         await asyncio.to_thread(_call, request, run)
@@ -219,7 +222,7 @@ async def add_to(request: Request, job_id: int):
         if not disc:
             raise cdrip.ResolveError("Enter which disc of the album this is.")
         n_files = len(cdrip.rip_files(rip))
-        titles = [form.get(f"title_{n}", "") for n in range(1, n_files + 1)]
+        titles = [form.get(f"addto_title_{n}", "") for n in range(1, n_files + 1)]
         if any(titles) and not all(titles):
             raise cdrip.ResolveError("Every track needs a title.")
         return cdrip.plan_add_to(conn, rip, form.get("album_key", ""), disc, titles if any(titles) else None)
@@ -243,7 +246,8 @@ async def discard(request: Request, job_id: int):
     rip = await asyncio.to_thread(_call, request, cd_rips.get, job_id)
     if rip is None:
         return HTMLResponse("<p>Unknown rip.</p>", status_code=404)
-    await asyncio.to_thread(_call, request, cdrip.discard, job_id)
+    if not await asyncio.to_thread(_call, request, cdrip.discard, job_id):
+        return _item(request, job_id, error="This rip isn't waiting for a look any more.", status_code=400)
     return _done(request, "/music")
 
 

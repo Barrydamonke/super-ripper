@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
 from collections.abc import Callable
@@ -63,7 +64,8 @@ class Services:
         self.space = SpaceChecker(config.work_dir)
         # Indirect, so drive_factory can be swapped after construction (tests).
         self.monitor = MediaMonitor(
-            config, self, drive_factory=lambda path: self.drive_factory(path), on_insert=self.on_insert
+            config, self, drive_factory=lambda path: self.drive_factory(path), on_insert=self.on_insert,
+            on_present=self.on_present,
         )
         self.runner = JobRunner(config, self, self.space, services=self)
         self.musicbrainz = MusicBrainz()
@@ -111,24 +113,61 @@ class Services:
         self._db(cd_rips.remember_disc, disc_id, toc.to_json(), len(toc.audio_tracks), drive_id, utc_now())
         return toc
 
-    def _enqueue_cd_rip(self, conn, drive_id: str, toc: Toc) -> int:
+    def _enqueue_cd_rip(self, conn, drive_id: str, toc: Toc, again: bool) -> int | None:
+        """Check and queue in one write transaction, so the Rip button and an insert
+        (or a double-click) can't both queue the same disc."""
         drive = conn.execute("SELECT sr_name, read_offset FROM drives WHERE id = ?", (drive_id,)).fetchone()
         disc_id = musicbrainz_disc_id(toc)
-        job_id = jobs.enqueue(
-            conn, drive_id, "rip_cd",
-            {"disc_id": disc_id, "toc": toc.to_json(), "offset": drive["read_offset"], "sr_name": drive["sr_name"]},
-            needs_bytes=math.ceil(toc.audio_seconds * CD_BYTES_PER_SECOND * FLAC_RATIO),
-            uses_drive=True, now=utc_now(),
-        )
-        cd_rips.create(conn, job_id, disc_id, utc_now())
+        params = {"disc_id": disc_id, "toc": toc.to_json(), "offset": drive["read_offset"], "sr_name": drive["sr_name"]}
+        now = utc_now()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            blocking = cd_rips.blocking_rip_for_disc(conn, disc_id)
+            active = blocking is not None and blocking["job_state"] in ("queued", "waiting_space", "running")
+            if active or (blocking is not None and not again):
+                conn.rollback()
+                return None
+            cur = conn.execute(
+                """
+                INSERT INTO jobs (drive_id, kind, state, params, needs_bytes, uses_drive, created_at)
+                VALUES (?, 'rip_cd', 'queued', ?, ?, 1, ?)
+                """,
+                (drive_id, json.dumps(params), math.ceil(toc.audio_seconds * CD_BYTES_PER_SECOND * FLAC_RATIO), now),
+            )
+            job_id = cur.lastrowid
+            conn.execute(
+                "INSERT INTO cd_rips (job_id, disc_id, state, updated_at) VALUES (?, ?, 'ripping', ?)",
+                (job_id, disc_id, now),
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         return job_id
 
-    async def enqueue_cd_rip(self, drive_id: str, toc: Toc) -> int:
-        job_id = await asyncio.to_thread(self._db, self._enqueue_cd_rip, drive_id, toc)
-        log.info("cd: queued rip #%s on %s", job_id, drive_id)
-        self.wake(drive_id)
+    async def enqueue_cd_rip(self, drive_id: str, toc: Toc, *, again: bool = False) -> int | None:
+        """Queue a rip of the disc. None if this disc is already queued or ripping, or
+        (without again) was already ripped and filed or is waiting for a look."""
+        job_id = await asyncio.to_thread(self._db, self._enqueue_cd_rip, drive_id, toc, again)
+        if job_id is not None:
+            log.info("cd: queued rip #%s on %s", job_id, drive_id)
+            self.wake(drive_id)
         await self.drive_changed(drive_id)
         return job_id
+
+    async def on_present(self, drive_id: str) -> None:
+        """A disc already in the drive at start-up: remember it (for the card), don't rip it."""
+        row = await asyncio.to_thread(
+            self._db, lambda conn: conn.execute("SELECT disc_type FROM drives WHERE id = ?", (drive_id,)).fetchone()
+        )
+        if row is None or row["disc_type"] not in ("audio", "mixed"):
+            return
+        try:
+            await asyncio.to_thread(self.read_toc, drive_id)
+        except OSError as exc:
+            log.warning("cd: reading the TOC on %s failed: %s", drive_id, exc)
+            return
+        await self.drive_changed(drive_id)
 
     async def on_insert(self, drive_id: str) -> None:
         """An audio CD went in: remember it and, with auto-start on, queue its rip

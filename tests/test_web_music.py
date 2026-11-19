@@ -145,7 +145,7 @@ def test_add_to_existing_album(music):
     client.post(f"/music/{j1}/manual", data=_manual_form(2, disc_total="2"))
     key = conn.execute("SELECT album_key FROM albums").fetchone()[0]
     j2 = waiting_rip(conn, config, tracks=2, disc_id="disc-two")
-    form = {"album_key": key, "disc": "2", "title_1": "Encore", "title_2": "Goodnight"}
+    form = {"album_key": key, "disc": "2", "addto_title_1": "Encore", "addto_title_2": "Goodnight"}
     r = client.post(f"/music/{j2}/add-to", data=form)
     assert r.status_code in (200, 303), r.text
     folder = config.music_dir / "The Band" / "Live at Home (2003)"
@@ -220,3 +220,83 @@ def test_titles_escaped(music):
 
 def test_music_requires_login(client):
     assert client.get("/music").status_code == 303
+
+
+# --- checkpoint 3 review fixes -------------------------------------------------------
+
+
+def test_add_to_form_carries_its_own_titles(music):
+    client, conn, config = music
+    j1 = waiting_rip(conn, config, tracks=2)
+    client.post(f"/music/{j1}/manual", data=_manual_form(2, disc_total="2"))
+    j2 = waiting_rip(conn, config, tracks=2, disc_id="disc-two")
+    page = client.get(f"/music/{j2}").text
+    add_form = page[page.index(f'action="/music/{j2}/add-to"'):]
+    add_form = add_form[: add_form.index("</form>")]
+    assert 'name="addto_title_1"' in add_form and 'type="hidden"' not in add_form
+    key = conn.execute("SELECT album_key FROM albums").fetchone()[0]
+    r = client.post(f"/music/{j2}/add-to", data={"album_key": key, "disc": "2", "addto_title_1": "Encore",
+                                                  "addto_title_2": "Goodnight"})
+    assert r.status_code in (200, 303), r.text
+    assert cd_rips.get(conn, j2)["state"] == "filed"
+
+
+def _wall_rips(conn, config, client):
+    release = json.loads((MB / "release_wall.json").read_text(encoding="utf-8"))
+    disc1 = musicbrainz.candidate_for_medium(release, 1)
+    disc2 = musicbrainz.candidate_for_medium(release, 2)
+    j1 = waiting_rip(conn, config, tracks=len(disc1.tracks), cands=[disc1], disc_id="wall-1")
+    client.post(f"/music/{j1}/use-release", data={"release_id": disc1.release_id})
+    return disc2
+
+
+def test_file_anyway_later_disc_joins_album(music):
+    client, conn, config = music
+    disc2 = _wall_rips(conn, config, client)
+    j2 = waiting_rip(conn, config, tracks=len(disc2.tracks), cands=[disc2], reasons=("2 track(s) not verified",),
+                     release_id=disc2.release_id, disc_id="wall-2")
+    r = client.post(f"/music/{j2}/file-anyway")
+    assert r.status_code in (200, 303), r.text
+    assert sorted(p.name for p in (config.music_dir / "Pink Floyd").iterdir()) == ["The Wall (1994)"]
+
+
+def test_duplicate_records_its_own_album_key(music):
+    client, conn, config = music
+    cands = nevermind_candidates()
+    first = waiting_rip(conn, config, cands=cands)
+    client.post(f"/music/{first}/use-release", data={"release_id": cands[0].release_id})
+    j = waiting_rip(conn, config, cands=cands, reasons=("already in the library",), release_id=cands[0].release_id)
+    client.post(f"/music/{j}/file-anyway")
+    dup_key = cd_rips.get(conn, j)["album_key"]
+    assert dup_key != cd_rips.get(conn, first)["album_key"]
+    folder = conn.execute("SELECT folder FROM albums WHERE album_key = ?", (dup_key,)).fetchone()[0]
+    assert folder.endswith(" (2)")
+
+
+def test_discard_only_waiting_rips(music):
+    client, conn, config = music
+    j = waiting_rip(conn, config, tracks=1)
+    client.post(f"/music/{j}/manual", data=_manual_form(1))
+    r = client.post(f"/music/{j}/discard")
+    assert r.status_code == 400
+    assert cd_rips.get(conn, j)["state"] == "filed"
+
+
+def test_double_submit_is_safe(music):
+    client, conn, config = music
+    cands = nevermind_candidates()
+    j = waiting_rip(conn, config, cands=cands)
+    assert cdrip.claim(conn, j) is True  # first request takes it...
+    assert cdrip.claim(conn, j) is False  # ...a second one can't
+    r = client.post(f"/music/{j}/use-release", data={"release_id": cands[0].release_id})
+    assert r.status_code == 400 and "waiting for a look any more" in r.text
+    assert conn.execute("SELECT COUNT(*) FROM albums").fetchone()[0] == 0
+    cdrip.release_claim(conn, j)
+    assert cd_rips.get(conn, j)["state"] == "needs_look"
+
+
+def test_failed_resolve_releases_claim(music):
+    client, conn, config = music
+    j = waiting_rip(conn, config, cands=nevermind_candidates())
+    client.post(f"/music/{j}/use-release", data={"release_id": "not-a-candidate"})
+    assert cd_rips.get(conn, j)["state"] == "needs_look"

@@ -301,4 +301,7 @@ def set_media(
             """,
             (state, disc_type, label, now, drive_id, state, disc_type, label),
         )
+        if state != "disc":
+            # The disc left: the card must not keep showing it ("Already ripped").
+            conn.execute("UPDATE discs SET drive_id = NULL WHERE drive_id = ?", (drive_id,))
     return cur.rowcount == 1

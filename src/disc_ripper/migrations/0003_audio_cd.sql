@@ -16,7 +16,7 @@ CREATE TABLE discs (
 CREATE TABLE cd_rips (
   job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
   disc_id TEXT NOT NULL,
-  state TEXT NOT NULL CHECK (state IN ('ripping','needs_look','filed','discarded')),
+  state TEXT NOT NULL CHECK (state IN ('ripping','needs_look','filing','filed','discarded')),
   reasons TEXT NOT NULL DEFAULT '[]',
   candidates TEXT NOT NULL DEFAULT '[]',
   release_id TEXT,

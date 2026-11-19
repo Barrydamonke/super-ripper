@@ -43,6 +43,7 @@ class MediaMonitor:
         probe_timeout: float = 30.0,
         status_timeout: float = 10.0,
         on_insert: Callable[[str], Awaitable[None]] | None = None,
+        on_present: Callable[[str], Awaitable[None]] | None = None,
     ):
         self.config = config
         self.notifier = notifier
@@ -51,6 +52,7 @@ class MediaMonitor:
         self.probe_timeout = probe_timeout
         self.status_timeout = status_timeout
         self.on_insert = on_insert
+        self.on_present = on_present  # a disc already in at start-up: remember it, don't rip
         self.probe = discprobe.probe
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
@@ -129,6 +131,8 @@ class MediaMonitor:
             await self.notifier.drive_changed(target.drive_id)
         # Only a real insert: the drive was empty, open or spinning up. "unknown → disc"
         # is a read glitch with the same disc still in, and must not start a second rip.
+        if inserted and first and self.on_present:
+            await self.on_present(target.drive_id)
         if inserted and not first and target.previous in _BEFORE_INSERT and self.on_insert:
             await self.on_insert(target.drive_id)
 

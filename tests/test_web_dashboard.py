@@ -296,3 +296,36 @@ def test_card_links_recent_rip_to_music_page(dash):
     html = client.get("/").text
     assert f'href="/music/{j}"' in html
     assert "needs a look" in html
+
+
+def test_rip_again_never_queues_twice(dash):
+    client, conn = dash
+    _audio_disc(client, conn)
+    for _ in range(3):
+        client.post("/dashboard/rip", data={"drive_id": "serial:A", "again": "1"})
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind = 'rip_cd'").fetchone()[0] == 1
+
+
+def test_rip_buttons_disable_themselves(dash):
+    client, conn = dash
+    _audio_disc(client, conn)
+    html = client.get("/").text
+    rip_button = html[html.index('hx-post="/dashboard/rip"') - 200: html.index('hx-post="/dashboard/rip"') + 300]
+    assert 'hx-disabled-elt="this"' in rip_button
+
+
+def test_old_disc_not_shown_after_tray_empties(dash):
+    client, conn = dash
+    old_toc = Toc(first=1, last=5, offsets=(0, 1, 2, 3, 4), leadout=99999, data_tracks=frozenset())
+    old = musicbrainz_disc_id(old_toc)
+    j = jobs.enqueue(conn, "serial:A", "rip_cd", {"disc_id": old}, uses_drive=True, now="t")
+    cd_rips.create(conn, j, old, "t")
+    jobs.start(conn, j, "t")
+    jobs.finish(conn, j, "done", "t")
+    cd_rips.update(conn, j, state="filed", summary="Old Album")
+    cd_rips.remember_disc(conn, old, old_toc.to_json(), 5, "serial:A", "t")
+    drives.set_media(conn, "serial:A", "empty", None, "", "t1")
+    drives.set_media(conn, "serial:A", "disc", "audio", "", "t2")  # a new disc, no insert event yet
+    html = client.get("/").text
+    assert "Already ripped" not in html
+    assert 'hx-post="/dashboard/rip"' in html

@@ -421,7 +421,9 @@ class ResolveError(Exception):
 
 
 def rip_files(rip) -> list[Path]:
-    folder = Path(rip["downloads_path"] or "")
+    if not rip["downloads_path"]:
+        return []
+    folder = Path(rip["downloads_path"])
     return sorted(folder.glob("[0-9][0-9].flac")) if folder.is_dir() else []
 
 
@@ -502,8 +504,29 @@ def file_resolved(conn, job_id: int, plan: AlbumPlan, music_dir: Path, *, allow_
     return folder
 
 
-def discard(conn, job_id: int) -> None:
+def claim(conn, job_id: int) -> bool:
+    """Take a waiting rip for one request (two tabs or a double-click can't both file it)."""
+    with conn:
+        cur = conn.execute(
+            "UPDATE cd_rips SET state = 'filing' WHERE job_id = ? AND state = 'needs_look'", (job_id,)
+        )
+    return cur.rowcount == 1
+
+
+def release_claim(conn, job_id: int) -> None:
+    with conn:
+        conn.execute("UPDATE cd_rips SET state = 'needs_look' WHERE job_id = ? AND state = 'filing'", (job_id,))
+
+
+def discard(conn, job_id: int) -> bool:
+    """Delete a waiting rip's files. False if it isn't waiting (filed, ripping...)."""
+    with conn:
+        cur = conn.execute(
+            "UPDATE cd_rips SET state = 'discarded' WHERE job_id = ? AND state = 'needs_look'", (job_id,)
+        )
+    if cur.rowcount != 1:
+        return False
     rip = cd_rips.get(conn, job_id)
     if rip["downloads_path"]:
         shutil.rmtree(rip["downloads_path"], ignore_errors=True)
-    cd_rips.update(conn, job_id, state="discarded")
+    return True

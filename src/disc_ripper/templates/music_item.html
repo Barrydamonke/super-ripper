@@ -78,8 +78,15 @@
     </select>
   </label>
   <label class="inline">This is disc <input type="text" name="disc" value="{{ form.get('disc', '2') }}" size="2"></label>
-  <p class="hint">Track titles come from the chosen MusicBrainz release if there is one; otherwise fill them in under "Type it in" first.</p>
-  {% for t in tracks %}<input type="hidden" name="title_{{ t.n }}" value="">{% endfor %}
+  <table>
+    <thead><tr><th>#</th><th>Title</th></tr></thead>
+    <tbody>
+    {% for t in tracks %}
+      <tr><td>{{ t.n }}</td><td><input type="text" name="addto_title_{{ t.n }}" value="{{ form.get('addto_title_' ~ t.n, t.title) }}"></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">Leave every title blank to use the chosen MusicBrainz release's titles.</p>
   <button type="submit">Add this disc</button>
 </form>
 {% endif %}

@@ -98,7 +98,10 @@ def file_album(
 
 def _file_album(conn, plan, music_dir, *, cover, now, allow_duplicate_folder) -> Path:
     row = _album_row(conn, plan)
-    if row is not None and not allow_duplicate_folder:
+    disc_number = str(plan.disc or 1)
+    already_filed = row is not None and disc_number in json.loads(row["discs"])
+    if row is not None and not (allow_duplicate_folder and already_filed):
+        # A later disc joins its album; "file anyway" only splits off a real duplicate.
         rel = PurePosixPath(row["folder"])
         album_key = row["album_key"]
     else:
@@ -134,7 +137,7 @@ def _file_album(conn, plan, music_dir, *, cover, now, allow_duplicate_folder) ->
     if cover is not None and cover.is_file() and not (folder / "cover.jpg").exists():
         shutil.copy2(cover, folder / "cover.jpg")
 
-    disc_number = str(plan.disc or 1)
+    plan.album_key = album_key  # the key actually used (a duplicate gets its own)
     with conn:
         existing = conn.execute("SELECT discs FROM albums WHERE album_key = ?", (album_key,)).fetchone()
         if existing is None:

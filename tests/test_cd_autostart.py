@@ -138,3 +138,20 @@ def test_glitch_unknown_to_disc_no_insert(config, svc):
 
     asyncio.run(polls())
     assert inserts == ["serial:A"]  # only the real empty → disc change
+
+
+def test_first_poll_remembers_present_disc(config, svc):
+    async def run():
+        svc.monitor.probe = lambda drive: ("audio", "")
+
+        class D(FakeDrive):
+            def drive_status(self):
+                return "disc"
+
+        svc.drive_factory = lambda path: D(TOC)
+        await svc.monitor.poll_once(first=True)
+        await asyncio.sleep(0.2)
+
+    asyncio.run(run())
+    assert cd_rips.disc_in_drive(svc.conn, "serial:A")["disc_id"] == DISC
+    assert rip_jobs(svc.conn) == []  # no auto-start for a disc that was already in

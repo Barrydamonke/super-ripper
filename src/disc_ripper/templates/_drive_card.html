@@ -24,9 +24,9 @@
     {% if blocking.state == "filed" %}Already ripped (filed as {{ blocking.summary or "an album" }}).
     {% elif blocking.state == "needs_look" %}Already ripped — <a href="/music/{{ blocking.job_id }}">waiting on the Music page</a>.
     {% else %}A rip of this disc is already queued.{% endif %}
-    <button hx-post="/dashboard/rip" hx-vals='{"drive_id": {{ drive.id|tojson }}, "again": "1"}' name="again" value="1" hx-target="#drive-{{ key }}">Rip again</button>
+    <button hx-post="/dashboard/rip" hx-vals='{"drive_id": {{ drive.id|tojson }}, "again": "1"}' name="again" value="1" hx-target="#drive-{{ key }}" hx-disabled-elt="this">Rip again</button>
   {% else %}
-    <button hx-post="/dashboard/rip" hx-vals='{"drive_id": {{ drive.id|tojson }}}' hx-target="#drive-{{ key }}">Rip</button>
+    <button hx-post="/dashboard/rip" hx-vals='{"drive_id": {{ drive.id|tojson }}}' hx-target="#drive-{{ key }}" hx-disabled-elt="this">Rip</button>
   {% endif %}
   </p>
 {% endif %}

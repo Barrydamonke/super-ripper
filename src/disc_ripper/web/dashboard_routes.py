@@ -188,12 +188,8 @@ async def rip_cd(request: Request, drive_id: str = Form(...), again: str = Form(
         toc = await asyncio.to_thread(svc.read_toc, drive_id)
     except OSError as exc:
         return await _card(request, drive_id, error=f"Couldn't read the disc: {exc}", status_code=400)
-    blocking = await asyncio.to_thread(
-        _with_conn, request, cd_rips.blocking_rip_for_disc, musicbrainz_disc_id(toc)
-    )
-    if blocking is not None and not again:
-        return await _card(request, drive_id)  # the card explains and offers Rip again
-    await svc.enqueue_cd_rip(drive_id, toc)
+    # Refused (already queued, or already ripped without "again"): the card explains why.
+    await svc.enqueue_cd_rip(drive_id, toc, again=bool(again))
     return await _card(request, drive_id)
 
 
