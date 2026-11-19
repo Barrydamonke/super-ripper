@@ -69,3 +69,13 @@ def test_no_schedule_busy_if_running(conn):
 def test_queued_job_does_not_hold(conn):
     jobs.enqueue(conn, "serial:A", "test", {}, now="t")
     assert busy.busy_report(conn, GuardState("in_window", END, GRACE_END))["busy"] is False
+
+
+def test_times_reported_in_local_zone(conn, monkeypatch):
+    monkeypatch.setenv("TZ", "Europe/Paris")
+    j = running_job(conn)
+    report = busy.busy_report(conn, GuardState("in_window", END, GRACE_END))
+    assert report["scheduledEnd"] == "2026-11-19T00:00:00+01:00"  # 23:00 UTC
+    assert report["graceEndsAt"] == "2026-11-19T03:00:00+01:00"
+    assert report["jobs"][0]["estimatedFinish"] == "2026-11-19T00:30:00+01:00"
+    assert j

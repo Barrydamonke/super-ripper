@@ -34,5 +34,7 @@ def load_config(env: Mapping[str, str] = os.environ) -> AppConfig:
         sysfs_root=Path(env.get("SYSFS_ROOT", "/sys")),
         dev_root=Path(env.get("DEV_ROOT", "/dev")),
         work_dir=Path(env.get("WORK_DIR", "/work")),
-        busy_secret=env.get("BUSY_SECRET", ""),
+        # Trimmed: a pasted value can pick up a trailing space or newline, which an
+        # HTTP header can't carry, so it could never match.
+        busy_secret=env.get("BUSY_SECRET", "").strip(),
     )
