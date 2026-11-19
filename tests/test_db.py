@@ -103,3 +103,8 @@ def test_migration_0002_from_step1_db(config):
         assert conn.execute("SELECT drive_id FROM jobs").fetchone()[0] == "serial:new"
     finally:
         conn.close()
+
+
+def test_busy_secret_trimmed():
+    # Pasting into the Unraid field can add a trailing space or newline; HTTP headers drop them.
+    assert load_config({"BUSY_SECRET": "  s3cret \n"}).busy_secret == "s3cret"
