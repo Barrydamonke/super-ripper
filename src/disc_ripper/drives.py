@@ -251,11 +251,18 @@ def list_drives(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def update_drive(conn: sqlite3.Connection, drive_id: str, *, label: str, enabled: bool) -> bool:
+READ_OFFSET_MIN = -3000
+READ_OFFSET_MAX = 3000
+
+
+def update_drive(
+    conn: sqlite3.Connection, drive_id: str, *, label: str, enabled: bool, read_offset: int | None = None
+) -> bool:
+    """Update a drive's label and enabled flag, and its read offset when given."""
     with conn:
         cur = conn.execute(
-            "UPDATE drives SET label = ?, enabled = ? WHERE id = ?",
-            (label.strip()[:LABEL_MAX], 1 if enabled else 0, drive_id),
+            "UPDATE drives SET label = ?, enabled = ?, read_offset = COALESCE(?, read_offset) WHERE id = ?",
+            (label.strip()[:LABEL_MAX], 1 if enabled else 0, read_offset, drive_id),
         )
     return cur.rowcount == 1
 

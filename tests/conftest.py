@@ -12,11 +12,15 @@ def config(tmp_path: Path) -> AppConfig:
         sysfs_root=tmp_path / "sys",
         dev_root=tmp_path / "dev",
         work_dir=tmp_path / "work",
+        music_dir=tmp_path / "music",
+        downloads_dir=tmp_path / "downloads",
         run_background=False,
     )
     cfg.sysfs_root.mkdir()
     cfg.dev_root.mkdir()
     cfg.work_dir.mkdir()
+    cfg.music_dir.mkdir()
+    cfg.downloads_dir.mkdir()
     return cfg
 
 

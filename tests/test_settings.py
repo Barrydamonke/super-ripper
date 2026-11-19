@@ -17,6 +17,10 @@ VALID_FORM = {
     "shutdown_grace_hours": "2.5",
     "raw_retention_hours": "24",
     "iso_dir": "/data/ISOs",
+    "cd_rip_mode": "secure",
+    "cd_retries": "10",
+    "cd_approval": "odd_ones",
+    "cd_cover_art": "on",
 }
 
 
@@ -108,3 +112,26 @@ def test_stored_value_above_max_is_clamped(conn):
 def test_url_with_bad_port_rejected():
     with pytest.raises(settings.SettingsError):
         settings.parse_form({**VALID_FORM, "schedule_status_url": "http://backend:30o1/status"})
+
+
+def test_choice_setting():
+    assert settings.parse_form({**VALID_FORM, "cd_rip_mode": "fast"})["cd_rip_mode"] == "fast"
+    with pytest.raises(settings.SettingsError) as exc:
+        settings.parse_form({**VALID_FORM, "cd_rip_mode": "turbo"})
+    assert exc.value.errors["cd_rip_mode"] == "Must be one of: secure, fast."
+
+
+def test_secret_blank_keeps_current():
+    form = {**VALID_FORM, "jellyfin_api_key": ""}
+    assert settings.parse_form(form, current={"jellyfin_api_key": "abc"})["jellyfin_api_key"] == "abc"
+    form = {**VALID_FORM, "jellyfin_api_key": "  new  "}
+    assert settings.parse_form(form, current={"jellyfin_api_key": "abc"})["jellyfin_api_key"] == "new"
+    assert settings.parse_form({**VALID_FORM})["jellyfin_api_key"] == ""
+
+
+def test_cd_defaults(conn):
+    values = settings.get_all(conn)
+    assert (values["cd_rip_mode"], values["cd_retries"], values["cd_approval"], values["cd_cover_art"]) == (
+        "secure", 10, "odd_ones", True,
+    )
+    assert values["jellyfin_url"] == "" and values["jellyfin_api_key"] == ""
