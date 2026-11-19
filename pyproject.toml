@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "disc-ripper"
-version = "0.1.0"
+version = "0.3.0"
 description = "Rip, encode and burn discs from a web UI on Unraid"
 readme = "README.md"
 requires-python = ">=3.12"
