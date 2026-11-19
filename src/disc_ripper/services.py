@@ -293,6 +293,7 @@ class Services:
         conn = db.connect(self.config.db_path)
         try:
             count = jobs.mark_interrupted(conn, utc_now())
+            cd_rips.reconcile(conn, self.config.work_dir)
             cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc))
         finally:
             conn.close()

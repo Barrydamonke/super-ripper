@@ -190,3 +190,24 @@ def test_partial_failure_rolls_back(tmp_path, conn, config, monkeypatch):
     assert all(src.exists() for src, _ in p.tracks)  # everything back where it was
     assert not (config.music_dir / "Pink Floyd" / "The Dark Side of the Moon (1973)").exists()
     assert conn.execute("SELECT COUNT(*) FROM albums").fetchone()[0] == 0
+
+
+def test_refiling_same_disc_number_refused(tmp_path, conn, config):
+    filing.file_album(conn, plan(tmp_path, src="a"), config.music_dir, cover=None, now="t1")
+    again = plan(tmp_path, src="b", titles=("Speak to Me (Remastered)",))
+    with pytest.raises(filing.FileExists):
+        filing.file_album(conn, again, config.music_dir, cover=None, now="t2")
+    assert len(list((config.music_dir / "Pink Floyd" / "The Dark Side of the Moon (1973)").glob("*.flac"))) == 1
+
+
+def test_late_join_by_release_group(tmp_path, conn, config):
+    # Disc 1 was filed (from release A) while disc 2's plan (release B, same group) was being built.
+    filing.file_album(conn, plan(tmp_path, key="A", release="A", group="rg", disc=1, disc_total=2, src="a"),
+                      config.music_dir, cover=None, now="t1")
+    late = plan(tmp_path, key="B", release="B", group="rg", disc=2, disc_total=2, titles=("Two",), src="b",
+                year="1974")
+    late.album_tags["MUSICBRAINZ_ALBUMID"] = "B"
+    folder = filing.file_album(conn, late, config.music_dir, cover=None, now="t2")
+    assert folder.name == "The Dark Side of the Moon (1973)"
+    assert late.album_key == "A"
+    assert tagging.read_tags(folder / "2-01 - Two.flac")["DATE"] == ALBUM_TAGS["DATE"]

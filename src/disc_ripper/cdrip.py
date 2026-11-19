@@ -195,8 +195,7 @@ def decide(
     return reasons
 
 
-_ALBUM_LEVEL = ("ALBUM", "ALBUMARTIST", "DATE", "ORIGINALDATE", "LABEL", "BARCODE", "MUSICBRAINZ_ALBUMID",
-                "MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ_ALBUMARTISTID")
+_ALBUM_LEVEL = filing.ALBUM_LEVEL
 
 
 def filed_groups(conn) -> dict[str, int]:
@@ -276,13 +275,25 @@ def summary_for(album_artist: str, album: str, year: str) -> str:
 
 
 def _move_to_downloads(rip_dir: Path, files: list[Path], dest: Path) -> list[Path]:
-    """Move the ripped files (and the log) out of the work area as NN.flac."""
+    """Move the ripped files (and the log) out of the work area as NN.flac.
+
+    All or nothing: if a move fails, the files already moved go back, so the audio
+    is always in exactly one place."""
     dest.mkdir(parents=True, exist_ok=True)
-    moved = []
-    for n, src in enumerate(files, start=1):
-        target = dest / f"{n:02d}.flac"
-        filing._move(src, target)
-        moved.append(target)
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for n, src in enumerate(files, start=1):
+            target = dest / f"{n:02d}.flac"
+            filing._move(src, target)
+            moved.append((src, target))
+    except BaseException:
+        for src, target in reversed(moved):
+            try:
+                filing._move(target, src)
+            except OSError:
+                pass
+        raise
+    moved = [target for _src, target in moved]
     for log_file in rip_dir.glob("*.log"):
         filing._move(log_file, dest / "rip.log")
         break
@@ -298,10 +309,17 @@ async def after_rip(ctx, *, disc_id: str, toc: Toc, checks: list[TrackCheck], ri
     files_by_track = cyanrip.track_files(rip_dir)
     files = [files_by_track[t] for t in toc.audio_tracks]
     dest = ctx.config.downloads_dir / str(ctx.job_id)
-    files = await asyncio.to_thread(_move_to_downloads, rip_dir, files, dest)
-    shutil.rmtree(rip_dir.parent, ignore_errors=True)  # the work folder is done with
-    await ctx.db(cd_rips.update, ctx.job_id, downloads_path=str(dest),
+    # Record where the audio is at every moment: a stop or a failed move must never leave
+    # the Music page looking in the wrong place.
+    await ctx.db(cd_rips.update, ctx.job_id, downloads_path=str(rip_dir),
                  summary=f"Unknown album · {len(files)} tracks")
+    try:
+        files = await asyncio.to_thread(_move_to_downloads, rip_dir, files, dest)
+    except Exception:
+        log.exception("cdrip: #%s: moving the rip to %s failed; it stays in %s", ctx.job_id, dest, rip_dir)
+        raise
+    await ctx.db(cd_rips.update, ctx.job_id, downloads_path=str(dest))
+    shutil.rmtree(rip_dir.parent, ignore_errors=True)  # the work folder is done with
     await _identify(ctx, disc_id=disc_id, files=files, dest=dest, checks=checks)
 
 
@@ -421,10 +439,11 @@ class ResolveError(Exception):
 
 
 def rip_files(rip) -> list[Path]:
+    """The rip's audio, in track order: NN.flac in downloads, or cyanrip's names in /work."""
     if not rip["downloads_path"]:
         return []
     folder = Path(rip["downloads_path"])
-    return sorted(folder.glob("[0-9][0-9].flac")) if folder.is_dir() else []
+    return list(cyanrip.track_files(folder).values()) if folder.is_dir() else []
 
 
 def stored_candidates(rip) -> list[Candidate]:

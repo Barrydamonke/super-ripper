@@ -52,7 +52,8 @@ def blocking_rip_for_disc(conn: sqlite3.Connection, disc_id: str) -> sqlite3.Row
         """
         SELECT cd_rips.*, jobs.state AS job_state FROM cd_rips JOIN jobs ON jobs.id = cd_rips.job_id
         WHERE cd_rips.disc_id = ?
-          AND (cd_rips.state IN ('needs_look', 'filed') OR jobs.state IN ('queued', 'waiting_space', 'running'))
+          AND (cd_rips.state IN ('needs_look', 'filing', 'filed')
+               OR jobs.state IN ('queued', 'waiting_space', 'running'))
         ORDER BY cd_rips.job_id DESC LIMIT 1
         """,
         (disc_id,),
@@ -70,6 +71,39 @@ def earlier_unfinished(conn: sqlite3.Connection, disc_id: str, job_id: int) -> l
         (disc_id, job_id),
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def reconcile(conn: sqlite3.Connection, work_dir) -> int:
+    """After a hard stop: put rips caught mid-way back on the Music page. Run before workers start."""
+    from pathlib import Path
+
+    changed = 0
+    with conn:
+        cur = conn.execute(
+            "UPDATE cd_rips SET state = 'needs_look', reasons = ? WHERE state = 'filing'",
+            (json.dumps(["filing was interrupted — check the album's library folder, then try again"]),),
+        )
+        changed += cur.rowcount
+        rows = conn.execute(
+            """
+            SELECT cd_rips.job_id, cd_rips.downloads_path FROM cd_rips JOIN jobs ON jobs.id = cd_rips.job_id
+            WHERE cd_rips.state = 'ripping' AND jobs.state NOT IN ('queued', 'waiting_space', 'running')
+            """
+        ).fetchall()
+        for row in rows:
+            path = row["downloads_path"]
+            work_rip = Path(work_dir) / str(row["job_id"]) / "rip"
+            if not path and any(work_rip.glob("*.flac")):
+                path = str(work_rip)
+            if not path or not any(Path(path).glob("*.flac")):
+                continue  # the rip itself never finished: the job's Retry covers it
+            conn.execute(
+                "UPDATE cd_rips SET state = 'needs_look', downloads_path = ?, reasons = ? WHERE job_id = ?",
+                (path, json.dumps(["identification was interrupted — choose the release or type the details in"]),
+                 row["job_id"]),
+            )
+            changed += 1
+    return changed
 
 
 def needs_look(conn: sqlite3.Connection) -> list[sqlite3.Row]:

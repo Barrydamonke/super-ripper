@@ -11,7 +11,7 @@ Current state: **step 3 (audio CD ripping)**, on top of step 2 (detection, queue
   - Anything that needs a decision waits on the **Music** page: no match, several possible releases, unverified tracks, or an album you already have.
 - **Shutdown guard:** reads the Pi's power schedule and tells unraid-backend, through `/api/busy`, to wait while a job runs, for at most the grace period after the scheduled end.
 
-Ripping comes in later steps.
+DVD, Blu-ray and data-disc ripping come in later steps.
 
 ## Install on Unraid
 
@@ -70,7 +70,7 @@ Music/Various Artists/<Album> (<Year>)/01 - <Artist> - <Title>.flac (compilation
 2. **An obscure or scratched CD.** It goes to Music → Needs a look. Fix it with a release, a MusicBrainz link, or by typing the details in.
 3. **A 2-CD set.** Rip disc 1, then disc 2: both land in one folder.
 4. **Re-insert a filed CD.** The card says "Already ripped" and offers Rip again.
-5. **Cancel a rip midway,** and **restart the container mid-rip.** The job shows interrupted, and Retry works with the same disc.
+5. **Cancel a rip midway** (the job shows cancelled), and **restart the container mid-rip** (it shows interrupted). Retry works with the same disc still in.
 6. **Send me the first real rip's output.** I need it to confirm the progress and AccurateRip parsing against cyanrip's real output; the test copies are reconstructed from its source code.
    - The log: `docker exec disc-ripper sh -c 'cat /data/downloads/disc-ripper/*/rip.log'`, or the album's waiting folder.
    - The container log lines from that rip.

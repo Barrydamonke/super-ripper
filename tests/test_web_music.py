@@ -300,3 +300,12 @@ def test_failed_resolve_releases_claim(music):
     j = waiting_rip(conn, config, cands=nevermind_candidates())
     client.post(f"/music/{j}/use-release", data={"release_id": "not-a-candidate"})
     assert cd_rips.get(conn, j)["state"] == "needs_look"
+
+
+def test_resolve_refuses_rip_without_files(music):
+    client, conn, config = music
+    j = waiting_rip(conn, config, tracks=0)
+    r = client.post(f"/music/{j}/manual", data=_manual_form(0))
+    assert r.status_code == 400
+    assert conn.execute("SELECT COUNT(*) FROM albums").fetchone()[0] == 0
+    assert cd_rips.get(conn, j)["state"] == "needs_look"

@@ -120,7 +120,10 @@ async def _resolve(request: Request, job_id: int, make_plan, *, allow_duplicate=
         if not cdrip.claim(conn, job_id):
             raise cdrip.ResolveError("This rip isn't waiting for a look any more.")
         try:
-            plan = make_plan(conn, cd_rips.get(conn, job_id))
+            rip = cd_rips.get(conn, job_id)
+            if not cdrip.rip_files(rip):
+                raise cdrip.ResolveError("No ripped audio was found for this rip, so there is nothing to file.")
+            plan = make_plan(conn, rip)
             return cdrip.file_resolved(conn, job_id, plan, request.app.state.config.music_dir,
                                        allow_duplicate=allow_duplicate)
         except BaseException:

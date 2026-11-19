@@ -148,3 +148,35 @@ def test_start_sweeps_old_work_folders(config, add_sg, monkeypatch):
 
     asyncio.run(main())
     assert calls == [config.work_dir]
+
+
+def test_start_reconciles_interrupted_cd_rips(config, add_sg):
+    import asyncio
+
+    from disc_ripper import cd_rips
+
+    from .conftest import make_flac
+
+    conn = _prepare(config, add_sg)
+    filing_job = jobs.enqueue(conn, "serial:A", "rip_cd", {}, now="t")
+    cd_rips.create(conn, filing_job, "d1", "t")
+    cd_rips.update(conn, filing_job, state="filing")
+    ident_job = jobs.enqueue(conn, "serial:A", "rip_cd", {}, now="t")
+    jobs.start(conn, ident_job, "t")  # killed while identifying
+    cd_rips.create(conn, ident_job, "d2", "t")
+    dest = config.downloads_dir / str(ident_job)
+    make_flac(dest / "01.flac")
+    cd_rips.update(conn, ident_job, downloads_path=str(dest))
+    assert cd_rips.blocking_rip_for_disc(conn, "d1") is not None  # 'filing' blocks re-rips
+
+    svc = services.Services(config)
+
+    async def main():
+        await svc.start()
+        await svc.stop()
+
+    asyncio.run(main())
+    assert cd_rips.get(conn, filing_job)["state"] == "needs_look"
+    row = cd_rips.get(conn, ident_job)
+    assert row["state"] == "needs_look" and "interrupted" in row["reasons"]
+    conn.close()

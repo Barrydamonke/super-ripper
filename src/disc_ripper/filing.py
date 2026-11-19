@@ -19,6 +19,10 @@ from pathlib import Path, PurePosixPath
 from . import library, tagging
 
 
+# Album-level tags: when a disc joins an album, these come from the album already filed.
+ALBUM_LEVEL = ("ALBUM", "ALBUMARTIST", "DATE", "ORIGINALDATE", "LABEL", "BARCODE", "MUSICBRAINZ_ALBUMID",
+               "MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ_ALBUMARTISTID")
+
 # Two drives can finish discs of the same album together: filing is one at a time.
 _FILING_LOCK = threading.Lock()
 
@@ -98,8 +102,24 @@ def file_album(
 
 def _file_album(conn, plan, music_dir, *, cover, now, allow_duplicate_folder) -> Path:
     row = _album_row(conn, plan)
+    if row is None and plan.release_group_id:
+        # Another drive may have filed a different pressing of this album since the plan
+        # was built: join it (same release group, same number of discs) rather than split.
+        row = conn.execute(
+            "SELECT * FROM albums WHERE release_group_id = ? AND disc_total = ? ORDER BY filed_at LIMIT 1",
+            (plan.release_group_id, plan.disc_total),
+        ).fetchone()
+        if row is not None:
+            album_tags = json.loads(row["album_tags"])
+            shared = {k: v for k, v in album_tags.items() if k in ALBUM_LEVEL}
+            for _src, tags in plan.tracks:
+                tags.update(shared)
+            plan.album_tags = album_tags
     disc_number = str(plan.disc or 1)
     already_filed = row is not None and disc_number in json.loads(row["discs"])
+    if already_filed and not allow_duplicate_folder:
+        # Never a second copy of a disc inside one album (e.g. another pressing's titles).
+        raise FileExists(f"Disc {disc_number} of this album is already in the library.")
     if row is not None and not (allow_duplicate_folder and already_filed):
         # A later disc joins its album; "file anyway" only splits off a real duplicate.
         rel = PurePosixPath(row["folder"])

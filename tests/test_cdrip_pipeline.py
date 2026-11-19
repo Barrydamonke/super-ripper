@@ -354,3 +354,33 @@ def test_cover_fetch_http_exception_is_none():
         raise http.client.IncompleteRead(b"")
 
     assert coverart.fetch_front("abc", fetch=fetch) is None
+
+
+# --- final review fixes ----------------------------------------------------------------
+
+
+def test_move_failure_keeps_files_visible(config, conn, monkeypatch):
+    from disc_ripper import filing as filing_mod
+
+    real = filing_mod._move
+    calls = []
+
+    def flaky(src, dst):
+        calls.append(src)
+        if len(calls) == 3:
+            raise PermissionError(13, "Permission denied")
+        real(src, dst)
+
+    monkeypatch.setattr(filing_mod, "_move", flaky)
+    job_id = jobs.enqueue(conn, "serial:A", "rip_cd", {}, uses_drive=True, now="t")
+    cd_rips.create(conn, job_id, NEVERMIND, "t")
+    rip_dir = config.work_dir / str(job_id) / "rip"
+    for n in range(1, 13):
+        make_flac(rip_dir / f"{n:02d}.flac")
+    toc = Toc(1, 12, tuple(range(0, 12000, 1000)), 12000, frozenset())
+    ctx = Ctx(config, FakeServices(FakeMB(releases("pressings"))), job_id)
+    with pytest.raises(PermissionError):
+        asyncio.run(cdrip.after_rip(ctx, disc_id=NEVERMIND, toc=toc, checks=[], rip_dir=rip_dir))
+    row = cd_rips.get(conn, job_id)
+    assert row["downloads_path"] == str(rip_dir)  # where the audio actually is
+    assert len(cdrip.rip_files(row)) == 12  # moved files were put back
