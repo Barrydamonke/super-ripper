@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Disc Ripper{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<div hx-ext="sse" sse-connect="/events">
+  <div id="guard" sse-swap="guard">{{ guard_html|safe }}</div>
+  {% for card in cards %}
+    <section class="drive-card">
+      <div id="drive-{{ card.key }}" sse-swap="drive-{{ card.key }}">{{ card.html|safe }}</div>
+      {% include "_test_job_form.html" %}
+    </section>
+  {% else %}
+    <p>No enabled drives. Check the <a href="/drives">Drives</a> page.</p>
+  {% endfor %}
+</div>
+{% endblock %}

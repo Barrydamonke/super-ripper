@@ -5,6 +5,7 @@ Run with: uvicorn disc_ripper.app:create_app --factory
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -15,11 +16,12 @@ from fastapi.staticfiles import StaticFiles
 from . import auth, db, drives
 from .clock import utc_now
 from .config import AppConfig, load_config
-from .web import auth_routes, drive_routes, settings_routes
+from .services import Services
+from .web import auth_routes, dashboard_routes, drive_routes, settings_routes
 from .web.deps import is_htmx
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_OPEN_PATHS = {"/healthz"}
+_OPEN_PATHS = {"/healthz", "/api/busy"}  # /api/busy has its own secret
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
@@ -92,8 +94,21 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     finally:
         conn.close()
 
-    app = FastAPI(title="Disc Ripper", docs_url=None, redoc_url=None, openapi_url=None)
+    services = Services(config)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if config.run_background:
+            await services.start()
+        try:
+            yield
+        finally:
+            if config.run_background:
+                await services.stop()
+
+    app = FastAPI(title="Disc Ripper", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.config = config
+    app.state.services = services
     app.state.sessions = auth.SessionManager(auth.load_or_create_secret(config.secret_key_path))
 
     async def _guarded(request: Request, call_next) -> Response:
@@ -119,12 +134,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def healthz():
         return {"status": "ok"}
 
-    @app.get("/")
-    def root():
-        return RedirectResponse("/drives", status_code=303)
-
     app.mount("/static", StaticFiles(directory=str(_PACKAGE_DIR / "static")), name="static")
     app.include_router(auth_routes.router)
+    app.include_router(dashboard_routes.router)
     app.include_router(drive_routes.router)
     app.include_router(settings_routes.router)
     return app

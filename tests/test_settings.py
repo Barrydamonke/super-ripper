@@ -66,3 +66,45 @@ def test_internal_keys_hidden(conn):
     assert "internal.x" not in settings.get_all(conn)
     with pytest.raises(ValueError):
         settings.set_internal(conn, "x", 1)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("", ""), ("  ", ""), ("http://10.0.0.5:3001/status", "http://10.0.0.5:3001/status"),
+     (" https://pi.local:8090/schedule ", "https://pi.local:8090/schedule")],
+)
+def test_url_setting_valid(raw, expected):
+    assert settings.parse_form({**VALID_FORM, "schedule_status_url": raw})["schedule_status_url"] == expected
+
+
+@pytest.mark.parametrize("raw", ["ftp://x", "10.0.0.5:3001", "http://", "http://a b"])
+def test_url_setting_invalid(raw):
+    with pytest.raises(settings.SettingsError) as exc:
+        settings.parse_form({**VALID_FORM, "schedule_pi_url": raw})
+    assert exc.value.errors == {"schedule_pi_url": "Must be blank or an http:// or https:// URL."}
+
+
+def test_schedule_urls_default_blank(conn):
+    values = settings.get_all(conn)
+    assert values["schedule_status_url"] == ""
+    assert values["schedule_pi_url"] == ""
+
+
+def test_grace_max():
+    assert settings.parse_form({**VALID_FORM, "shutdown_grace_hours": "3.5"})["shutdown_grace_hours"] == 3.5
+    with pytest.raises(settings.SettingsError) as exc:
+        settings.parse_form({**VALID_FORM, "shutdown_grace_hours": "4"})
+    assert exc.value.errors["shutdown_grace_hours"] == "Must be at most 3.5."
+
+
+def test_stored_value_above_max_is_clamped(conn):
+    # Step 1 allowed a grace of up to 11 h; the guard must never exceed 3.5 h.
+    conn.execute("INSERT INTO settings (key, value) VALUES ('shutdown_grace_hours', '8')")
+    conn.commit()
+    assert settings.get(conn, "shutdown_grace_hours") == 3.5
+    assert settings.get_all(conn)["shutdown_grace_hours"] == 3.5
+
+
+def test_url_with_bad_port_rejected():
+    with pytest.raises(settings.SettingsError):
+        settings.parse_form({**VALID_FORM, "schedule_status_url": "http://backend:30o1/status"})

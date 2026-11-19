@@ -1,0 +1,221 @@
+import asyncio
+import errno
+import json
+
+import pytest
+
+from disc_ripper import db, drives, jobs, services
+from disc_ripper.web import dashboard_routes
+
+SERIAL = b"\x05\x80\x00\x01A"
+KEY = services.drive_key("serial:A")
+
+
+@pytest.fixture
+def dash(logged_in_client, config, add_sg):
+    add_sg(config.sysfs_root, 1, sr=0, vpd_serial=SERIAL)
+    assert logged_in_client.post("/drives/rescan").status_code == 200
+    conn = db.connect(config.db_path)
+    yield logged_in_client, conn
+    conn.close()
+
+
+class FakeDrive:
+    def __init__(self, error=None):
+        self.error = error
+        self.ejected = 0
+
+    def eject(self):
+        if self.error:
+            raise self.error
+        self.ejected += 1
+
+    def close_tray(self):
+        pass
+
+
+def test_root_is_dashboard(dash):
+    client, _ = dash
+    r = client.get("/")
+    assert r.status_code == 200
+    assert 'sse-connect="/events"' in r.text
+    assert f'id="drive-{KEY}"' in r.text
+    assert f'sse-swap="drive-{KEY}"' in r.text
+    assert 'sse-swap="guard"' in r.text
+    assert "/static/htmx-ext-sse.js" in r.text
+    assert "No schedule could be read" in r.text
+
+
+def test_dashboard_shows_media(dash):
+    client, conn = dash
+    drives.set_media(conn, "serial:A", "disc", "bluray", "THE_MATRIX", "t")
+    r = client.get("/")
+    assert "Disc in" in r.text and "Blu-ray" in r.text and "THE_MATRIX" in r.text
+
+
+def test_dashboard_escapes_label(dash):
+    client, conn = dash
+    drives.set_media(conn, "serial:A", "disc", "data", "<script>x</script>", "t")
+    r = client.get("/")
+    assert "&lt;script&gt;x" in r.text
+    assert "<script>x" not in r.text
+
+
+def test_disabled_drive_not_on_dashboard(dash):
+    client, conn = dash
+    drives.update_drive(conn, "serial:A", label="", enabled=False)
+    assert f'id="drive-{KEY}"' not in client.get("/").text
+
+
+def test_queue_test_job(dash):
+    client, conn = dash
+    r = client.post("/jobs/test", data={"drive_id": "serial:A", "minutes": "20", "size_gb": "0"})
+    assert r.status_code == 200
+    assert "Queued" in r.text
+    assert "<html" not in r.text
+    [row] = conn.execute("SELECT * FROM jobs").fetchall()
+    assert json.loads(row["params"]) == {"duration_s": 1200, "size_gb": 0.0}
+    assert (row["kind"], row["needs_bytes"], row["uses_drive"]) == ("test", 0, 0)
+
+
+def test_queue_test_job_size(dash):
+    client, conn = dash
+    client.post("/jobs/test", data={"drive_id": "serial:A", "minutes": "5", "size_gb": "12.5"})
+    assert conn.execute("SELECT needs_bytes FROM jobs").fetchone()[0] == 12_500_000_000
+
+
+@pytest.mark.parametrize(
+    "minutes,size",
+    [("0", "0"), ("361", "0"), ("x", "0"), ("20", "-1"), ("20", "501"), ("20", "nan")],
+)
+def test_queue_test_job_validation(dash, minutes, size):
+    client, conn = dash
+    r = client.post("/jobs/test", data={"drive_id": "serial:A", "minutes": minutes, "size_gb": size})
+    assert r.status_code == 400
+    assert 'class="error"' in r.text
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_queue_test_job_unknown_drive(dash):
+    client, _ = dash
+    r = client.post("/jobs/test", data={"drive_id": "serial:nope", "minutes": "5", "size_gb": "0"})
+    assert r.status_code == 404
+
+
+def test_cancel_and_retry_routes(dash):
+    client, conn = dash
+    j = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 60, "size_gb": 0}, now="t")
+    r = client.post(f"/jobs/{j}/cancel")
+    assert r.status_code == 200
+    assert jobs.get(conn, j)["state"] == "cancelled"
+    assert "Retry" in r.text
+    r = client.post(f"/jobs/{j}/retry")
+    assert r.status_code == 200
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE state = 'queued'").fetchone()[0] == 1
+    assert client.post("/jobs/9999/cancel").status_code == 404
+
+
+def test_eject(dash):
+    client, _ = dash
+    fake = FakeDrive()
+    client.app.state.services.drive_factory = lambda path: fake
+    r = client.post("/dashboard/eject", data={"drive_id": "serial:A"})
+    assert r.status_code == 200
+    assert fake.ejected == 1
+
+
+def test_eject_error_shown(dash):
+    client, _ = dash
+    fake = FakeDrive(OSError(errno.EBUSY, "Device or resource busy"))
+    client.app.state.services.drive_factory = lambda path: fake
+    r = client.post("/dashboard/eject", data={"drive_id": "serial:A"})
+    assert "Eject failed: Device or resource busy" in r.text
+
+
+def test_busy_endpoint_unset_secret(client):
+    r = client.get("/api/busy", headers={"X-Shutdown-Secret": "anything"})
+    assert r.status_code == 503
+    assert r.json() == {"error": "BUSY_SECRET not set"}
+
+
+def test_busy_endpoint_auth(config):
+    from dataclasses import replace
+
+    from fastapi.testclient import TestClient
+
+    from disc_ripper.app import create_app
+
+    with TestClient(create_app(replace(config, busy_secret="s3cret")), follow_redirects=False) as c:
+        assert c.get("/api/busy").status_code == 401
+        assert c.get("/api/busy", headers={"X-Shutdown-Secret": "wrong"}).status_code == 401
+        r = c.get("/api/busy", headers={"X-Shutdown-Secret": "s3cret"})
+        assert r.status_code == 200  # no login cookie needed
+        assert r.json()["busy"] is False
+        assert r.json()["phase"] == "no_schedule"
+
+
+def test_events_requires_login(client):
+    r = client.get("/events")
+    assert r.status_code == 303
+
+
+def test_event_stream_initial_burst(dash):
+    client, _ = dash
+    svc = client.app.state.services
+
+    class FakeRequest:
+        async def is_disconnected(self):
+            return True
+
+    async def main():
+        chunks = []
+        async for chunk in dashboard_routes.event_stream(svc, FakeRequest()):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(main())
+    assert chunks[0].startswith("event: guard\n")
+    assert chunks[1].startswith(f"event: drive-{KEY}\n")
+    assert len(chunks) == 2
+    assert svc.broker.subscriber_count == 0
+
+
+def test_event_stream_forwards_and_pings(dash, monkeypatch):
+    client, _ = dash
+    svc = client.app.state.services
+    monkeypatch.setattr(dashboard_routes, "KEEPALIVE_SECONDS", 0.05)
+
+    class FakeRequest:
+        calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 4
+
+    async def main():
+        chunks = []
+        stream = dashboard_routes.event_stream(svc, FakeRequest())
+        async for chunk in stream:
+            chunks.append(chunk)
+            if len(chunks) == 2:
+                svc.broker.publish("guard", "<p>new</p>")
+        return chunks
+
+    chunks = asyncio.run(main())
+    assert "event: guard\ndata: <p>new</p>\n\n" in chunks
+    assert ": ping\n\n" in chunks
+
+
+def test_live_card_does_not_contain_the_form(dash):
+    # The card is replaced every second while a job runs; a form inside it would reset as you type.
+    client, conn = dash
+    row = conn.execute("SELECT * FROM drives WHERE id = 'serial:A'").fetchone()
+    from datetime import datetime
+
+    html = dashboard_routes.render_drive_card(conn, row, datetime.now().astimezone())
+    assert 'name="minutes"' not in html
+    page = client.get("/").text
+    assert page.count('name="minutes"') == 1
+    form_at = page.index('name="minutes"')
+    wrapper_end = page.index("</div>", page.index(f'sse-swap="drive-{KEY}"'))
+    assert form_at > wrapper_end

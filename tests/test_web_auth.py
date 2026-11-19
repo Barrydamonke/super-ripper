@@ -90,10 +90,10 @@ def test_forged_cookie_rejected(client):
     assert client.get("/drives").status_code == 303
 
 
-def test_root_redirects_to_drives(logged_in_client):
+def test_root_is_dashboard_when_logged_in(logged_in_client):
     r = logged_in_client.get("/")
-    assert r.status_code == 303
-    assert r.headers["location"] == "/drives"
+    assert r.status_code == 200
+    assert "Dashboard" in r.text
 
 
 def test_logout(logged_in_client):

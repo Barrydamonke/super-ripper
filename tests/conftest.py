@@ -11,9 +11,12 @@ def config(tmp_path: Path) -> AppConfig:
         config_dir=tmp_path / "config",
         sysfs_root=tmp_path / "sys",
         dev_root=tmp_path / "dev",
+        work_dir=tmp_path / "work",
+        run_background=False,
     )
     cfg.sysfs_root.mkdir()
     cfg.dev_root.mkdir()
+    cfg.work_dir.mkdir()
     return cfg
 
 

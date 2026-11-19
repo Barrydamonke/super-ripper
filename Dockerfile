@@ -2,8 +2,9 @@ FROM python:3.12-slim-bookworm
 
 # tzdata: schedule times are Pi local time (set TZ in the template).
 # util-linux provides setpriv, used to drop from root to PUID:PGID.
+# tini runs as PID 1 so child processes get signals and are reaped.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata util-linux \
+    && apt-get install -y --no-install-recommends tzdata util-linux tini \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \
@@ -27,4 +28,4 @@ VOLUME ["/config"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('PORT', '8580'), timeout=3)"
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]

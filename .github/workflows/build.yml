@@ -50,7 +50,10 @@ jobs:
             sleep 1
           done
           curl -fsS http://localhost:8580/healthz
-          test "$(docker exec smoke sh -c "awk '/^Uid:/{print \$2}' /proc/1/status")" = "99"
+          # PID 1 is tini (root, only forwards signals); the app is its child and must run as 99.
+          test "$(docker exec smoke cat /proc/1/comm)" = "tini"
+          app_pid=$(docker exec smoke cat /proc/1/task/1/children | awk '{print $1}')
+          test "$(docker exec smoke awk '/^Uid:/{print $2}' /proc/$app_pid/status)" = "99"
           docker logs smoke
           docker rm -f smoke
 

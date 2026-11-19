@@ -13,6 +13,11 @@ class AppConfig:
     config_dir: Path
     sysfs_root: Path
     dev_root: Path
+    work_dir: Path = Path("/work")
+    # Shared with unraid-backend for GET /api/busy; blank disables the endpoint.
+    busy_secret: str = ""
+    # Drive poller, job workers and schedule refresher. Tests turn them off.
+    run_background: bool = True
 
     @property
     def db_path(self) -> Path:
@@ -28,4 +33,6 @@ def load_config(env: Mapping[str, str] = os.environ) -> AppConfig:
         config_dir=Path(env.get("CONFIG_DIR", "/config")),
         sysfs_root=Path(env.get("SYSFS_ROOT", "/sys")),
         dev_root=Path(env.get("DEV_ROOT", "/dev")),
+        work_dir=Path(env.get("WORK_DIR", "/work")),
+        busy_secret=env.get("BUSY_SECRET", ""),
     )

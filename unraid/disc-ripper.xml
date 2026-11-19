@@ -17,6 +17,7 @@
   <Config Name="Data" Target="/data" Default="/mnt/user/Barry-server" Mode="rw" Description="The Barry-server share, mounted as /data like in Radarr, Sonarr and Jellyfin" Type="Path" Display="always" Required="true">/mnt/user/Barry-server</Config>
   <Config Name="Work area" Target="/work" Default="/mnt/user/disc-ripper-work" Mode="rw" Description="Cache-only exclusive share for in-progress rips and encodes" Type="Path" Display="always" Required="true">/mnt/user/disc-ripper-work</Config>
   <Config Name="TZ" Target="TZ" Default="Europe/London" Mode="" Description="Time zone; must match the Raspberry Pi's clock" Type="Variable" Display="always" Required="true">Europe/London</Config>
+  <Config Name="Busy secret" Target="BUSY_SECRET" Default="" Mode="" Description="Shared secret unraid-backend sends to /api/busy (X-Shutdown-Secret). Use a long random string; blank turns /api/busy off." Type="Variable" Display="always" Required="false" Mask="true"></Config>
   <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User the app runs as" Type="Variable" Display="advanced" Required="true">99</Config>
   <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group the app runs as; also owns the drive device nodes" Type="Variable" Display="advanced" Required="true">100</Config>
 </Container>

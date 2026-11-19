@@ -1,0 +1,54 @@
+{%- set states = {"empty": "Empty", "tray_open": "Tray open", "not_ready": "Not ready", "disc": "Disc in", "unknown": "Unknown"} -%}
+{%- set types = {"audio": "Audio CD", "dvd": "DVD", "bluray": "Blu-ray", "data": "Data disc", "mixed": "Enhanced CD", "unknown": "Unknown type"} -%}
+<div class="card-head">
+  <h2>{{ drive.label or drive.model }}</h2>
+  <span class="hint">{{ drive.vendor }} {{ drive.model }}</span>
+  <span class="actions">
+    <button hx-post="/dashboard/eject" hx-vals='{"drive_id": {{ drive.id|tojson }}}' hx-target="#drive-{{ key }}">
+      {%- if jobs.running and jobs.running.uses_drive %}Cancel job and eject{% else %}Eject{% endif -%}
+    </button>
+    <button hx-post="/dashboard/close" hx-vals='{"drive_id": {{ drive.id|tojson }}}' hx-target="#drive-{{ key }}">Close tray</button>
+  </span>
+</div>
+<p>
+  <strong>{{ states.get(drive.media_state, "Unknown") }}</strong>
+  {%- if drive.media_state == "disc" %} · {{ types.get(drive.disc_type, "Unknown type") }}
+    {%- if drive.disc_label %} · "{{ drive.disc_label }}"{% endif %}
+  {%- endif %}
+</p>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+{% if jobs.running %}
+  {%- set job = jobs.running %}
+  <div class="job">
+    Running: {{ job.kind }} job #{{ job.id }}
+    <progress max="1" value="{{ job.progress }}"></progress> {{ (job.progress * 100)|round|int }}%
+    {% if job.estimated_finish %}finishes ~{{ job.estimated_finish|hm }}{% endif %}
+    <button hx-post="/jobs/{{ job.id }}/cancel" hx-target="#drive-{{ key }}">Cancel</button>
+    {% if job.message %}<div class="hint">{{ job.message }}</div>{% endif %}
+    {% if running_past_grace %}<div class="error">Expected to finish after the grace period ends ({{ guard.grace_ends_at|hm }}).</div>{% endif %}
+  </div>
+{% endif %}
+
+{% for job in jobs.queued %}
+  {%- set params = job.params|fromjson %}
+  <div class="job">
+    {% if job.state == "waiting_space" %}Waiting{% else %}Queued{% endif %}: {{ job.kind }} job #{{ job.id }}
+    {%- if job.kind == "test" %} ({{ (params.get("duration_s", 0) // 60) }} min, {{ params.get("size_gb", 0) }} GB){% endif %}
+    <button hx-post="/jobs/{{ job.id }}/cancel" hx-target="#drive-{{ key }}">Cancel</button>
+    {% if job.message %}<div class="hint">{{ job.message }}</div>{% endif %}
+  </div>
+{% endfor %}
+
+{% if jobs.recent %}
+  <div class="hint">Recent:
+  {% for job in jobs.recent %}
+    #{{ job.id }} {{ job.state }}{% if job.error %} ({{ job.error }}){% endif %}
+    {%- if job.state in ("interrupted", "failed", "cancelled") %}
+      <button hx-post="/jobs/{{ job.id }}/retry" hx-target="#drive-{{ key }}">Retry</button>
+    {%- endif %}{% if not loop.last %} ·{% endif %}
+  {% endfor %}
+  </div>
+{% endif %}
+
+{% if new_job_past_grace %}<p class="error">A {{ default_minutes }}-minute test job would finish after the grace period ends ({{ guard.grace_ends_at|hm }}).</p>{% endif %}
