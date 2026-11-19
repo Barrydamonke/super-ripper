@@ -10,10 +10,12 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-from . import cdrip, db, drives, jobs, schedule_source  # cdrip registers the rip_cd job
+from . import cdrip, coverart, db, drives, jobs, schedule_source, settings  # cdrip registers rip_cd
+from .jellyfin import Jellyfin, RefreshDebouncer
+from .musicbrainz import MusicBrainz
 from .cdrom import CdDrive
 from .clock import utc_now
 from .config import AppConfig
@@ -58,9 +60,21 @@ class Services:
         # Indirect, so drive_factory can be swapped after construction (tests).
         self.monitor = MediaMonitor(config, self, drive_factory=lambda path: self.drive_factory(path))
         self.runner = JobRunner(config, self, self.space, services=self)
+        self.musicbrainz = MusicBrainz()
+        self.refresher = RefreshDebouncer(self.jellyfin)
+        self.cover_fetch = coverart.fetch_front
         self._tasks: list[asyncio.Task] = []
         self._loop: asyncio.AbstractEventLoop | None = None
         self._schedule_error: str | None = None
+
+    def jellyfin(self) -> Jellyfin | None:
+        """A Jellyfin client from the current settings, or None if not configured."""
+        conn = db.connect(self.config.db_path)
+        try:
+            url, key = settings.get(conn, "jellyfin_url"), settings.get(conn, "jellyfin_api_key")
+        finally:
+            conn.close()
+        return Jellyfin(url, key) if url and key else None
 
     # -- Notifier ------------------------------------------------------------
 
@@ -162,6 +176,7 @@ class Services:
         conn = db.connect(self.config.db_path)
         try:
             count = jobs.mark_interrupted(conn, utc_now())
+            cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc))
         finally:
             conn.close()
         if count:

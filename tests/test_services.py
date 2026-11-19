@@ -112,3 +112,39 @@ def test_services_register_cd_rip_job(config):
     assert "rip_cd" in svc.runner.handlers
     assert svc.runner.services is svc
     assert runner.HANDLERS is svc.runner.handlers
+
+
+def test_services_cd_helpers(config):
+    from disc_ripper import db, jellyfin, musicbrainz, settings
+
+    conn = db.connect(config.db_path)
+    db.migrate(conn)
+    svc = services.Services(config)
+    assert isinstance(svc.musicbrainz, musicbrainz.MusicBrainz)
+    assert svc.jellyfin() is None  # not configured
+    try:
+        settings.save(conn, {"jellyfin_url": "http://jf:8096", "jellyfin_api_key": "k"})
+    finally:
+        conn.close()
+    client = svc.jellyfin()
+    assert isinstance(client, jellyfin.Jellyfin) and client.base == "http://jf:8096"
+    assert isinstance(svc.refresher, jellyfin.RefreshDebouncer)
+    assert callable(svc.cover_fetch)
+
+
+def test_start_sweeps_old_work_folders(config, add_sg, monkeypatch):
+    import asyncio
+
+    from disc_ripper import cdrip
+
+    _prepare(config, add_sg).close()
+    calls = []
+    monkeypatch.setattr(cdrip, "sweep_work", lambda conn, work_dir, now: calls.append(work_dir))
+    svc = services.Services(config)
+
+    async def main():
+        await svc.start()
+        await svc.stop()
+
+    asyncio.run(main())
+    assert calls == [config.work_dir]
