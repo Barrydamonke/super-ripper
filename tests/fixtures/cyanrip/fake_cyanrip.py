@@ -40,6 +40,13 @@ def main():
         name = f"{n:02d}" if tracks > 9 else str(n)
         (folder / f"{name}.flac").write_bytes(flac_bytes())
     log = (HERE / "log.txt").read_text(encoding="utf-8").split("\n", 1)[1]
+    if os.environ.get("FAKE_CYANRIP_VERIFIED"):  # every track accurately ripped
+        log = "".join(
+            f"Track {n} ripped and encoded successfully!\n"
+            "  Accurip:       disc found in database (max confidence: 9)\n"
+            f"    Accurip v1:  0000000{n} (accurately ripped, confidence 9)\n"
+            for n in range(1, tracks + 1)
+        )
     (folder / "log.log").write_text(log, encoding="utf-8")
     sys.exit(0)
 
