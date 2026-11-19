@@ -54,6 +54,8 @@ jobs:
           test "$(docker exec smoke cat /proc/1/comm)" = "tini"
           app_pid=$(docker exec smoke cat /proc/1/task/1/children | awk '{print $1}')
           test "$(docker exec smoke awk '/^Uid:/{print $2}' /proc/$app_pid/status)" = "99"
+          # cyanrip (Debian trixie) must run as the app user.
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups cyanrip -V | grep -q "^cyanrip 0.9"
           docker logs smoke
           docker rm -f smoke
 
