@@ -22,6 +22,7 @@ from .events import Notifier
 
 log = logging.getLogger(__name__)
 _BUSY = object()
+_BEFORE_INSERT = ("empty", "tray_open", "not_ready")
 
 
 @dataclass(frozen=True)
@@ -126,7 +127,9 @@ class MediaMonitor:
         if changed:
             log.info("media: %s -> %s %s %r", target.drive_id, state, disc_type or "", label)
             await self.notifier.drive_changed(target.drive_id)
-        if inserted and not first and target.previous != "disc" and self.on_insert:
+        # Only a real insert: the drive was empty, open or spinning up. "unknown → disc"
+        # is a read glitch with the same disc still in, and must not start a second rip.
+        if inserted and not first and target.previous in _BEFORE_INSERT and self.on_insert:
             await self.on_insert(target.drive_id)
 
     async def poll_once(self, *, first: bool = False) -> None:

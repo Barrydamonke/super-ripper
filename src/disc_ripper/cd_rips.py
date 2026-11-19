@@ -73,3 +73,23 @@ def recently_filed(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Ro
     return conn.execute(
         "SELECT * FROM cd_rips WHERE state = 'filed' ORDER BY updated_at DESC, job_id DESC LIMIT ?", (limit,)
     ).fetchall()
+
+
+def remember_disc(conn: sqlite3.Connection, disc_id: str, toc_json: str, track_count: int, drive_id: str,
+                  now: str) -> None:
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO discs (disc_id, toc, track_count, drive_id, last_seen) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(disc_id) DO UPDATE SET toc = excluded.toc, track_count = excluded.track_count,
+                drive_id = excluded.drive_id, last_seen = excluded.last_seen
+            """,
+            (disc_id, toc_json, track_count, drive_id, now),
+        )
+
+
+def disc_in_drive(conn: sqlite3.Connection, drive_id: str) -> sqlite3.Row | None:
+    """The disc most recently seen in this drive."""
+    return conn.execute(
+        "SELECT * FROM discs WHERE drive_id = ? ORDER BY last_seen DESC LIMIT 1", (drive_id,)
+    ).fetchone()
