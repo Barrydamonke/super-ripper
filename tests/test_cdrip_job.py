@@ -206,3 +206,70 @@ def test_sweep_work_removes_old_finished(config, setup):
 @pytest.mark.skipif(os.name == "nt", reason="process-group kill is POSIX")
 def test_cancel_leaves_no_orphan(config, setup, monkeypatch):
     test_rip_job_cancel_kills_process(config, setup, monkeypatch)
+
+
+def test_retry_without_cd_rips_row_is_tracked(config, setup, monkeypatch):
+    async def fake_after(ctx, **kw):
+        await asyncio.to_thread(cd_rips.update, setup, ctx.job_id, state="needs_look", reasons=["x"])
+
+    monkeypatch.setattr(cdrip, "after_rip", fake_after)
+    j = jobs.enqueue(setup, "serial:A", "rip_cd",
+                     {"disc_id": DISC_ID, "toc": TOC.to_json(), "offset": 0, "sr_name": "sr0"},
+                     uses_drive=True, now="t")  # e.g. created by jobs.retry: no cd_rips row
+    run(config, FakeServices(), lambda: jobs.get(setup, j)["state"] in ("done", "failed"))
+    assert cd_rips.get(setup, j)["state"] == "needs_look"
+
+
+def test_cancel_during_identification_keeps_the_rip(config, setup, monkeypatch):
+    started = asyncio.Event() if False else None
+
+    async def slow_after(ctx, **kw):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(cdrip, "_identify", slow_after)
+    j = enqueue(setup)
+
+    async def cancel_when_identifying(r):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
+        while not (config.downloads_dir / str(j)).exists():
+            assert loop.time() < deadline
+            await asyncio.sleep(0.05)
+        await r.cancel(j)
+
+    run(config, FakeServices(), lambda: jobs.get(setup, j)["state"] not in ("queued", "running"),
+        after_start=cancel_when_identifying)
+    rip = cd_rips.get(setup, j)
+    assert rip["state"] == "needs_look"
+    assert "interrupted" in json.loads(rip["reasons"])[0]
+    assert len(list((config.downloads_dir / str(j)).glob("*.flac"))) == 3
+
+
+def test_sweep_never_touches_done_jobs(config, setup):
+    j = enqueue(setup)
+    jobs.start(setup, j, "t")
+    jobs.finish(setup, j, "done", (datetime.now(timezone.utc) - timedelta(days=30)).isoformat())
+    (config.work_dir / str(j)).mkdir()
+    cdrip.sweep_work(setup, config.work_dir, datetime.now(timezone.utc))
+    assert (config.work_dir / str(j)).exists()
+
+
+def test_process_killed_when_line_handler_fails(config, setup, monkeypatch):
+    monkeypatch.setenv("FAKE_CYANRIP_MODE", "hang")
+    seen = []
+
+    async def main():
+        r = runner.JobRunner(config, Notifier(), Space())
+        ctx = runner.JobContext(r, 1, "serial:A", {})
+        work = config.work_dir / "x"
+        work.mkdir()
+
+        async def on_line(line):
+            seen.extend(runner.LIVE_PROCESSES)
+            raise RuntimeError("database is locked")
+
+        with pytest.raises(RuntimeError):
+            await ctx.run_process(json.loads(os.environ["CYANRIP_BIN"]), cwd=work, on_line=on_line)
+
+    asyncio.run(main())
+    assert seen and all(p.returncode is not None for p in seen)

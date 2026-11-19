@@ -50,11 +50,12 @@ class Jellyfin:
         query = urllib.parse.urlencode(
             {"Recursive": "true", "IncludeItemTypes": "MusicAlbum", "Fields": "ProviderIds", "searchTerm": album}
         )
+        body = self._call("GET", f"/Items?{query}")
         try:
-            items = json.loads(self._call("GET", f"/Items?{query}")).get("Items", [])
-        except ValueError as exc:
-            raise JellyfinError(f"unexpected answer: {exc}") from exc
-        return any((item.get("ProviderIds") or {}).get("MusicBrainzAlbum") == release_id for item in items)
+            items = json.loads(body).get("Items") or []
+            return any((item.get("ProviderIds") or {}).get("MusicBrainzAlbum") == release_id for item in items)
+        except Exception as exc:  # not the JSON shape we expect: some other server, or another version
+            raise JellyfinError(f"unexpected answer from Jellyfin ({type(exc).__name__})") from None
 
     def refresh(self) -> None:
         self._call("POST", "/Library/Refresh")

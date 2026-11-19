@@ -12,10 +12,15 @@ import json
 import os
 import shutil
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from . import library, tagging
+
+
+# Two drives can finish discs of the same album together: filing is one at a time.
+_FILING_LOCK = threading.Lock()
 
 
 class FileExists(Exception):
@@ -87,6 +92,11 @@ def file_album(
     now: str,
     allow_duplicate_folder: bool = False,
 ) -> Path:
+    with _FILING_LOCK:
+        return _file_album(conn, plan, music_dir, cover=cover, now=now, allow_duplicate_folder=allow_duplicate_folder)
+
+
+def _file_album(conn, plan, music_dir, *, cover, now, allow_duplicate_folder) -> Path:
     row = _album_row(conn, plan)
     if row is not None and not allow_duplicate_folder:
         rel = PurePosixPath(row["folder"])
@@ -100,10 +110,27 @@ def file_album(
     for _src, _tags, dst in targets:  # check everything before moving anything
         if dst.exists():
             raise FileExists(f"{dst.relative_to(music_dir)} is already in the library.")
-    folder.mkdir(parents=True, exist_ok=True)
-    for src, tags, dst in targets:
+    for src, tags, _dst in targets:  # tags first: a failure here has moved nothing
         tagging.write_tags(src, tags)
-        _move(src, dst)
+    created = not folder.exists()
+    folder.mkdir(parents=True, exist_ok=True)
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for src, _tags, dst in targets:
+            _move(src, dst)
+            moved.append((src, dst))
+    except BaseException:
+        for src, dst in reversed(moved):  # put back what already went in; never half an album
+            try:
+                _move(dst, src)
+            except OSError:
+                pass
+        if created:
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+        raise
     if cover is not None and cover.is_file() and not (folder / "cover.jpg").exists():
         shutil.copy2(cover, folder / "cover.jpg")
 
@@ -136,6 +163,11 @@ def retag_album(
     conn: sqlite3.Connection, album_key: str, new_album_tags: dict[str, str], music_dir: Path, now: str
 ) -> Path:
     """Change album-level tags on every file; move the folder if its name changes."""
+    with _FILING_LOCK:
+        return _retag_album(conn, album_key, new_album_tags, music_dir)
+
+
+def _retag_album(conn, album_key, new_album_tags, music_dir) -> Path:
     row = conn.execute("SELECT * FROM albums WHERE album_key = ?", (album_key,)).fetchone()
     if row is None:
         raise KeyError(album_key)

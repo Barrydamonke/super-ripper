@@ -6,6 +6,7 @@ most one request per second and a meaningful User-Agent; both are enforced here.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import threading
@@ -66,7 +67,7 @@ class MusicBrainz:
                     if exc.code not in _RETRY_CODES:
                         raise MusicBrainzUnavailable(f"MusicBrainz answered HTTP {exc.code}") from exc
                     error: Exception = exc
-                except (OSError, ValueError) as exc:  # network trouble or a garbled answer
+                except (OSError, ValueError, http.client.HTTPException) as exc:  # network trouble, garbled answer
                     error = exc
                 if attempt < len(BACKOFF):
                     self._sleep(BACKOFF[attempt])  # longer than MIN_INTERVAL, so no extra wait after it

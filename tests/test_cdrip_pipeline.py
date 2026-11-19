@@ -285,3 +285,72 @@ def test_jellyfin_client_requests():
     assert "searchTerm=Nevermind" in url and "IncludeItemTypes=MusicAlbum" in url
     assert headers["Authorization"] == 'MediaBrowser Token="KEY"'
     assert seen[-1][:2] == ("POST", "http://jf:8096/Library/Refresh")
+
+
+# --- checkpoint 2 review fixes -------------------------------------------------------
+
+
+def test_garbled_mb_answer_keeps_files_and_location(config, conn):
+    bad = releases("pressings")
+    bad[0] = {**bad[0], "media": [{**bad[0]["media"][0], "position": "x"}]}
+    job_id, row = rip(config, conn, FakeServices(FakeMB(bad)), NEVERMIND, 12)
+    assert row["state"] == "needs_look"
+    assert reasons(row) == ["MusicBrainz unreachable"]
+    assert row["downloads_path"] == str(config.downloads_dir / str(job_id))
+    assert len(list((config.downloads_dir / str(job_id)).glob("*.flac"))) == 12
+
+
+def test_mb_http_exception_is_retried_then_unreachable():
+    import http.client
+
+    calls = []
+
+    def fetch(url, headers, timeout):
+        calls.append(url)
+        raise http.client.IncompleteRead(b"")
+
+    mb = musicbrainz.MusicBrainz(fetch=fetch, clock=lambda: 0.0, sleep=lambda s: None)
+    with pytest.raises(musicbrainz.MusicBrainzUnavailable):
+        mb.lookup_discid(NEVERMIND)
+    assert len(calls) == 4
+
+
+def test_joining_disc_ignores_jellyfin_having_disc_one(config, conn):
+    (config.music_dir / "Pink Floyd" / "The Wall (1994)").mkdir(parents=True)
+    _filed_album(conn, key="wall-disc1-release", group=WALL_GROUP, disc_total=2, discs={"1": "d1"})
+    _, row = rip(config, conn, FakeServices(FakeMB(releases("two_disc_2")), FakeJellyfin({"wall-disc1-release"})),
+                 WALL_2, 13)
+    assert row["state"] == "filed", reasons(row)
+
+
+def test_unambiguous_other_edition_goes_to_look(config, conn):
+    group = musicbrainz.candidates_for_disc(releases("pressings"), NEVERMIND)[0].release_group_id
+    conn.execute(
+        "INSERT INTO albums (album_key, folder, release_group_id, album_artist, album, year, disc_total, discs,"
+        " filed_at) VALUES ('deluxe', 'Nirvana/Nevermind (2011)', ?, 'Nirvana', 'Nevermind', '2011', 4, '{}', 't')",
+        (group,),
+    )
+    conn.commit()
+    _, row = rip(config, conn, FakeServices(FakeMB(releases("pressings"))), NEVERMIND, 12)
+    assert row["state"] == "needs_look"
+    assert "another edition of an album in the library" in reasons(row)
+
+
+def test_jellyfin_odd_json_does_not_block():
+    for body in (b"[]", b'{"Items": ["x"]}', b"not json"):
+        client = jellyfin.Jellyfin("http://jf", "k", fetch=lambda m, u, h, t, body=body: body)
+        with pytest.raises(jellyfin.JellyfinError):
+            client.has_album("r", "a")
+    # "Items": null is simply no albums
+    assert jellyfin.Jellyfin("http://jf", "k", fetch=lambda m, u, h, t: b'{"Items": null}').has_album("r", "a") is False
+
+
+def test_cover_fetch_http_exception_is_none():
+    import http.client
+
+    from disc_ripper import coverart
+
+    def fetch(url, headers, timeout):
+        raise http.client.IncompleteRead(b"")
+
+    assert coverart.fetch_front("abc", fetch=fetch) is None

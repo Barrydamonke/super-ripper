@@ -144,3 +144,49 @@ def test_retag_refuses_existing_target(tmp_path, conn, config):
     with pytest.raises(filing.FileExists):
         filing.retag_album(conn, "rel-1", {"ALBUM": "Taken", "ALBUMARTIST": "Pink Floyd", "DATE": "1973"},
                            config.music_dir, "t2")
+
+
+def test_two_discs_filing_at_once_both_recorded(tmp_path, conn, config):
+    import threading
+
+    from disc_ripper import db as dbmod
+
+    p1 = plan(tmp_path, disc=1, disc_total=2, titles=("A",), src="a", disc_id="d1")
+    p2 = plan(tmp_path, disc=2, disc_total=2, titles=("B",), src="b", disc_id="d2")
+    errors = []
+
+    def go(p):
+        c = dbmod.connect(config.db_path)
+        try:
+            filing.file_album(c, p, config.music_dir, cover=None, now="t")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            c.close()
+
+    threads = [threading.Thread(target=go, args=(p,)) for p in (p1, p2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert json.loads(conn.execute("SELECT discs FROM albums").fetchone()[0]) == {"1": "d1", "2": "d2"}
+
+
+def test_partial_failure_rolls_back(tmp_path, conn, config, monkeypatch):
+    p = plan(tmp_path, titles=("One", "Two", "Three"))
+    real_move = filing._move
+    calls = []
+
+    def flaky(src, dst):
+        calls.append(src)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        real_move(src, dst)
+
+    monkeypatch.setattr(filing, "_move", flaky)
+    with pytest.raises(OSError):
+        filing.file_album(conn, p, config.music_dir, cover=None, now="t")
+    assert all(src.exists() for src, _ in p.tracks)  # everything back where it was
+    assert not (config.music_dir / "Pink Floyd" / "The Dark Side of the Moon (1973)").exists()
+    assert conn.execute("SELECT COUNT(*) FROM albums").fetchone()[0] == 0

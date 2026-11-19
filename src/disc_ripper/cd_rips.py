@@ -22,6 +22,15 @@ def create(conn: sqlite3.Connection, job_id: int, disc_id: str, now: str) -> Non
         )
 
 
+def ensure(conn: sqlite3.Connection, job_id: int, disc_id: str, now: str) -> None:
+    """Make sure a rip job has its row (a retried job is a new job without one)."""
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO cd_rips (job_id, disc_id, state, updated_at) VALUES (?, ?, 'ripping', ?)",
+            (job_id, disc_id, now),
+        )
+
+
 def get(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM cd_rips WHERE job_id = ?", (job_id,)).fetchone()
 

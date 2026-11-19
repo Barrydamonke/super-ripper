@@ -18,7 +18,7 @@ def fetch_front(release_id: str, fetch: Fetcher = http_get) -> bytes | None:
         if exc.code != 404:
             log.info("cover art for %s: HTTP %s", release_id, exc.code)
         return None
-    except OSError as exc:
+    except Exception as exc:  # network trouble of any kind: no cover, not an error
         log.info("cover art for %s: %s", release_id, exc)
         return None
     return data or None

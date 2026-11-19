@@ -30,7 +30,8 @@ log = logging.getLogger(__name__)
 
 WORK_KEEP_DAYS = 7
 DRIVE_LOCK_TIMEOUT = 10.0
-_FINAL = ("done", "failed", "cancelled", "interrupted")
+# Only rips that never finished leave audio in /work; a done rip's files have moved on.
+_SWEEPABLE = ("failed", "cancelled", "interrupted")
 
 
 def running_process_count() -> int:
@@ -66,6 +67,7 @@ async def run_rip_cd(ctx: runner.JobContext) -> None:
     disc_id = params["disc_id"]
     toc = Toc.from_json(params["toc"])
     sr_name = params["sr_name"]
+    await ctx.db(cd_rips.ensure, ctx.job_id, disc_id, utc_now())
 
     # A retry may find another disc in the drive by now: never rip it under this disc's identity.
     current = await asyncio.to_thread(_with_drive_lock, ctx, lambda: _drive(ctx, sr_name).read_toc())
@@ -122,11 +124,27 @@ async def run_rip_cd(ctx: runner.JobContext) -> None:
 
     try:
         await after_rip(ctx, disc_id=disc_id, toc=toc, checks=checks, rip_dir=rip_dir)
+    except asyncio.CancelledError:
+        # The audio is safe in downloads; record it before the cancellation carries on.
+        _record_sync(ctx, state="needs_look",
+                     reasons=["identification was interrupted — choose the release or type the details in"])
+        raise
     except Exception as exc:
         log.exception("cdrip: after rip #%s failed", ctx.job_id)
         await ctx.db(cd_rips.update, ctx.job_id, state="needs_look",
                      reasons=[f"Couldn't finish after the rip: {exc}"])
     await ctx.report(1.0, "Ripped")
+
+
+def _record_sync(ctx, **fields) -> None:
+    """A cd_rips write that doesn't await (for use while being cancelled)."""
+    from . import db
+
+    conn = db.connect(ctx.config.db_path)
+    try:
+        cd_rips.update(conn, ctx.job_id, **fields)
+    finally:
+        conn.close()
 
 
 # --- after the rip: identify, decide, file ------------------------------------------
@@ -272,28 +290,38 @@ def _move_to_downloads(rip_dir: Path, files: list[Path], dest: Path) -> list[Pat
 
 
 async def after_rip(ctx, *, disc_id: str, toc: Toc, checks: list[TrackCheck], rip_dir: Path) -> None:
-    services = ctx.services
+    """Move the audio out of the work area and record where it is, then identify and file.
+
+    The move and the record come first, before any network call, so whatever
+    happens later the files are kept and the Music page knows where they are.
+    """
     files_by_track = cyanrip.track_files(rip_dir)
     files = [files_by_track[t] for t in toc.audio_tracks]
+    dest = ctx.config.downloads_dir / str(ctx.job_id)
+    files = await asyncio.to_thread(_move_to_downloads, rip_dir, files, dest)
+    shutil.rmtree(rip_dir.parent, ignore_errors=True)  # the work folder is done with
+    await ctx.db(cd_rips.update, ctx.job_id, downloads_path=str(dest),
+                 summary=f"Unknown album · {len(files)} tracks")
+    await _identify(ctx, disc_id=disc_id, files=files, dest=dest, checks=checks)
+
+
+async def _identify(ctx, *, disc_id: str, files: list[Path], dest: Path, checks: list[TrackCheck]) -> None:
+    services = ctx.services
     approval, cover_on = await ctx.db(lambda conn: (settings.get(conn, "cd_approval"), settings.get(conn, "cd_cover_art")))
 
     mb_error = False
     try:
         releases = await asyncio.to_thread(services.musicbrainz.lookup_discid, disc_id)
-    except musicbrainz.MusicBrainzUnavailable as exc:
-        log.warning("cdrip: #%s: %s", ctx.job_id, exc)
-        releases, mb_error = [], True
-    cands = musicbrainz.candidates_for_disc(releases, disc_id)
+        cands = musicbrainz.candidates_for_disc(releases, disc_id)
+    except Exception as exc:  # unreachable, or an answer we can't read: treat both as "no answer"
+        log.warning("cdrip: #%s: MusicBrainz: %s", ctx.job_id, exc)
+        cands, mb_error = [], True
     groups = musicbrainz.group_equivalent(cands)
     filed = await ctx.db(filed_groups)
     chosen = musicbrainz.choose(groups, filed_groups=filed)
     track_mismatch = chosen is not None and len(chosen.tracks) != len(files)
     if track_mismatch:
         chosen = None
-
-    dest = ctx.config.downloads_dir / str(ctx.job_id)
-    files = await asyncio.to_thread(_move_to_downloads, rip_dir, files, dest)
-    shutil.rmtree(rip_dir.parent, ignore_errors=True)  # the work folder is done with
 
     plan = await ctx.db(build_plan, chosen, files, disc_id) if chosen else None
     cover = None
@@ -308,21 +336,27 @@ async def after_rip(ctx, *, disc_id: str, toc: Toc, checks: list[TrackCheck], ri
 
     duplicate = False
     notes = []
+    joining = False
     if plan:
         row = await ctx.db(lambda conn: conn.execute(
             "SELECT discs FROM albums WHERE album_key = ?", (plan.album_key,)).fetchone())
-        duplicate = row is not None and str(plan.disc or 1) in json.loads(row["discs"])
-        client = services.jellyfin()
-        if client is not None and not duplicate:
+        joining = row is not None
+        duplicate = joining and str(plan.disc or 1) in json.loads(row["discs"])
+        # Jellyfin only catches albums this app didn't file. A disc joining an album
+        # we filed would always match its own disc 1 there.
+        client = await asyncio.to_thread(services.jellyfin) if not joining else None
+        if client is not None:
             release = plan.album_tags.get("MUSICBRAINZ_ALBUMID") or chosen.release_id
             try:
                 duplicate = await asyncio.to_thread(client.has_album, release, plan.album)
             except jellyfin.JellyfinError as exc:
                 notes.append("Jellyfin check failed")
                 log.warning("cdrip: #%s: Jellyfin check failed: %s", ctx.job_id, exc)
-    other_edition = any(
+    # Same release group already filed with a different number of discs (e.g. a deluxe edition):
+    # never join or file it automatically.
+    other_edition = not joining and any(
         c.release_group_id in filed and filed[c.release_group_id] != c.medium_count for c in cands
-    ) and plan is None
+    )
     sibling = await ctx.db(waiting_sibling, ctx.job_id, cands)
 
     reasons = decide(
@@ -364,7 +398,7 @@ def sweep_work(conn, work_dir: Path, now: datetime) -> None:
         if not folder.is_dir() or not folder.name.isdigit():
             continue
         job = jobs.get(conn, int(folder.name))
-        if job is None or job["state"] not in _FINAL or not job["finished_at"]:
+        if job is None or job["state"] not in _SWEEPABLE or not job["finished_at"]:
             continue
         try:
             finished = datetime.fromisoformat(job["finished_at"])

@@ -92,10 +92,11 @@ class JobContext:
             for line in splitter.flush():
                 await on_line(line)
             return await proc.wait()
-        except asyncio.CancelledError:
-            await _terminate(proc, posix)
-            raise
         finally:
+            if proc.returncode is None:
+                # Cancelled, or on_line failed: stop the child. Shielded so a second
+                # cancel (e.g. shutdown after a user cancel) can't skip the SIGKILL.
+                await asyncio.shield(_terminate(proc, posix))
             LIVE_PROCESSES.discard(proc)
 
 
