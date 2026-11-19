@@ -233,15 +233,18 @@ def sync(conn: sqlite3.Connection, found: list[DiscoveredDrive], now: str) -> No
             conn.execute(
                 """
                 INSERT INTO drives (id, id_source, vendor, model, revision, sg_name, sr_name,
-                                    present, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                                    present, first_seen, last_seen, read_offset)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     id_source = excluded.id_source, vendor = excluded.vendor,
                     model = excluded.model, revision = excluded.revision,
                     sg_name = excluded.sg_name, sr_name = excluded.sr_name,
                     present = 1, last_seen = excluded.last_seen
                 """,
-                (d.id, d.id_source, d.vendor, d.model, d.revision, d.sg_name, d.sr_name, now, now),
+                (
+                    d.id, d.id_source, d.vendor, d.model, d.revision, d.sg_name, d.sr_name, now, now,
+                    known_read_offset(d.model),  # new drives only; never overwrites an edit
+                ),
             )
 
 
@@ -249,6 +252,20 @@ def list_drives(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM drives ORDER BY present DESC, length(sg_name), sg_name, id"
     ).fetchall()
+
+
+def known_read_offset(model: str) -> int:
+    """AccurateRip read offset for known drive models (also applied by migration 0003).
+
+    Values from the AccurateRip drive database: BH10LS38 +667 (1,236 agreeing
+    submissions), iHAS124 A-F +6 (iHAS124 W and Y use +48 and aren't listed here).
+    """
+    compact = " ".join(model.upper().split())
+    if "BH10LS38" in compact:
+        return 667
+    if re.search(r"IHAS124 ?[A-F]?$", compact):
+        return 6
+    return 0
 
 
 READ_OFFSET_MIN = -3000

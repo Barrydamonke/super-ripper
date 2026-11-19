@@ -284,3 +284,16 @@ def test_set_media_reports_change(config, conn, add_sg):
         "disc", "dvd", "OTHER", "t3",
     )
     assert drives.set_media(conn, "serial:nope", "empty", None, "", "t4") is False
+
+
+def test_new_drive_gets_known_read_offset(config, conn, add_sg):
+    add_sg(config.sysfs_root, 1, sr=0, model="BD-RE BH10LS38", vpd_serial=b"\x05\x80\x00\x01A")
+    add_sg(config.sysfs_root, 2, sr=1, model="iHAS124   F", vpd_serial=b"\x05\x80\x00\x01B")
+    add_sg(config.sysfs_root, 3, sr=2, model="iHAS124   Y", vpd_serial=b"\x05\x80\x00\x01C")
+    drives.sync(conn, drives.discover(config.sysfs_root), "t1")
+    offsets = {r["id"]: r["read_offset"] for r in drives.list_drives(conn)}
+    assert offsets == {"serial:A": 667, "serial:B": 6, "serial:C": 0}
+    # a user's edit survives the next sync
+    drives.update_drive(conn, "serial:A", label="", enabled=True, read_offset=670)
+    drives.sync(conn, drives.discover(config.sysfs_root), "t2")
+    assert {r["id"]: r["read_offset"] for r in drives.list_drives(conn)}["serial:A"] == 670

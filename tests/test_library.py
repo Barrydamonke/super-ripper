@@ -51,3 +51,33 @@ def test_track_filename():
     )
     assert library.track_filename(100, "Long", disc=None, track_artist=None) == "100 - Long.flac"
     assert library.track_filename(4, "AC/DC?", disc=None, track_artist=None) == "04 - AC_DC_.flac"
+
+
+def test_long_multibyte_names_fit_filesystem_limit():
+    title = "あ" * 300
+    name = library.track_filename(1, title, disc=1, track_artist=None)
+    assert len(name.encode("utf-8")) <= 240
+    assert name.startswith("1-01 - ") and name.endswith(".flac")
+    folder = library.album_folder("あ" * 300, "い" * 300, "1999", compilation=False)
+    for part in folder.parts:
+        assert len(part.encode("utf-8")) <= 240
+    assert folder.parts[1].endswith(" (1999)")
+    # no half characters
+    for part in (*folder.parts, name):
+        part.encode("utf-8").decode("utf-8")
+
+
+def test_leading_dots_removed():
+    assert library.safe_component(".38 Special") == "38 Special"
+    assert library.album_folder("Metallica", "...And Justice for All", "1988", compilation=False).parts[1] == (
+        "And Justice for All (1988)"
+    )
+    assert library.safe_component("..") == "_"
+
+
+def test_long_titles_keep_their_year():
+    long = "Symphony " + "x" * 300
+    a = library.album_folder("Orchestra", long, "1999", compilation=False)
+    b = library.album_folder("Orchestra", long, "2001", compilation=False)
+    assert a != b
+    assert a.parts[1].endswith(" (1999)") and b.parts[1].endswith(" (2001)")
