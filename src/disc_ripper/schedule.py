@@ -69,17 +69,24 @@ def parse_schedule(data: object) -> list[DayEntry] | None:
     return entries
 
 
-def _zone(now: datetime) -> tzinfo:
-    """The zone schedule times are in. A fixed offset (datetime.now().astimezone())
-    doesn't know about clock changes, so prefer the container's TZ."""
-    if isinstance(now.tzinfo, ZoneInfo):
-        return now.tzinfo
+def local_zone() -> tzinfo:
+    """The container's time zone (TZ), which must match the Pi's clock."""
     name = os.environ.get("TZ", "").lstrip(":")
     if name:
         try:
             return ZoneInfo(name)
         except (ZoneInfoNotFoundError, ValueError):
             pass
+    return datetime.now().astimezone().tzinfo
+
+
+def _zone(now: datetime) -> tzinfo:
+    """The zone schedule times are in. A fixed offset (datetime.now().astimezone())
+    doesn't know about clock changes, so prefer the container's TZ."""
+    if isinstance(now.tzinfo, ZoneInfo):
+        return now.tzinfo
+    if os.environ.get("TZ"):
+        return local_zone()
     return now.tzinfo
 
 
