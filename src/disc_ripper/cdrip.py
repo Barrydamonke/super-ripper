@@ -8,15 +8,17 @@ afterwards (identifying, tagging, filing) puts the rip on the Music page's
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import uuid
 import shutil
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import json
 
-from . import cd_rips, cyanrip, filing, jellyfin, jobs, musicbrainz, runner, settings, tagging
+from . import cd_rips, cyanrip, filing, jellyfin, jobs, library, musicbrainz, runner, settings, tagging
 from .cdrom import CdDrive
 from .cdtoc import Toc, musicbrainz_disc_id
 from .clock import utc_now
@@ -231,16 +233,9 @@ def build_plan(conn, cand: Candidate, files: list[Path], disc_id: str) -> AlbumP
     )
 
 
-def _candidate_snapshot(cands: list[Candidate]) -> list[dict]:
-    return [
-        {
-            "release_id": c.release_id, "release_group_id": c.release_group_id, "title": c.title,
-            "album_artist": c.album_artist, "date": c.date, "country": c.country, "label": c.label,
-            "barcode": c.barcode, "medium": c.medium, "medium_count": c.medium_count,
-            "tracks": [{"number": t.number, "title": t.title, "artist": t.artist} for t in c.tracks],
-        }
-        for c in cands
-    ]
+def candidate_snapshot(cands: list[Candidate]) -> list[dict]:
+    """Everything needed to tag from a candidate later, without asking MusicBrainz again."""
+    return [dataclasses.asdict(c) for c in cands]
 
 
 def waiting_sibling(conn, job_id: int, cands: list[Candidate]) -> int | None:
@@ -338,7 +333,7 @@ async def after_rip(ctx, *, disc_id: str, toc: Toc, checks: list[TrackCheck], ri
     if notes:
         summary += " · " + ", ".join(notes)
     fields = dict(
-        candidates=_candidate_snapshot(cands), release_id=chosen.release_id if chosen else None,
+        candidates=candidate_snapshot(cands), release_id=chosen.release_id if chosen else None,
         medium=chosen.medium if chosen else None, downloads_path=str(dest), summary=summary,
     )
 
@@ -382,3 +377,99 @@ def sweep_work(conn, work_dir: Path, now: datetime) -> None:
 
 
 runner.HANDLERS["rip_cd"] = run_rip_cd
+
+
+# --- resolving a rip from the Music page --------------------------------------------
+
+
+class ResolveError(Exception):
+    """The request can't be done as asked; the message is shown to the user."""
+
+
+def rip_files(rip) -> list[Path]:
+    folder = Path(rip["downloads_path"] or "")
+    return sorted(folder.glob("[0-9][0-9].flac")) if folder.is_dir() else []
+
+
+def stored_candidates(rip) -> list[Candidate]:
+    return [musicbrainz.candidate_from_dict(d) for d in json.loads(rip["candidates"] or "[]")]
+
+
+def plan_for_candidate(conn, rip, cand: Candidate) -> AlbumPlan:
+    files = rip_files(rip)
+    if len(files) != len(cand.tracks):
+        raise ResolveError(f"That release has {len(cand.tracks)} tracks on this disc; the rip has {len(files)}.")
+    return build_plan(conn, cand, files, rip["disc_id"])
+
+
+def plan_manual(rip, *, album: str, album_artist: str, year: str, disc: int, disc_total: int,
+                titles: list[str], artists: list[str]) -> AlbumPlan:
+    files = rip_files(rip)
+    compilation = album_artist.strip().casefold() == library.VARIOUS_ARTISTS.casefold()
+    album_tags = {"ALBUM": album, "ALBUMARTIST": album_artist, "DATE": year}
+    tracks = []
+    for n, (path, title, artist) in enumerate(zip(files, titles, artists, strict=True), start=1):
+        tags = {
+            **album_tags, "TITLE": title, "ARTIST": artist or album_artist, "TRACKNUMBER": str(n),
+            "TRACKTOTAL": str(len(files)), "DISCNUMBER": str(disc), "DISCTOTAL": str(disc_total),
+            "MUSICBRAINZ_DISCID": rip["disc_id"],
+        }
+        tracks.append((path, tags))
+    return AlbumPlan(
+        album_key=f"manual:{uuid.uuid4()}", release_id=None, release_group_id=None, album_artist=album_artist,
+        album=album, year=year, compilation=compilation, disc=disc if disc_total > 1 else None,
+        disc_total=disc_total, disc_id=rip["disc_id"], album_tags=album_tags, tracks=tracks,
+    )
+
+
+def plan_add_to(conn, rip, album_key: str, disc: int, titles: list[str] | None) -> AlbumPlan:
+    """Put this disc into an album already in the library."""
+    row = conn.execute("SELECT * FROM albums WHERE album_key = ?", (album_key,)).fetchone()
+    if row is None:
+        raise ResolveError("That album isn't in the library any more.")
+    files = rip_files(rip)
+    cands = [c for c in stored_candidates(rip) if c.release_id == rip["release_id"]]
+    if titles is None:
+        if not cands or len(cands[0].tracks) != len(files):
+            raise ResolveError("Type a title for every track.")
+        titles = [t.title for t in cands[0].tracks]
+        artists = [t.artist for t in cands[0].tracks]
+    else:
+        artists = [""] * len(titles)
+    album_tags = json.loads(row["album_tags"])
+    disc_total = max(int(row["disc_total"]), disc)
+    compilation = PurePosixPath(row["folder"]).parts[0] == library.VARIOUS_ARTISTS
+    tracks = []
+    for n, (path, title, artist) in enumerate(zip(files, titles, artists, strict=True), start=1):
+        tags = {
+            **album_tags, "TITLE": title, "ARTIST": artist or row["album_artist"], "TRACKNUMBER": str(n),
+            "TRACKTOTAL": str(len(files)), "DISCNUMBER": str(disc), "DISCTOTAL": str(disc_total),
+            "MUSICBRAINZ_DISCID": rip["disc_id"],
+        }
+        tracks.append((path, tags))
+    return AlbumPlan(
+        album_key=album_key, release_id=None, release_group_id=row["release_group_id"],
+        album_artist=row["album_artist"], album=row["album"], year=row["year"], compilation=compilation,
+        disc=disc if disc_total > 1 else None, disc_total=disc_total, disc_id=rip["disc_id"],
+        album_tags=album_tags, tracks=tracks,
+    )
+
+
+def file_resolved(conn, job_id: int, plan: AlbumPlan, music_dir: Path, *, allow_duplicate: bool = False) -> Path:
+    """File a resolved rip into the library and mark it filed."""
+    rip = cd_rips.get(conn, job_id)
+    dest = Path(rip["downloads_path"])
+    cover = dest / "cover.jpg"
+    folder = filing.file_album(conn, plan, music_dir, cover=cover if cover.is_file() else None, now=utc_now(),
+                               allow_duplicate_folder=allow_duplicate)
+    shutil.rmtree(dest, ignore_errors=True)
+    cd_rips.update(conn, job_id, state="filed", reasons=[], filed_path=str(folder), album_key=plan.album_key,
+                   summary=summary_for(plan.album_artist, plan.album, plan.year))
+    return folder
+
+
+def discard(conn, job_id: int) -> None:
+    rip = cd_rips.get(conn, job_id)
+    if rip["downloads_path"]:
+        shutil.rmtree(rip["downloads_path"], ignore_errors=True)
+    cd_rips.update(conn, job_id, state="discarded")

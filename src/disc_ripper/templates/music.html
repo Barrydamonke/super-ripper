@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Music - Disc Ripper{% endblock %}
+{% block content %}
+<h1>Music</h1>
+{% if refresh_error %}<p class="error">{{ refresh_error }}</p>{% endif %}
+
+<h2>Needs a look ({{ waiting|length }})</h2>
+{% if waiting %}
+<table>
+  <thead><tr><th>Rip</th><th>Album</th><th>Why</th><th></th></tr></thead>
+  <tbody>
+  {% for item in waiting %}
+    <tr>
+      <td>#{{ item.row.job_id }}</td>
+      <td>{{ item.row.summary or "Unknown album" }}</td>
+      <td>{{ item.reasons|join(" · ") }}</td>
+      <td><a href="/music/{{ item.row.job_id }}">Open</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="hint">Nothing waiting. Clean rips file themselves.</p>
+{% endif %}
+
+<h2>Recently filed</h2>
+{% if filed %}
+<table>
+  <thead><tr><th>Rip</th><th>Album</th><th>Filed</th><th></th></tr></thead>
+  <tbody>
+  {% for row in filed %}
+    <tr>
+      <td>#{{ row.job_id }}</td>
+      <td>{{ row.summary }}</td>
+      <td>{{ row.updated_at|hm }}</td>
+      <td>{% if row.album_key %}<a href="/music/album/{{ row.album_key|urlencode }}/edit">Edit</a>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="hint">No albums filed yet.</p>
+{% endif %}
+{% endblock %}

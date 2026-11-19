@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Edit album - Disc Ripper{% endblock %}
+{% block content %}
+<p><a href="/music">← Music</a></p>
+<h1>Edit {{ album.album_artist }} — {{ album.album }}</h1>
+<p class="hint">In the library at {{ album.folder }}. Changing these renames the folder and updates every track's tags.</p>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post" action="/music/album/{{ album.album_key|urlencode }}/edit">
+  <label>Album <input type="text" name="album" value="{{ form.get('album', album.album) }}"></label>
+  <label>Album artist <input type="text" name="album_artist" value="{{ form.get('album_artist', album.album_artist) }}"></label>
+  <label>Year <input type="text" name="year" value="{{ form.get('year', album.year) }}" size="5"></label>
+  <button type="submit">Save</button>
+</form>
+{% endblock %}

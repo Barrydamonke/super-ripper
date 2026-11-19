@@ -84,6 +84,10 @@ class Services:
 
     # -- audio CDs -------------------------------------------------------------
 
+    def music_waiting(self) -> int:
+        """How many rips wait on the Music page (shown in the nav)."""
+        return self._db(lambda conn: conn.execute("SELECT COUNT(*) FROM cd_rips WHERE state = 'needs_look'").fetchone()[0])
+
     def _db(self, fn, *args):
         conn = db.connect(self.config.db_path)
         try:

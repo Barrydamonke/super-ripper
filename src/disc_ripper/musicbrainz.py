@@ -240,3 +240,21 @@ def tags_for(c: Candidate, track: TrackInfo, disc_id: str) -> dict[str, str]:
         "MUSICBRAINZ_ALBUMARTISTID": "; ".join(c.album_artist_ids),
         "MUSICBRAINZ_DISCID": disc_id,
     }
+
+
+def candidate_from_dict(data: Mapping) -> Candidate:
+    """Rebuild a Candidate stored with dataclasses.asdict (the Music page works offline)."""
+    tracks = tuple(
+        TrackInfo(
+            number=int(t["number"]), title=t["title"], artist=t["artist"], recording_id=t.get("recording_id", ""),
+            artist_ids=tuple(t.get("artist_ids", ())),
+        )
+        for t in data.get("tracks", [])
+    )
+    return Candidate(
+        release_id=data["release_id"], release_group_id=data.get("release_group_id", ""), title=data["title"],
+        album_artist=data["album_artist"], album_artist_ids=tuple(data.get("album_artist_ids", ())),
+        date=data.get("date", ""), original_date=data.get("original_date", ""), country=data.get("country", ""),
+        label=data.get("label", ""), barcode=data.get("barcode", ""), medium=int(data["medium"]),
+        medium_count=int(data["medium_count"]), tracks=tracks,
+    )
