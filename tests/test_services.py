@@ -103,3 +103,12 @@ def test_guard_loop_survives_render_error(config, add_sg, monkeypatch):
 
     asyncio.run(main())
     assert len(calls) > 2
+
+
+def test_services_register_cd_rip_job(config):
+    from disc_ripper import runner
+
+    svc = services.Services(config)
+    assert "rip_cd" in svc.runner.handlers
+    assert svc.runner.services is svc
+    assert runner.HANDLERS is svc.runner.handlers

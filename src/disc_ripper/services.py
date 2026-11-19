@@ -13,7 +13,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from . import db, drives, jobs, schedule_source
+from . import cdrip, db, drives, jobs, schedule_source  # cdrip registers the rip_cd job
 from .cdrom import CdDrive
 from .clock import utc_now
 from .config import AppConfig
@@ -57,7 +57,7 @@ class Services:
         self.space = SpaceChecker(config.work_dir)
         # Indirect, so drive_factory can be swapped after construction (tests).
         self.monitor = MediaMonitor(config, self, drive_factory=lambda path: self.drive_factory(path))
-        self.runner = JobRunner(config, self, self.space)
+        self.runner = JobRunner(config, self, self.space, services=self)
         self._tasks: list[asyncio.Task] = []
         self._loop: asyncio.AbstractEventLoop | None = None
         self._schedule_error: str | None = None

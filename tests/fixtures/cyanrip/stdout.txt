@@ -1,0 +1,50 @@
+# synthetic: built from cyanrip 0.9.3's source strings; replace with a real capture
+cyanrip 0.9.3 (release)
+System device:  /dev/sr0
+Device model:   HL-DT-ST BD-RE  BH10LS38
+Offset:         +667 samples
+Overread:       +0 frames
+Frame retries:  10
+AccurateRip:    found
+Tracks:
+Ripping and encoding track 1, progress - 12.50%Ripping and encoding track 1, progress - 50.00%Ripping and encoding track 1, progress - 100.00%                                                  Track 1 ripped and encoded successfully!
+  Preemphasis:   none detected
+
+  Properties:
+    Duration:    00:03:30.000
+    Samples:     9261000
+    Frames:      15750
+
+  EAC CRC32:     1234ABC1
+  Accurip:       disc found in database (max confidence: 42)
+    Accurip v1:  00000001 (accurately ripped, confidence 40)
+    Accurip v2:  10000001 (accurately ripped, confidence 12)
+
+Ripping and encoding track 2, progress - 12.50%Ripping and encoding track 2, progress - 50.00%Ripping and encoding track 2, progress - 100.00%                                                  Track 2 ripped and encoded successfully!
+  Preemphasis:   none detected
+
+  Properties:
+    Duration:    00:03:30.000
+    Samples:     9261000
+    Frames:      15750
+
+  EAC CRC32:     1234ABC2
+  Accurip:       disc found in database (max confidence: 42)
+    Accurip v1:  00000002 (not found, either a new pressing, or bad rip)
+    Accurip v2:  10000002 (not found, either a new pressing, or bad rip)
+    Accurip 450: 20000002 (not found)
+
+Ripping and encoding track 3, progress - 12.50%Ripping and encoding track 3, progress - 50.00%Ripping and encoding track 3, progress - 100.00%                                                  Track 3 ripped and encoded successfully!
+  Preemphasis:   none detected
+
+  Properties:
+    Duration:    00:03:30.000
+    Samples:     9261000
+    Frames:      15750
+
+  EAC CRC32:     1234ABC3
+  Accurip:       disc found in database (max confidence: 42)
+    Accurip v1:  00000003 (accurately ripped, confidence 40)
+    Accurip v2:  10000003 (accurately ripped, confidence 12)
+
+Tracks ripped accurately: 2/3

@@ -10,10 +10,13 @@ a busy database never stalls the event loop.
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from . import db, jobs, settings
@@ -26,6 +29,9 @@ log = logging.getLogger(__name__)
 
 PROGRESS_INTERVAL = 1.0
 CANCEL_WAIT_SECONDS = 3.0
+KILL_GRACE_SECONDS = 5.0
+# Child processes started by jobs, so tests (and shutdown checks) can see none are left.
+LIVE_PROCESSES: set[asyncio.subprocess.Process] = set()
 
 
 class JobContext:
@@ -33,6 +39,8 @@ class JobContext:
         self.job_id = job_id
         self.drive_id = drive_id
         self.params = params
+        self.config = runner.config
+        self.services = runner.services
         self._runner = runner
         self._last_write: float | None = None
 
@@ -48,6 +56,70 @@ class JobContext:
 
     async def sleep(self, seconds: float) -> None:
         await asyncio.sleep(seconds * self._runner.time_scale)
+
+    async def db(self, fn, *args, **kwargs):
+        return await self._runner.db(fn, *args, **kwargs)
+
+    async def run_process(
+        self, argv: list[str], *, cwd: Path, on_line: Callable[[str], Awaitable[None]]
+    ) -> int:
+        """Run a child (fixed argv, no shell), feeding each output line to on_line.
+
+        Lines end at '\n' or '\r' (progress bars rewrite with '\r'). If the job is
+        cancelled or the worker stops, the child gets SIGTERM, then SIGKILL after
+        KILL_GRACE_SECONDS, before the cancellation carries on.
+        """
+        from .cyanrip import LineSplitter
+
+        posix = os.name == "posix"
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(cwd),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=posix,  # its own process group, so helpers die with it
+        )
+        LIVE_PROCESSES.add(proc)
+        splitter = LineSplitter()
+        try:
+            while True:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                for line in splitter.feed(chunk.decode("utf-8", errors="replace")):
+                    await on_line(line)
+            for line in splitter.flush():
+                await on_line(line)
+            return await proc.wait()
+        except asyncio.CancelledError:
+            await _terminate(proc, posix)
+            raise
+        finally:
+            LIVE_PROCESSES.discard(proc)
+
+
+async def _terminate(proc: asyncio.subprocess.Process, posix: bool) -> None:
+    if proc.returncode is not None:
+        return
+
+    def send(sig: int) -> None:
+        try:
+            if posix:
+                os.killpg(proc.pid, sig)
+            elif sig == signal.SIGTERM:
+                proc.terminate()
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+
+    send(signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), KILL_GRACE_SECONDS)
+    except TimeoutError:
+        send(getattr(signal, "SIGKILL", signal.SIGTERM))
+        await proc.wait()
 
 
 Handler = Callable[[JobContext], Awaitable[None]]
@@ -84,8 +156,10 @@ class JobRunner:
         handlers: dict[str, Handler] = HANDLERS,
         time_scale: float = 1.0,
         recheck_seconds: float = 30.0,
+        services=None,
     ):
         self.config = config
+        self.services = services  # the app's Services (drive access, MusicBrainz...); None in some tests
         self.notifier = notifier
         self.space = space
         self.handlers = handlers
