@@ -101,7 +101,9 @@ def set_progress(
 ) -> None:
     with conn:
         conn.execute(
-            "UPDATE jobs SET progress = ?, message = ?, estimated_finish = ? WHERE id = ?",
+            # Only while running: a write still in flight when the job ends must not
+            # overwrite the final message (e.g. "Interrupted by a restart or shutdown.").
+            "UPDATE jobs SET progress = ?, message = ?, estimated_finish = ? WHERE id = ? AND state = 'running'",
             (progress, message, estimated_finish, job_id),
         )
 
