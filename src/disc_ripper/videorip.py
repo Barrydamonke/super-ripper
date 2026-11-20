@@ -7,6 +7,7 @@ import dataclasses
 import logging
 import os
 import shutil
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -137,9 +138,11 @@ def _after_move(conn, rip_id: int, job_id: int, title: int, path: Path | None, r
         video_rips.set_state(conn, rip_id, "ripped", "", now)
 
 
-def _move(config, rip_id: int, role: str, src: Path, min_free_gb: float) -> tuple[Path | None, str]:
+def _move(config, rip_id: int, role: str, src: Path, min_free_gb: float,
+          cancel: threading.Event | None = None) -> tuple[Path | None, str]:
     try:
-        return videofiles.move_to_downloads(config, rip_id, role, src, min_free_gb=min_free_gb), ""
+        return videofiles.move_to_downloads(config, rip_id, role, src, min_free_gb=min_free_gb,
+                                           cancel=cancel), ""
     except OSError as exc:
         log.warning("video: moving rip #%s to downloads failed: %s", rip_id, exc)
         return None, f"Couldn't move to downloads: {exc}"
@@ -190,7 +193,15 @@ async def _rip_title(ctx, params: dict, work: Path) -> None:
         raise RuntimeError(detail + (" " + hint if hint else ""))
     src = await asyncio.to_thread(videofiles.check_output, work, params["expected_seconds"])
     await ctx.report(0.99, "Moving to downloads…")
-    moved, message = await asyncio.to_thread(_move, ctx.config, rip_id, role, src, min_free)
+    stop = threading.Event()
+    copying = asyncio.ensure_future(asyncio.to_thread(_move, ctx.config, rip_id, role, src, min_free, stop))
+    try:
+        moved, message = await asyncio.shield(copying)
+    except asyncio.CancelledError:
+        # The thread outlives the cancel: stop it between chunks so nothing lands in downloads.
+        stop.set()
+        await asyncio.gather(copying, return_exceptions=True)
+        raise
     await ctx.db(_after_move, rip_id, ctx.job_id, title, moved, role, message, utc_now())
     if moved is not None:
         shutil.rmtree(work, ignore_errors=True)

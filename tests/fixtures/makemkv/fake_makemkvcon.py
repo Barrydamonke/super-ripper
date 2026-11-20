@@ -1,6 +1,6 @@
 """Stand-in for makemkvcon in tests.
 
-FAKE_MAKEMKV_MODE: ok (default) | fail_old | hang | short | no_audio.
+FAKE_MAKEMKV_MODE: ok (default) | fail_old | hang | short | long | two_files | no_audio.
 FAKE_MAKEMKV_INFO: fixture replayed by `info` (default info_dvd.txt).
 """
 import json
@@ -39,8 +39,11 @@ def main():
     for pct in (0, 32768, 65536):
         sys.stdout.write(f"PRGV:{pct},{pct},65536\n")
         sys.stdout.flush()
-    seconds = 30 if mode == "short" else 6730
+    seconds = {"short": 30, "long": 9000}.get(mode, 6730)
     audio = 0 if mode == "no_audio" else 2
+    if mode == "two_files":
+        (out_dir / f"title_t{title:02d}_b.mkv").write_text(
+            json.dumps({"seconds": seconds, "video": 1, "audio": audio}), encoding="utf-8")
     (out_dir / f"title_t{title:02d}.mkv").write_text(
         json.dumps({"seconds": seconds, "video": 1, "audio": audio}), encoding="utf-8")
 

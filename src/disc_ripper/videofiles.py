@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 GIB = 1024**3
 STATVFS = getattr(os, "statvfs", None)  # absent on Windows dev machines: the space check is skipped
-MIN_LENGTH_FRACTION = 0.9
+CHUNK = 8 * 1024 * 1024
+
+
+class MoveCancelled(Exception):
+    """The copy was stopped by a cancel; src is untouched and nothing is left in downloads."""
 
 
 @dataclass
@@ -45,16 +49,18 @@ PROBE: Callable[[Path], MkvInfo] = ffprobe  # tests replace this
 
 def check_output(work: Path, expected_seconds: int) -> Path:
     """The one ripped file in work, if it looks right; RuntimeError says what's wrong."""
-    files = sorted(work.rglob("*.mkv")) if work.is_dir() else []
+    files = sorted(work.glob("*.mkv")) if work.is_dir() else []
     if not files:
         raise RuntimeError("MakeMKV finished but wrote no file.")
+    if len(files) > 1:
+        raise RuntimeError(f"MakeMKV wrote more than one file ({len(files)}); expected one.")
     path = files[0]
     info = PROBE(path)
     if info.video < 1:
         raise RuntimeError("The ripped file has no video.")
     if info.audio < 1:
         raise RuntimeError("The ripped file has no audio.")
-    if expected_seconds and info.seconds < expected_seconds * MIN_LENGTH_FRACTION:
+    if expected_seconds and abs(info.seconds - expected_seconds) > max(0.02 * expected_seconds, 5):
         raise RuntimeError(
             f"The ripped file's length is {info.seconds:.0f}s but the disc says {expected_seconds}s.")
     return path
@@ -69,7 +75,8 @@ def _free_name(dest: Path, name: str) -> Iterator[Path]:
         n += 1
 
 
-def move_to_downloads(config, rip_id: int, role: str, src: Path, statvfs=None, min_free_gb: float = 0) -> Path:
+def move_to_downloads(config, rip_id: int, role: str, src: Path, statvfs=None, min_free_gb: float = 0,
+                     cancel: threading.Event | None = None) -> Path:
     """Copy src to downloads/<rip_id>/ (extras in extras/), never overwriting, then remove src."""
     statvfs = statvfs or STATVFS
     size = src.stat().st_size
@@ -83,9 +90,14 @@ def move_to_downloads(config, rip_id: int, role: str, src: Path, statvfs=None, m
     part = dest / (src.name + ".part")
     try:
         with src.open("rb") as fin, part.open("wb") as fout:  # an old .part is overwritten
-            shutil.copyfileobj(fin, fout, 8 * 1024 * 1024)
+            while chunk := fin.read(CHUNK):
+                if cancel is not None and cancel.is_set():
+                    raise MoveCancelled()
+                fout.write(chunk)
             fout.flush()
             os.fsync(fout.fileno())
+        if cancel is not None and cancel.is_set():
+            raise MoveCancelled()
         for target in _free_name(dest, src.name):
             try:
                 os.link(part, target)  # atomic, and fails if the name is taken

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import types
 from pathlib import Path
 
@@ -202,3 +203,124 @@ def test_attempts_feed_should_eject(config, setup):
     services, rip = scanned(config, setup)
     assert [a[:2] for a in video_rips.attempts(setup, rip)] == [(0, rip)]
     assert not titles.should_eject(video_rips.attempts(setup, rip))
+
+
+def stub_mkv(folder, name, seconds, audio=2):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text(json.dumps({"seconds": seconds, "video": 1, "audio": audio}))
+
+
+def test_check_output_length_tolerance(tmp_path):
+    stub_mkv(tmp_path / "a", "t.mkv", 6730)
+    assert videofiles.check_output(tmp_path / "a", 6730).name == "t.mkv"
+    stub_mkv(tmp_path / "b", "t.mkv", 6730 * 0.97)  # about 3% short
+    with pytest.raises(RuntimeError, match="length"):
+        videofiles.check_output(tmp_path / "b", 6730)
+    stub_mkv(tmp_path / "c", "t.mkv", 6730 * 1.03)  # and too long
+    with pytest.raises(RuntimeError, match="length"):
+        videofiles.check_output(tmp_path / "c", 6730)
+    stub_mkv(tmp_path / "d", "t.mkv", 100)  # short titles get 5 s
+    assert videofiles.check_output(tmp_path / "d", 104)
+    with pytest.raises(RuntimeError, match="length"):
+        videofiles.check_output(tmp_path / "d", 106)
+
+
+def test_check_output_needs_exactly_one_top_level_file(tmp_path):
+    stub_mkv(tmp_path, "a.mkv", 100)
+    stub_mkv(tmp_path, "b.mkv", 100)
+    with pytest.raises(RuntimeError, match="more than one file"):
+        videofiles.check_output(tmp_path, 100)
+    stub_mkv(tmp_path / "n", "a.mkv", 100)
+    stub_mkv(tmp_path / "n" / "sub", "b.mkv", 100)  # nested files are not the output
+    assert videofiles.check_output(tmp_path / "n", 100).name == "a.mkv"
+
+
+def test_long_file_fails(config, setup, monkeypatch):
+    monkeypatch.setenv("FAKE_MAKEMKV_MODE", "long")
+    services, rip = scanned(config, setup)
+    row = run_until_done(config, setup, services, rip)
+    assert row["state"] == "failed" and "length" in row["error"]
+
+
+def test_two_files_fail_and_nothing_is_deleted_silently(config, setup, monkeypatch):
+    monkeypatch.setenv("FAKE_MAKEMKV_MODE", "two_files")
+    services, rip = scanned(config, setup)
+    row = run_until_done(config, setup, services, rip)
+    assert row["state"] == "failed" and "more than one file" in row["error"]
+    assert not (config.downloads_dir / str(rip)).exists()
+
+
+def test_cancel_during_move_leaves_nothing_in_downloads(config, tmp_path):
+    src = config.work_dir / "5" / "title_t00.mkv"
+    src.parent.mkdir()
+    src.write_bytes(b"x" * 100)
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(videofiles.MoveCancelled):
+        videofiles.move_to_downloads(config, 7, "main", src, min_free_gb=0, cancel=stop)
+    assert src.read_bytes() == b"x" * 100
+    assert not list((config.downloads_dir / "7").glob("*"))
+
+
+def test_cancel_mid_copy_stops_between_chunks(config, monkeypatch):
+    monkeypatch.setattr(videofiles, "CHUNK", 10)
+    src = config.work_dir / "5" / "title_t00.mkv"
+    src.parent.mkdir()
+    src.write_bytes(b"x" * 100)
+    stop = threading.Event()
+
+    class Reader:
+        def __init__(self, f):
+            self.f, self.n = f, 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.f.close()
+
+        def read(self, size):
+            self.n += 1
+            if self.n == 3:
+                stop.set()
+            return self.f.read(size)
+
+        def fileno(self):
+            return self.f.fileno()
+
+    real_open = Path.open
+    monkeypatch.setattr(Path, "open", lambda self, mode="r", *a, **k:
+                        Reader(real_open(self, mode, *a, **k)) if self == src else real_open(self, mode, *a, **k))
+    with pytest.raises(videofiles.MoveCancelled):
+        videofiles.move_to_downloads(config, 7, "main", src, min_free_gb=0, cancel=stop)
+    assert src.exists() and not list((config.downloads_dir / "7").glob("*"))
+
+
+def test_handler_cancel_during_move_keeps_file_in_work(config, setup, monkeypatch):
+    services, rip = scanned(config, setup)
+    inside = threading.Event()
+    real = videofiles.move_to_downloads
+
+    def slow(config_, rip_id, role, src, statvfs=None, min_free_gb=0, cancel=None):
+        inside.set()
+        assert cancel.wait(10)  # the handler must set the event on cancel
+        return real(config_, rip_id, role, src, min_free_gb=min_free_gb, cancel=cancel)
+
+    monkeypatch.setattr(videofiles, "move_to_downloads", slow)
+
+    async def go():
+        r = runner.JobRunner(config, Notifier(), Space(), services=services)
+        r.sync_workers({"serial:A"})
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 15
+        while not inside.is_set():
+            assert loop.time() < deadline
+            await asyncio.sleep(0.05)
+        await r.cancel(rip)
+        await r.stop()
+
+    asyncio.run(go())
+    assert jobs.get(setup, rip)["state"] == "cancelled"
+    assert (config.work_dir / str(rip) / "title_t00.mkv").is_file()
+    assert not list((config.downloads_dir / str(rip)).glob("*"))
+    assert rip_state(setup, rip)["files"] == "{}"
