@@ -234,50 +234,132 @@ class Services:
         await self.drive_changed(drive_id)
         return job_id
 
-    def _start_video_rip(self, conn, drive_id: str, fingerprint: str, main: int,
-                         scan_job_id: int | None = None) -> int | None:
-        disc = conn.execute("SELECT * FROM video_discs WHERE fingerprint = ?", (fingerprint,)).fetchone()
-        drive = conn.execute("SELECT sr_name FROM drives WHERE id = ?", (drive_id,)).fetchone()
-        title = next(t for t in json.loads(disc["scan"])["titles"] if t["number"] == main)
-        params = {"rip_id": 0, "fingerprint": fingerprint, "title": main, "role": "main",
-                  "minlength": disc["minlength"], "expected_seconds": title["seconds"],
-                  "sr_name": drive["sr_name"]}
-        now = utc_now()
+    @staticmethod
+    def _rip_params(disc, drive, fingerprint: str, title: dict, role: str) -> dict:
+        return {"rip_id": 0, "fingerprint": fingerprint, "title": title["number"], "role": role,
+                "minlength": disc["minlength"], "expected_seconds": title["seconds"],
+                "sr_name": drive["sr_name"]}
+
+    @staticmethod
+    def _insert_rip_job(conn, drive_id: str, params: dict, title: dict, now: str) -> int:
+        cur = conn.execute(
+            "INSERT INTO jobs (drive_id, kind, state, params, needs_bytes, uses_drive, created_at) "
+            "VALUES (?, 'rip_title', 'queued', ?, ?, 1, ?)",
+            (drive_id, json.dumps(params), math.ceil(title["size"] * 1.02), now),
+        )
+        return cur.lastrowid
+
+    def _start_video_rip(self, conn, drive_id: str, fingerprint: str, main: int | None,
+                         scan_job_id: int | None = None, extras: list[int] | None = None,
+                         again: bool = False) -> int | None:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            disc = conn.execute("SELECT * FROM video_discs WHERE fingerprint = ?", (fingerprint,)).fetchone()
+            drive = conn.execute("SELECT sr_name, video_hold FROM drives WHERE id = ?", (drive_id,)).fetchone()
+            if disc is None or drive is None:
+                conn.rollback()
+                return None
+            by_number = {t["number"]: t for t in json.loads(disc["scan"])["titles"]}
+            wanted = [] if main is None else [main]
+            for number in extras or []:
+                if number == main:
+                    continue  # the main title is not also an extra
+                if number not in wanted:
+                    wanted.append(number)
+            if not wanted or any(n not in by_number for n in wanted):
+                conn.rollback()
+                return None
             if scan_job_id is not None:  # an auto-start: Hold or a cancel may have come since the scan decided
-                hold = conn.execute("SELECT video_hold FROM drives WHERE id = ?", (drive_id,)).fetchone()
                 scan = conn.execute("SELECT state FROM jobs WHERE id = ?", (scan_job_id,)).fetchone()
-                if (hold is not None and hold["video_hold"]) or scan is None or scan["state"] != "running":
+                if drive["video_hold"] or scan is None or scan["state"] != "running":
                     conn.rollback()
                     return None
-            cur = conn.execute(
-                "INSERT INTO jobs (drive_id, kind, state, params, needs_bytes, uses_drive, created_at) "
-                "VALUES (?, 'rip_title', 'queued', ?, ?, 1, ?)",
-                (drive_id, json.dumps(params), math.ceil(title["size"] * 1.02), now),
-            )
-            job_id = cur.lastrowid
-            conn.execute("UPDATE jobs SET params = json_set(params, '$.rip_id', ?) WHERE id = ?", (job_id, job_id))
+            blocking = video_rips.blocking_rip(conn, fingerprint, self.config.downloads_dir, self.config.work_dir)
+            if blocking is not None and (blocking["state"] == "ripping" or not again):
+                conn.rollback()
+                return None
+            now = utc_now()
+            ids = []
+            for number in wanted:
+                role = "title" if main is None else ("main" if number == main else "extra")
+                params = self._rip_params(disc, drive, fingerprint, by_number[number], role)
+                ids.append(self._insert_rip_job(conn, drive_id, params, by_number[number], now))
+            rip_id = ids[0]
+            conn.execute("UPDATE jobs SET params = json_set(params, '$.rip_id', ?) WHERE id IN (%s)"
+                         % ",".join("?" * len(ids)), (rip_id, *ids))
             conn.execute(
                 "INSERT INTO video_rips (rip_id, fingerprint, state, main_title, created_at, updated_at) "
-                "VALUES (?, ?, 'ripping', ?, ?, ?)", (job_id, fingerprint, main, now, now))
+                "VALUES (?, ?, 'ripping', ?, ?, ?)", (rip_id, fingerprint, main, now, now))
+            if scan_job_id is None:  # a manual start lifts the hold
+                conn.execute("UPDATE drives SET video_hold = 0 WHERE id = ?", (drive_id,))
             conn.commit()
         except BaseException:
             conn.rollback()
             raise
-        return job_id
+        return rip_id
 
-    async def start_video_rip(self, drive_id: str, fingerprint: str, *, main: int, extras: list[int],
+    async def start_video_rip(self, drive_id: str, fingerprint: str, *, main: int | None, extras: list[int],
                               again: bool, scan_job_id: int | None = None) -> int | None:
-        """Queue the main title's rip. (Extras, TV titles and the duplicate guard come later.)"""
+        """Queue the main title then the extras (or every ticked title as a peer when there is no
+        main). None when refused: a rip is active, the disc is already ripped (without again),
+        or a title isn't on the disc."""
         rip_id = await asyncio.to_thread(self._db, self._start_video_rip, drive_id, fingerprint, main,
-                                         scan_job_id)
+                                         scan_job_id, extras, again)
         if rip_id is None:
             return None
         log.info("video: queued rip #%s on %s", rip_id, drive_id)
         self.wake(drive_id)
         await self.drive_changed(drive_id)
         return rip_id
+
+    def _add_video_extra(self, conn, rip_id: int, title: int) -> tuple[int | None, str | None]:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rip = conn.execute("SELECT * FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+            first = conn.execute("SELECT drive_id FROM jobs WHERE id = ?", (rip_id,)).fetchone()
+            if rip is None or first is None or first["drive_id"] is None:
+                conn.rollback()
+                return None, None
+            drive_id, fingerprint = first["drive_id"], rip["fingerprint"]
+            disc = conn.execute("SELECT * FROM video_discs WHERE fingerprint = ?", (fingerprint,)).fetchone()
+            drive = conn.execute("SELECT sr_name FROM drives WHERE id = ?", (drive_id,)).fetchone()
+            by_number = {t["number"]: t for t in json.loads(disc["scan"])["titles"]} if disc else {}
+            if title not in by_number or drive is None:
+                conn.rollback()
+                return None, None
+            active = conn.execute(
+                "SELECT 1 FROM jobs WHERE kind = 'rip_title' AND drive_id = ? "
+                "AND state IN ('queued', 'waiting_space', 'running') LIMIT 1", (drive_id,)).fetchone()
+            here = video_rips.disc_in_drive(conn, drive_id)
+            if active is None and (here is None or here["fingerprint"] != fingerprint):
+                conn.rollback()  # the extra has to rip from this disc
+                return None, None
+            if any(t == title and s in ("queued", "waiting_space", "running", "done")
+                   for t, _j, s in video_rips.attempts(conn, rip_id)):
+                conn.rollback()
+                return None, None
+            role = "title" if rip["main_title"] is None else "extra"
+            params = self._rip_params(disc, drive, fingerprint, by_number[title], role)
+            params["rip_id"] = rip_id
+            now = utc_now()
+            job_id = self._insert_rip_job(conn, drive_id, params, by_number[title], now)
+            conn.execute("UPDATE video_rips SET state = 'ripping', updated_at = ? WHERE rip_id = ?", (now, rip_id))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return job_id, drive_id
+
+    async def add_video_extra(self, rip_id: int, title: int) -> int | None:
+        """Queue one more title for a rip (an extra, or a peer when the rip has no main).
+        None when refused, e.g. the title already has a queued, running or finished attempt."""
+        job_id, drive_id = await asyncio.to_thread(self._db, self._add_video_extra, rip_id, title)
+        if job_id is None:
+            return None
+        log.info("video: queued title %s as job #%s of rip #%s", title, job_id, rip_id)
+        self.wake(drive_id)
+        await self.drive_changed(drive_id)
+        return job_id
 
     async def move_again(self, rip_id: int) -> str | None:
         """Retry moving a rip's files to downloads. Returns an error message, or None."""

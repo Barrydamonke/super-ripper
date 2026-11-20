@@ -202,5 +202,6 @@ def test_autostart_rechecks_hold_and_cancel(config, setup):
         setup.execute("UPDATE jobs SET state = 'running' WHERE id = ?", (j,))
     assert services._db(services._start_video_rip, "serial:A", fp, 0, j) is not None
     with setup:
+        setup.execute("DELETE FROM jobs WHERE kind = 'rip_title'")  # the one queued above would block
         setup.execute("UPDATE drives SET video_hold = 1")
     assert services._db(services._start_video_rip, "serial:A", fp, 0) is not None

@@ -31,6 +31,11 @@ def save_scan(conn: sqlite3.Connection, fingerprint: str, disc_type: str, label:
                          (drive_id, fingerprint))
 
 
+def set_as_film(conn: sqlite3.Connection, fingerprint: str, value: bool) -> None:
+    with conn:
+        conn.execute("UPDATE video_discs SET as_film = ? WHERE fingerprint = ?", (int(value), fingerprint))
+
+
 def disc_in_drive(conn: sqlite3.Connection, drive_id: str) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM video_discs WHERE drive_id = ? ORDER BY last_seen DESC LIMIT 1", (drive_id,)
