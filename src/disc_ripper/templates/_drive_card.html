@@ -60,6 +60,8 @@
   <div class="job">
     {% if job.state == "waiting_space" %}Waiting{% else %}Queued{% endif %}: {{ job.kind }} job #{{ job.id }}
     {%- if job.kind == "test" %} ({{ (params.get("duration_s", 0) // 60) }} min, {{ params.get("size_gb", 0) }} GB){% endif %}
+    {%- if job.kind == "rip_title" and params.get("role") == "main" %} (main title){% endif %}
+    {% if job.kind == "rip_title" and params.get("role") == "main" %}<button hx-post="/dashboard/video/hold" hx-vals='{"drive_id": {{ drive.id|tojson }}}' hx-target="#drive-{{ key }}">Hold</button>{% endif %}
     <button hx-post="/jobs/{{ job.id }}/cancel" hx-target="#drive-{{ key }}">Cancel</button>
     {% if job.message %}<div class="hint">{{ job.message }}</div>{% endif %}
   </div>

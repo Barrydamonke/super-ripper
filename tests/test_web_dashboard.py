@@ -548,3 +548,30 @@ def test_eject_cancels_queued_disc_jobs_first(dash):
     assert r.status_code == 200 and fake.ejected == 1
     assert [jobs.get(conn, j)["state"] for j in queued] == ["cancelled"] * 3
     assert jobs.get(conn, test_job)["state"] == "queued"  # not the disc's
+
+
+@pytest.mark.parametrize("state", ["queued", "waiting_space"])
+def test_hold_offered_for_a_main_rip_not_started(dash, state):
+    client, conn = dash
+    _video_disc(conn, DECOY, held=["x"])
+    client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": "0", "extras": ["4"]})
+    main, extra = [r[0] for r in conn.execute("SELECT id FROM jobs WHERE kind = 'rip_title' ORDER BY id")]
+    conn.execute("UPDATE jobs SET state = ? WHERE id = ?", (state, main))
+    conn.commit()
+    text = _page(client)
+    assert text.count('hx-post="/dashboard/video/hold"') == 1  # on the main title only
+    r = client.post("/dashboard/video/hold", data={"drive_id": "serial:A"})
+    assert r.status_code == 200
+    # Back to held: the main rip and its extras are gone, and the title table is back.
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind = 'rip_title'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM video_rips").fetchone()[0] == 0
+    assert 'name="main"' in r.text and "Held" in r.text
+
+
+def test_no_hold_for_a_running_main_rip(dash):
+    client, conn = dash
+    _video_disc(conn, DECOY, held=["x"])
+    client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": "0"})
+    conn.execute("UPDATE jobs SET state = 'running'")
+    conn.commit()
+    assert 'hx-post="/dashboard/video/hold"' not in _page(client)

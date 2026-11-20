@@ -471,16 +471,24 @@ class Services:
         disc = video_rips.disc_in_drive(conn, drive_id)
         if disc is None:
             return []
-        rows = conn.execute(
-            "SELECT id FROM jobs WHERE kind = 'rip_title' AND state IN ('queued', 'waiting_space') "
-            "AND json_extract(params, '$.fingerprint') = ? AND json_extract(params, '$.role') = 'main'",
-            (disc["fingerprint"],)).fetchall()
-        cancelled = []
-        for row in rows:
-            if jobs.cancel_queued(conn, row["id"], utc_now()) == "cancelled":
-                cancelled.append(row["id"])
-                with conn:  # a held rip never started: drop it (video_rips cascades with its job)
-                    conn.execute("DELETE FROM jobs WHERE id = ?", (row["id"],))
+        # One write transaction, so the worker can't start the main title or an extra in between.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            mains = [r[0] for r in conn.execute(
+                "SELECT id FROM jobs WHERE kind = 'rip_title' AND state IN ('queued', 'waiting_space') "
+                "AND json_extract(params, '$.fingerprint') = ? AND json_extract(params, '$.role') = 'main'",
+                (disc["fingerprint"],))]
+            cancelled = []
+            for main in mains:  # a held rip never started: drop it and its queued extras
+                cancelled += [r[0] for r in conn.execute(
+                    "SELECT id FROM jobs WHERE kind = 'rip_title' AND state IN ('queued', 'waiting_space') "
+                    "AND (id = ? OR json_extract(params, '$.rip_id') = ?)", (main, main))]
+            # video_rips cascades with the main job
+            conn.executemany("DELETE FROM jobs WHERE id = ?", [(i,) for i in cancelled])
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         return cancelled
 
     async def hold_video(self, drive_id: str) -> None:
