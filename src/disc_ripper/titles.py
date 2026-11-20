@@ -72,7 +72,7 @@ def hold_reasons(
         reasons.append("auto-start is off")
     if already_ripped:
         reasons.append(f"already ripped ({already_ripped})")
-    if from_insert:
+    if not from_insert:
         reasons.append("disc was in the drive at start-up")
     if main is None:
         reasons.append("no titles found")

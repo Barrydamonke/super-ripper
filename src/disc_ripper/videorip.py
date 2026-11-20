@@ -35,7 +35,7 @@ def _read(conn):
     return key, selection, minlength
 
 
-def _decide(conn, drive_id, disc_type, label, scan, minlength, at_startup, downloads_dir, work_dir, now):
+def _decide(conn, drive_id, disc_type, label, scan, minlength, from_insert, downloads_dir, work_dir, now):
     fp = makemkv.fingerprint(disc_type, label, scan.titles)
     blocking = video_rips.blocking_rip(conn, fp, downloads_dir, work_dir)
     hold = conn.execute("SELECT video_hold FROM drives WHERE id = ?", (drive_id,)).fetchone()
@@ -44,7 +44,7 @@ def _decide(conn, drive_id, disc_type, label, scan, minlength, at_startup, downl
         auto_start=bool(settings.get(conn, "auto_start_rips")),
         hold_pressed=bool(hold and hold["video_hold"]),
         already_ripped=f"downloads/{blocking['rip_id']}/" if blocking is not None else None,
-        from_insert=at_startup,  # titles.hold_reasons' flag is true for a disc present at start-up
+        from_insert=from_insert,
     )
     payload = {"label": scan.label, "titles": [dataclasses.asdict(t) for t in scan.titles]}
     video_rips.save_scan(conn, fp, disc_type, label, payload, minlength, reasons, drive_id, now)
@@ -76,7 +76,7 @@ async def run_scan_video(ctx: runner.JobContext) -> None:
         raise RuntimeError(last + (" " + hint if hint else ""))
 
     fp, reasons = await ctx.db(
-        _decide, ctx.drive_id, disc_type, label, scan, minlength, not params.get("from_insert"),
+        _decide, ctx.drive_id, disc_type, label, scan, minlength, bool(params.get("from_insert")),
         ctx.config.downloads_dir, ctx.config.work_dir, utc_now(),
     )
     log.info("video: scanned %r on %s: %d titles, held=%s", label, ctx.drive_id, len(scan.titles), reasons)

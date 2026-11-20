@@ -10,7 +10,7 @@ def T(n, secs, size=None, segs="", chapters=10):
 
 
 def flags(**kw):
-    base = dict(auto_start=True, hold_pressed=False, already_ripped=None, from_insert=False)
+    base = dict(auto_start=True, hold_pressed=False, already_ripped=None, from_insert=True)
     base.update(kw)
     return base
 
@@ -59,7 +59,7 @@ def test_tv_blocked_by_unrelated_long_title():
 def test_reasons_order_and_flags():
     titles = [T(0, 7000, segs="1"), T(1, 6990, segs="2")]
     assert hold_reasons(
-        titles, auto_start=False, hold_pressed=True, already_ripped="Film (2001)", from_insert=True
+        titles, auto_start=False, hold_pressed=True, already_ripped="Film (2001)", from_insert=False
     ) == [
         "two titles of about the same length (decoy playlists?)",
         "Hold pressed",

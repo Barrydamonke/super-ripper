@@ -283,9 +283,8 @@ class Services:
         for row in rows:
             if jobs.cancel_queued(conn, row["id"], utc_now()) == "cancelled":
                 cancelled.append(row["id"])
-                with conn:
-                    conn.execute("UPDATE video_rips SET state = 'failed', message = 'Held', updated_at = ? "
-                                 "WHERE rip_id = ?", (utc_now(), row["id"]))
+                with conn:  # a held rip never started: drop it (video_rips cascades with its job)
+                    conn.execute("DELETE FROM jobs WHERE id = ?", (row["id"],))
         return cancelled
 
     async def hold_video(self, drive_id: str) -> None:

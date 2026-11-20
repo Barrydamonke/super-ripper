@@ -150,8 +150,8 @@ def test_hold_cancels_queued_main_rip(config, setup):
     j = scan_job(setup)
     run(config, services, lambda: rip_jobs(setup) != [] or jobs.get(setup, j)["state"] == "failed")
     asyncio.run(services.hold_video("serial:A"))
-    [rip] = rip_jobs(setup)
-    assert rip["state"] == "cancelled"
+    assert rip_jobs(setup) == []
+    assert setup.execute("SELECT COUNT(*) FROM video_rips").fetchone()[0] == 0
     assert setup.execute("SELECT video_hold FROM drives").fetchone()[0] == 1
 
 
