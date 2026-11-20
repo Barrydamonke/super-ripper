@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import cd_rips, cdrip, coverart, db, drives, jobs, schedule_source, settings  # cdrip registers rip_cd
+from . import cd_rips, cdrip, coverart, db, drives, jobs, schedule_source, settings, video_rips, videorip  # cdrip, videorip register handlers
 from .jellyfin import Jellyfin, RefreshDebouncer
 from .musicbrainz import MusicBrainz
 from .cdrom import CdDrive
@@ -160,6 +160,9 @@ class Services:
         row = await asyncio.to_thread(
             self._db, lambda conn: conn.execute("SELECT disc_type FROM drives WHERE id = ?", (drive_id,)).fetchone()
         )
+        if row is not None and row["disc_type"] in ("dvd", "bluray"):
+            await self.enqueue_video_scan(drive_id, from_insert=False)
+            return
         if row is None or row["disc_type"] not in ("audio", "mixed"):
             return
         try:
@@ -175,6 +178,9 @@ class Services:
         row = await asyncio.to_thread(
             self._db, lambda conn: conn.execute("SELECT disc_type FROM drives WHERE id = ?", (drive_id,)).fetchone()
         )
+        if row is not None and row["disc_type"] in ("dvd", "bluray"):
+            await self.enqueue_video_scan(drive_id, from_insert=True)
+            return
         if row is None or row["disc_type"] not in ("audio", "mixed"):
             return
         try:
@@ -192,6 +198,101 @@ class Services:
             await self.drive_changed(drive_id)  # show Rip / "Already ripped" on the card
             return
         await self.enqueue_cd_rip(drive_id, toc)
+
+    # -- DVD / Blu-ray ---------------------------------------------------------
+
+    def _enqueue_video_scan(self, conn, drive_id: str, from_insert: bool) -> int | None:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            drive = conn.execute(
+                "SELECT sr_name, disc_type, disc_label FROM drives WHERE id = ?", (drive_id,)).fetchone()
+            busy = conn.execute(
+                "SELECT 1 FROM jobs WHERE drive_id = ? AND kind = 'scan_video' "
+                "AND state IN ('queued', 'waiting_space', 'running')", (drive_id,)).fetchone()
+            if drive is None or not drive["sr_name"] or busy:
+                conn.rollback()
+                return None
+            params = {"sr_name": drive["sr_name"], "disc_type": drive["disc_type"],
+                      "label": drive["disc_label"] or "", "from_insert": from_insert}
+            cur = conn.execute(
+                "INSERT INTO jobs (drive_id, kind, state, params, needs_bytes, uses_drive, created_at) "
+                "VALUES (?, 'scan_video', 'queued', ?, 0, 1, ?)",
+                (drive_id, json.dumps(params), utc_now()),
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return cur.lastrowid
+
+    async def enqueue_video_scan(self, drive_id: str, *, from_insert: bool) -> int | None:
+        """Queue a scan of the disc in a drive. None while one is already queued or running."""
+        job_id = await asyncio.to_thread(self._db, self._enqueue_video_scan, drive_id, from_insert)
+        if job_id is not None:
+            log.info("video: queued scan #%s on %s", job_id, drive_id)
+            self.wake(drive_id)
+        await self.drive_changed(drive_id)
+        return job_id
+
+    def _start_video_rip(self, conn, drive_id: str, fingerprint: str, main: int) -> int:
+        disc = conn.execute("SELECT * FROM video_discs WHERE fingerprint = ?", (fingerprint,)).fetchone()
+        drive = conn.execute("SELECT sr_name FROM drives WHERE id = ?", (drive_id,)).fetchone()
+        title = next(t for t in json.loads(disc["scan"])["titles"] if t["number"] == main)
+        params = {"rip_id": 0, "fingerprint": fingerprint, "title": main, "role": "main",
+                  "minlength": disc["minlength"], "expected_seconds": title["seconds"],
+                  "sr_name": drive["sr_name"]}
+        now = utc_now()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                "INSERT INTO jobs (drive_id, kind, state, params, needs_bytes, uses_drive, created_at) "
+                "VALUES (?, 'rip_title', 'queued', ?, ?, 1, ?)",
+                (drive_id, json.dumps(params), math.ceil(title["size"] * 1.02), now),
+            )
+            job_id = cur.lastrowid
+            conn.execute("UPDATE jobs SET params = json_set(params, '$.rip_id', ?) WHERE id = ?", (job_id, job_id))
+            conn.execute(
+                "INSERT INTO video_rips (rip_id, fingerprint, state, main_title, created_at, updated_at) "
+                "VALUES (?, ?, 'ripping', ?, ?, ?)", (job_id, fingerprint, main, now, now))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return job_id
+
+    async def start_video_rip(self, drive_id: str, fingerprint: str, *, main: int, extras: list[int],
+                              again: bool) -> int:
+        """Queue the main title's rip. (Extras, TV titles and the duplicate guard come later.)"""
+        rip_id = await asyncio.to_thread(self._db, self._start_video_rip, drive_id, fingerprint, main)
+        log.info("video: queued rip #%s on %s", rip_id, drive_id)
+        self.wake(drive_id)
+        await self.drive_changed(drive_id)
+        return rip_id
+
+    def _hold_video(self, conn, drive_id: str) -> list[int]:
+        with conn:
+            conn.execute("UPDATE drives SET video_hold = 1 WHERE id = ?", (drive_id,))
+        disc = video_rips.disc_in_drive(conn, drive_id)
+        if disc is None:
+            return []
+        rows = conn.execute(
+            "SELECT id FROM jobs WHERE kind = 'rip_title' AND state IN ('queued', 'waiting_space') "
+            "AND json_extract(params, '$.fingerprint') = ? AND json_extract(params, '$.role') = 'main'",
+            (disc["fingerprint"],)).fetchall()
+        cancelled = []
+        for row in rows:
+            if jobs.cancel_queued(conn, row["id"], utc_now()) == "cancelled":
+                cancelled.append(row["id"])
+                with conn:
+                    conn.execute("UPDATE video_rips SET state = 'failed', message = 'Held', updated_at = ? "
+                                 "WHERE rip_id = ?", (utc_now(), row["id"]))
+        return cancelled
+
+    async def hold_video(self, drive_id: str) -> None:
+        """Hold the disc: no automatic rip, and a queued (not yet running) main rip is cancelled."""
+        await asyncio.to_thread(self._db, self._hold_video, drive_id)
+        self.wake(drive_id)
+        await self.drive_changed(drive_id)
 
     # -- Notifier ------------------------------------------------------------
 

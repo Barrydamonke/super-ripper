@@ -61,7 +61,8 @@ class JobContext:
         return await self._runner.db(fn, *args, **kwargs)
 
     async def run_process(
-        self, argv: list[str], *, cwd: Path, on_line: Callable[[str], Awaitable[None]]
+        self, argv: list[str], *, cwd: Path, on_line: Callable[[str], Awaitable[None]],
+        env: dict[str, str] | None = None,
     ) -> int:
         """Run a child (fixed argv, no shell), feeding each output line to on_line.
 
@@ -75,6 +76,7 @@ class JobContext:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
+            env={**os.environ, **env} if env else None,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
