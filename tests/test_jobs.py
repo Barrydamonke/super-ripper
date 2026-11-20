@@ -123,3 +123,14 @@ def test_start_only_from_queued_or_waiting(conn):
     assert jobs.get(conn, j)["state"] == "cancelled"
     k = jobs.enqueue(conn, "serial:A", "test", {}, now="t")
     assert jobs.start(conn, k, "t3") is True
+
+
+def test_progress_after_finish_is_ignored(conn):
+    # A progress write already in flight when the job is stopped must not
+    # overwrite the final state's message.
+    j = jobs.enqueue(conn, "serial:A", "test", {}, now="t")
+    jobs.start(conn, j, "t")
+    jobs.finish(conn, j, "interrupted", "t2", message=jobs.INTERRUPTED_MESSAGE)
+    jobs.set_progress(conn, j, 0.5, "Test job: 3m left", None)
+    row = jobs.get(conn, j)
+    assert (row["message"], row["progress"]) == (jobs.INTERRUPTED_MESSAGE, 0.0)

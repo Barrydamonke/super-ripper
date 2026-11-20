@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Rip #{{ rip.job_id }} - Disc Ripper{% endblock %}
+{% block content %}
+<p><a href="/music">← Music</a></p>
+<h1>Rip #{{ rip.job_id }}: {{ rip.summary or "Unknown album" }}</h1>
+{% if rip.state != "needs_look" %}<p class="hint">This rip is {{ rip.state }}.</p>{% endif %}
+{% if reasons %}<p><strong>Why it's waiting:</strong> {{ reasons|join(" · ") }}</p>{% endif %}
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<h2>Tracks</h2>
+<table>
+  <thead><tr><th>#</th><th>Title</th><th>Length</th><th>AccurateRip</th><th>Listen</th></tr></thead>
+  <tbody>
+  {% for t in tracks %}
+    <tr>
+      <td>{{ t.n }}</td>
+      <td>{{ t.title or "—" }}{% if t.artist and t.title %} <span class="hint">{{ t.artist }}</span>{% endif %}</td>
+      <td>{{ t.duration }}</td>
+      <td class="{{ 'ok' if t.check == 'verified' else 'error' }}">{{ {"verified": "verified", "mismatch": "didn't match", "not_found": "not in database", "unknown": "unknown"}.get(t.check, t.check) }}</td>
+      <td><audio controls preload="none" src="/music/{{ rip.job_id }}/track/{{ t.n }}"></audio></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% if rip.state == "needs_look" %}
+{% if candidates %}
+<h2>Use a MusicBrainz release</h2>
+<form method="post" action="/music/{{ rip.job_id }}/use-release">
+  {% for c in candidates %}
+    <label>
+      <input type="radio" name="release_id" value="{{ c.release_id }}" {% if loop.first %}checked{% endif %}>
+      <strong>{{ c.album_artist }} — {{ c.title }}</strong>
+      {{ c.date or "no date" }}{% if c.country %} · {{ c.country }}{% endif %}{% if c.label %} · {{ c.label }}{% endif %}{% if c.barcode %} · {{ c.barcode }}{% endif %}
+      · disc {{ c.medium }} of {{ c.medium_count }} · {{ c.tracks|length }} tracks
+      <span class="hint">{% for t in c.tracks[:4] %}{{ t.number }}. {{ t.title }}{% if not loop.last %}; {% endif %}{% endfor %}{% if c.tracks|length > 4 %}…{% endif %}</span>
+    </label>
+  {% endfor %}
+  <button type="submit">Use this release</button>
+</form>
+{% endif %}
+
+<h2>Use a MusicBrainz link</h2>
+<form method="post" action="/music/{{ rip.job_id }}/use-url">
+  <label>Release link or ID <input type="text" name="ref" value="{{ form.get('ref', '') }}" size="60"></label>
+  <label>Disc number (only if asked) <input type="text" name="medium" value="{{ form.get('medium', '') }}" size="3"></label>
+  <button type="submit">Look up and file</button>
+</form>
+
+<h2>Type it in</h2>
+<form method="post" action="/music/{{ rip.job_id }}/manual">
+  <label>Album <input type="text" name="album" value="{{ form.get('album', '') }}"></label>
+  <label>Album artist <input type="text" name="album_artist" value="{{ form.get('album_artist', '') }}"> <span class="hint">"Various Artists" for compilations</span></label>
+  <label>Year <input type="text" name="year" value="{{ form.get('year', '') }}" size="5"></label>
+  <label class="inline">Disc <input type="text" name="disc" value="{{ form.get('disc', '1') }}" size="2"></label>
+  <label class="inline">of <input type="text" name="disc_total" value="{{ form.get('disc_total', '1') }}" size="2"></label>
+  <table>
+    <thead><tr><th>#</th><th>Title</th><th>Artist (compilations)</th></tr></thead>
+    <tbody>
+    {% for t in tracks %}
+      <tr>
+        <td>{{ t.n }}</td>
+        <td><input type="text" name="title_{{ t.n }}" value="{{ form.get('title_' ~ t.n, t.title) }}"></td>
+        <td><input type="text" name="artist_{{ t.n }}" value="{{ form.get('artist_' ~ t.n, '') }}"></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <button type="submit">File with these details</button>
+</form>
+
+{% if albums %}
+<h2>Add to an album in the library</h2>
+<form method="post" action="/music/{{ rip.job_id }}/add-to">
+  <label>Album
+    <select name="album_key">
+      {% for a in albums %}<option value="{{ a.album_key }}">{{ a.album_artist }} — {{ a.album }}{% if a.year %} ({{ a.year }}){% endif %}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="inline">This is disc <input type="text" name="disc" value="{{ form.get('disc', '2') }}" size="2"></label>
+  <table>
+    <thead><tr><th>#</th><th>Title</th></tr></thead>
+    <tbody>
+    {% for t in tracks %}
+      <tr><td>{{ t.n }}</td><td><input type="text" name="addto_title_{{ t.n }}" value="{{ form.get('addto_title_' ~ t.n, t.title) }}"></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">Leave every title blank to use the chosen MusicBrainz release's titles.</p>
+  <button type="submit">Add this disc</button>
+</form>
+{% endif %}
+
+<h2>Or</h2>
+<form method="post" action="/music/{{ rip.job_id }}/file-anyway" class="inline">
+  <button type="submit">File anyway</button>
+</form>
+<form method="post" action="/music/{{ rip.job_id }}/discard" class="inline"
+      onsubmit="return confirm('Delete these ripped files?');">
+  <button type="submit">Discard</button>
+</form>
+{% endif %}
+{% endblock %}

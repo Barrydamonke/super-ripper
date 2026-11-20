@@ -8,6 +8,10 @@ VALID = {
     "shutdown_grace_hours": "3",
     "raw_retention_hours": "24",
     "iso_dir": "/data/ISOs",
+    "cd_rip_mode": "secure",
+    "cd_retries": "10",
+    "cd_approval": "odd_ones",
+    "cd_cover_art": "on",
 }
 
 
@@ -142,3 +146,36 @@ def test_change_password_errors(logged_in_client):
     assert "do not match" in r.text
     # the original password still works
     assert logged_in_client.get("/settings").status_code == 200
+
+
+def test_secret_never_rendered(logged_in_client):
+    r = logged_in_client.post("/settings", data={**VALID, "jellyfin_api_key": "s3cr3t-key"})
+    assert r.status_code == 200
+    assert "s3cr3t-key" not in r.text
+    page = logged_in_client.get("/settings").text
+    assert "s3cr3t-key" not in page
+    assert "Set — leave blank to keep" in page
+    # saving again with the field blank keeps it
+    logged_in_client.post("/settings", data=VALID)
+    from disc_ripper import db, settings
+
+    conn = db.connect(logged_in_client.app.state.config.db_path)
+    try:
+        assert settings.get(conn, "jellyfin_api_key") == "s3cr3t-key"
+    finally:
+        conn.close()
+
+
+def test_read_offset_update(logged_in_client, config, add_sg):
+    add_sg(config.sysfs_root, 1, vpd_serial=SERIAL)
+    logged_in_client.post("/drives/rescan")
+    r = logged_in_client.post(
+        "/drives/update", data={"drive_id": "serial:ABC123", "label": "BD", "enabled": "on", "read_offset": "667"}
+    )
+    assert r.status_code == 200
+    assert 'value="667"' in r.text
+    r = logged_in_client.post(
+        "/drives/update", data={"drive_id": "serial:ABC123", "label": "BD", "enabled": "on", "read_offset": "99999"}
+    )
+    assert r.status_code == 400
+    assert 'value="667"' in r.text

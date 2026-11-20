@@ -45,6 +45,8 @@ def _render(
             "message": message,
             "password_error": password_error,
             "password_message": password_message,
+            # Only whether each secret is set; the value itself never reaches the page.
+            "secrets_set": {d.key: bool(settings.get(conn, d.key)) for d in settings.SETTINGS if d.kind == "secret"},
         },
         status_code=status_code,
     )
@@ -59,10 +61,12 @@ def settings_page(request: Request, conn: sqlite3.Connection = Depends(get_conn)
 async def settings_save(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     form = {k: v for k, v in (await request.form()).items() if isinstance(v, str)}
     try:
-        parsed = settings.parse_form(form)
+        parsed = settings.parse_form(form, current=settings.get_all(conn))
     except settings.SettingsError as exc:
         submitted: dict[str, Any] = {}
         for d in settings.SETTINGS:
+            if d.kind == "secret":
+                continue  # never echo a secret back, even a rejected one
             submitted[d.key] = d.key in form if d.kind == "bool" else form.get(d.key, "")
         return _render(request, conn, values=submitted, errors=exc.errors, status_code=400)
     settings.save(conn, parsed)

@@ -103,3 +103,80 @@ def test_guard_loop_survives_render_error(config, add_sg, monkeypatch):
 
     asyncio.run(main())
     assert len(calls) > 2
+
+
+def test_services_register_cd_rip_job(config):
+    from disc_ripper import runner
+
+    svc = services.Services(config)
+    assert "rip_cd" in svc.runner.handlers
+    assert svc.runner.services is svc
+    assert runner.HANDLERS is svc.runner.handlers
+
+
+def test_services_cd_helpers(config):
+    from disc_ripper import db, jellyfin, musicbrainz, settings
+
+    conn = db.connect(config.db_path)
+    db.migrate(conn)
+    svc = services.Services(config)
+    assert isinstance(svc.musicbrainz, musicbrainz.MusicBrainz)
+    assert svc.jellyfin() is None  # not configured
+    try:
+        settings.save(conn, {"jellyfin_url": "http://jf:8096", "jellyfin_api_key": "k"})
+    finally:
+        conn.close()
+    client = svc.jellyfin()
+    assert isinstance(client, jellyfin.Jellyfin) and client.base == "http://jf:8096"
+    assert isinstance(svc.refresher, jellyfin.RefreshDebouncer)
+    assert callable(svc.cover_fetch)
+
+
+def test_start_sweeps_old_work_folders(config, add_sg, monkeypatch):
+    import asyncio
+
+    from disc_ripper import cdrip
+
+    _prepare(config, add_sg).close()
+    calls = []
+    monkeypatch.setattr(cdrip, "sweep_work", lambda conn, work_dir, now: calls.append(work_dir))
+    svc = services.Services(config)
+
+    async def main():
+        await svc.start()
+        await svc.stop()
+
+    asyncio.run(main())
+    assert calls == [config.work_dir]
+
+
+def test_start_reconciles_interrupted_cd_rips(config, add_sg):
+    import asyncio
+
+    from disc_ripper import cd_rips
+
+    from .conftest import make_flac
+
+    conn = _prepare(config, add_sg)
+    filing_job = jobs.enqueue(conn, "serial:A", "rip_cd", {}, now="t")
+    cd_rips.create(conn, filing_job, "d1", "t")
+    cd_rips.update(conn, filing_job, state="filing")
+    ident_job = jobs.enqueue(conn, "serial:A", "rip_cd", {}, now="t")
+    jobs.start(conn, ident_job, "t")  # killed while identifying
+    cd_rips.create(conn, ident_job, "d2", "t")
+    dest = config.downloads_dir / str(ident_job)
+    make_flac(dest / "01.flac")
+    cd_rips.update(conn, ident_job, downloads_path=str(dest))
+    assert cd_rips.blocking_rip_for_disc(conn, "d1") is not None  # 'filing' blocks re-rips
+
+    svc = services.Services(config)
+
+    async def main():
+        await svc.start()
+        await svc.stop()
+
+    asyncio.run(main())
+    assert cd_rips.get(conn, filing_job)["state"] == "needs_look"
+    row = cd_rips.get(conn, ident_job)
+    assert row["state"] == "needs_look" and "interrupted" in row["reasons"]
+    conn.close()

@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
+from .cdtoc import Toc
+
 # linux/cdrom.h
 CDROMEJECT = 0x5309
 CDROMCLOSETRAY = 0x5319
@@ -66,6 +68,39 @@ class SgIoHdr(ctypes.Structure):
         ("resid", ctypes.c_int),
         ("duration", ctypes.c_uint),
         ("info", ctypes.c_uint),
+    ]
+
+
+CDROMREADTOCHDR = 0x5305
+CDROMREADTOCENTRY = 0x5306
+CDROM_LBA = 0x01
+CDROM_LEADOUT = 0xAA
+_CTRL_DATA = 0x04
+
+
+class CdromTocHdr(ctypes.Structure):
+    """struct cdrom_tochdr from <linux/cdrom.h>."""
+
+    _fields_ = [("cdth_trk0", ctypes.c_ubyte), ("cdth_trk1", ctypes.c_ubyte)]
+
+
+class _CdromMsf0(ctypes.Structure):
+    _fields_ = [("minute", ctypes.c_ubyte), ("second", ctypes.c_ubyte), ("frame", ctypes.c_ubyte)]
+
+
+class _CdromAddr(ctypes.Union):
+    _fields_ = [("msf", _CdromMsf0), ("lba", ctypes.c_int)]
+
+
+class CdromTocEntry(ctypes.Structure):
+    """struct cdrom_tocentry. cdte_adr:4 and cdte_ctrl:4 share one byte (adr low, ctrl high)."""
+
+    _fields_ = [
+        ("cdte_track", ctypes.c_ubyte),
+        ("cdte_adr_ctrl", ctypes.c_ubyte),
+        ("cdte_format", ctypes.c_ubyte),
+        ("cdte_addr", _CdromAddr),
+        ("cdte_datamode", ctypes.c_ubyte),
     ]
 
 
@@ -132,6 +167,27 @@ class CdDrive:
         if len(data) != _SECTOR:
             raise OSError(f"short read at sector {lba}: {len(data)} bytes")
         return data
+
+    def read_toc(self) -> Toc:
+        """The disc's table of contents (raw LBAs), with data tracks marked."""
+        with self._fd() as fd:
+            hdr = CdromTocHdr()
+            self._ioctl(fd, CDROMREADTOCHDR, hdr)
+            first, last = hdr.cdth_trk0, hdr.cdth_trk1
+            if not 1 <= first <= last <= 99:
+                raise OSError(f"bad table of contents: tracks {first}..{last}")
+            offsets = []
+            data_tracks = set()
+            for track in [*range(first, last + 1), CDROM_LEADOUT]:
+                entry = CdromTocEntry(cdte_track=track, cdte_format=CDROM_LBA)
+                self._ioctl(fd, CDROMREADTOCENTRY, entry)
+                if track == CDROM_LEADOUT:
+                    leadout = entry.cdte_addr.lba
+                else:
+                    offsets.append(entry.cdte_addr.lba)
+                    if (entry.cdte_adr_ctrl >> 4) & _CTRL_DATA:
+                        data_tracks.add(track)
+        return Toc(first, last, tuple(offsets), leadout, frozenset(data_tracks))
 
     def get_configuration(self) -> bytes:
         """GET CONFIGURATION header (8 bytes): the drive's current media profile."""

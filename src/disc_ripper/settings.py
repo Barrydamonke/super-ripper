@@ -22,12 +22,14 @@ _TRUE_VALUES = {"on", "true", "1"}
 class SettingDef:
     key: str
     label: str
-    kind: Literal["int", "float", "bool", "path", "url"]
+    kind: Literal["int", "float", "bool", "path", "url", "choice", "secret"]
     default: Any
     unit: str = ""
     minimum: float | None = None
     maximum: float | None = None
     help: str = ""
+    # (value, label) pairs for kind "choice"
+    choices: tuple[tuple[str, str], ...] = ()
 
 
 SETTINGS: tuple[SettingDef, ...] = (
@@ -48,6 +50,29 @@ SETTINGS: tuple[SettingDef, ...] = (
         "How long past the scheduled end jobs may delay shutdown. "
         "unraid-backend stops waiting for the ripper 4 hours after a shutdown request, "
         "so this must stay below that.",
+    ),
+    SettingDef(
+        "cd_rip_mode", "CD rip mode", "choice", "secure",
+        help="Secure re-reads every sector until it is sure (slower; best for scratched discs).",
+        choices=(("secure", "Secure (re-read until sure)"), ("fast", "Fast")),
+    ),
+    SettingDef(
+        "cd_retries", "CD retries per bad sector", "int", 10, "", 0, 50,
+        "How often cyanrip re-reads a bad sector before flagging the track.",
+    ),
+    SettingDef(
+        "cd_approval", "CD approval", "choice", "odd_ones",
+        help="Only check the odd ones: an exact match with every track verified files itself.",
+        choices=(("odd_ones", "Only check the odd ones"), ("always", "Always ask")),
+    ),
+    SettingDef("cd_cover_art", "Fetch CD cover art", "bool", True, help="Save cover.jpg from the Cover Art Archive."),
+    SettingDef(
+        "jellyfin_url", "Jellyfin address", "url", "",
+        help="For the music duplicate check and library refresh, e.g. http://192.168.68.143:8096.",
+    ),
+    SettingDef(
+        "jellyfin_api_key", "Jellyfin API key", "secret", "",
+        help="Jellyfin Dashboard → API Keys. Never shown again once saved.",
     ),
     SettingDef(
         "schedule_status_url", "Schedule source (unraid-backend /status)", "url", "",
@@ -119,6 +144,13 @@ def _parse_one(definition: SettingDef, raw: str | None) -> Any:
     if definition.kind == "bool":
         return raw is not None and raw.strip().lower() in _TRUE_VALUES
     text = (raw or "").strip()
+    if definition.kind == "secret":
+        return text
+    if definition.kind == "choice":
+        values = [value for value, _label in definition.choices]
+        if text not in values:
+            raise ValueError(f"Must be one of: {', '.join(values)}.")
+        return text
     if definition.kind == "url":
         return _parse_url(text)
     if definition.kind == "path":
@@ -159,12 +191,16 @@ def _parse_url(text: str) -> str:
     return text
 
 
-def parse_form(form: Mapping[str, str]) -> dict[str, Any]:
+def parse_form(form: Mapping[str, str], current: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Parse the settings form. A blank secret keeps its current value."""
     values: dict[str, Any] = {}
     errors: dict[str, str] = {}
     for definition in SETTINGS:
         try:
-            values[definition.key] = _parse_one(definition, form.get(definition.key))
+            value = _parse_one(definition, form.get(definition.key))
+            if definition.kind == "secret" and value == "" and current is not None:
+                value = current.get(definition.key, "")
+            values[definition.key] = value
         except ValueError as exc:
             errors[definition.key] = str(exc)
     if errors:

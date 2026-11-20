@@ -13,7 +13,8 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from .. import busy, db, drives, jobs, schedule_source
+from .. import busy, cd_rips, db, drives, jobs, schedule_source
+from ..cdtoc import musicbrainz_disc_id
 from ..clock import utc_now
 from ..events import format_sse
 from ..services import Services, drive_key
@@ -46,12 +47,24 @@ def render_drive_card(
     running_finish = None
     if grouped.running is not None and grouped.running["estimated_finish"]:
         running_finish = datetime.fromisoformat(grouped.running["estimated_finish"])
+    audio = drive_row["media_state"] == "disc" and drive_row["disc_type"] in ("audio", "mixed")
+    disc = cd_rips.disc_in_drive(conn, drive_row["id"]) if audio else None
+    blocking = cd_rips.blocking_rip_for_disc(conn, disc["disc_id"]) if disc else None
+    rips = {
+        row["job_id"]: row
+        for job in grouped.recent
+        if job["kind"] == "rip_cd" and (row := cd_rips.get(conn, job["id"])) is not None
+    }
     return templates.get_template("_drive_card.html").render(
         drive=drive_row,
         key=drive_key(drive_row["id"]),
         jobs=grouped,
         guard=guard,
         error=error,
+        audio=audio,
+        disc=disc,
+        blocking=blocking,
+        rips=rips,
         default_minutes=DEFAULT_TEST_MINUTES,
         running_past_grace=_past_grace(guard, running_finish),
         new_job_past_grace=_past_grace(guard, now + timedelta(minutes=DEFAULT_TEST_MINUTES)),
@@ -160,6 +173,24 @@ async def eject(request: Request, drive_id: str = Form(...)):
 @router.post("/dashboard/close")
 async def close_tray(request: Request, drive_id: str = Form(...)):
     return await _card(request, drive_id, error=await _drive_action(request, drive_id, "close"))
+
+
+@router.post("/dashboard/rip")
+async def rip_cd(request: Request, drive_id: str = Form(...), again: str = Form("")):
+    """Rip the audio CD in a drive (the Rip / Rip again buttons)."""
+    row = await asyncio.to_thread(_with_conn, request, _drive, drive_id)
+    if row is None:
+        return HTMLResponse('<p class="error">Unknown drive.</p>', status_code=404)
+    if row["media_state"] != "disc" or row["disc_type"] not in ("audio", "mixed"):
+        return await _card(request, drive_id, error="Only audio CDs can be ripped here so far.", status_code=400)
+    svc = _services(request)
+    try:
+        toc = await asyncio.to_thread(svc.read_toc, drive_id)
+    except OSError as exc:
+        return await _card(request, drive_id, error=f"Couldn't read the disc: {exc}", status_code=400)
+    # Refused (already queued, or already ripped without "again"): the card explains why.
+    await svc.enqueue_cd_rip(drive_id, toc, again=bool(again))
+    return await _card(request, drive_id)
 
 
 def _parse_test_job(minutes: str, size_gb: str) -> tuple[int, float]:

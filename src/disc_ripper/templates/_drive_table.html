@@ -1,4 +1,5 @@
 <div id="drive-table">
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if not items %}
   <p>No optical drives found. On the server, check that the drives show up in <code>/proc/sys/dev/cdrom/info</code>, then press Rescan.</p>
 {% else %}
@@ -23,6 +24,7 @@
             <input type="hidden" name="drive_id" value="{{ row.id }}">
             <input type="text" name="label" value="{{ row.label }}" maxlength="40" placeholder="e.g. Blu-ray">
             <label class="inline"><input type="checkbox" name="enabled" {% if row.enabled %}checked{% endif %}> enabled</label>
+            <label class="inline">read offset <input type="text" name="read_offset" value="{{ row.read_offset }}" size="5" inputmode="numeric"></label>
             <button type="submit">Save</button>
           </form>
         </td>

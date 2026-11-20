@@ -8,13 +8,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import math
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-from . import db, drives, jobs, schedule_source
+from . import cd_rips, cdrip, coverart, db, drives, jobs, schedule_source, settings  # cdrip registers rip_cd
+from .jellyfin import Jellyfin, RefreshDebouncer
+from .musicbrainz import MusicBrainz
 from .cdrom import CdDrive
+from .cdtoc import Toc, musicbrainz_disc_id
 from .clock import utc_now
 from .config import AppConfig
 from .events import Broker
@@ -26,6 +31,8 @@ log = logging.getLogger(__name__)
 
 SCHEDULE_REFRESH_SECONDS = 300
 GUARD_TICK_SECONDS = 60
+CD_BYTES_PER_SECOND = 176_400  # 44.1 kHz, 16-bit stereo
+FLAC_RATIO = 0.75  # generous: FLAC is usually 50-70% of the raw audio
 
 
 def drive_key(drive_id: str) -> str:
@@ -56,11 +63,135 @@ class Services:
         self.broker = Broker()
         self.space = SpaceChecker(config.work_dir)
         # Indirect, so drive_factory can be swapped after construction (tests).
-        self.monitor = MediaMonitor(config, self, drive_factory=lambda path: self.drive_factory(path))
-        self.runner = JobRunner(config, self, self.space)
+        self.monitor = MediaMonitor(
+            config, self, drive_factory=lambda path: self.drive_factory(path), on_insert=self.on_insert,
+            on_present=self.on_present,
+        )
+        self.runner = JobRunner(config, self, self.space, services=self)
+        self.musicbrainz = MusicBrainz()
+        self.refresher = RefreshDebouncer(self.jellyfin)
+        self.cover_fetch = coverart.fetch_front
         self._tasks: list[asyncio.Task] = []
         self._loop: asyncio.AbstractEventLoop | None = None
         self._schedule_error: str | None = None
+
+    def jellyfin(self) -> Jellyfin | None:
+        """A Jellyfin client from the current settings, or None if not configured."""
+        conn = db.connect(self.config.db_path)
+        try:
+            url, key = settings.get(conn, "jellyfin_url"), settings.get(conn, "jellyfin_api_key")
+        finally:
+            conn.close()
+        return Jellyfin(url, key) if url and key else None
+
+    # -- audio CDs -------------------------------------------------------------
+
+    def music_waiting(self) -> int:
+        """How many rips wait on the Music page (shown in the nav)."""
+        return self._db(lambda conn: conn.execute("SELECT COUNT(*) FROM cd_rips WHERE state = 'needs_look'").fetchone()[0])
+
+    def _db(self, fn, *args):
+        conn = db.connect(self.config.db_path)
+        try:
+            return fn(conn, *args)
+        finally:
+            conn.close()
+
+    def read_toc(self, drive_id: str) -> Toc:
+        """The TOC of the disc in a drive, read under the drive's lock (no waiting on a busy drive)."""
+        row = self._db(lambda conn: conn.execute("SELECT sr_name FROM drives WHERE id = ?", (drive_id,)).fetchone())
+        if row is None or not row["sr_name"]:
+            raise OSError("This drive has no /dev/sr node.")
+        lock = self.monitor.drive_lock(drive_id)
+        if not lock.acquire(timeout=5.0):
+            raise OSError("The drive is busy.")
+        try:
+            toc = self.drive_factory(self.config.dev_root / row["sr_name"]).read_toc()
+        finally:
+            lock.release()
+        disc_id = musicbrainz_disc_id(toc)
+        self._db(cd_rips.remember_disc, disc_id, toc.to_json(), len(toc.audio_tracks), drive_id, utc_now())
+        return toc
+
+    def _enqueue_cd_rip(self, conn, drive_id: str, toc: Toc, again: bool) -> int | None:
+        """Check and queue in one write transaction, so the Rip button and an insert
+        (or a double-click) can't both queue the same disc."""
+        drive = conn.execute("SELECT sr_name, read_offset FROM drives WHERE id = ?", (drive_id,)).fetchone()
+        disc_id = musicbrainz_disc_id(toc)
+        params = {"disc_id": disc_id, "toc": toc.to_json(), "offset": drive["read_offset"], "sr_name": drive["sr_name"]}
+        now = utc_now()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            blocking = cd_rips.blocking_rip_for_disc(conn, disc_id)
+            active = blocking is not None and blocking["job_state"] in ("queued", "waiting_space", "running")
+            if active or (blocking is not None and not again):
+                conn.rollback()
+                return None
+            cur = conn.execute(
+                """
+                INSERT INTO jobs (drive_id, kind, state, params, needs_bytes, uses_drive, created_at)
+                VALUES (?, 'rip_cd', 'queued', ?, ?, 1, ?)
+                """,
+                (drive_id, json.dumps(params), math.ceil(toc.audio_seconds * CD_BYTES_PER_SECOND * FLAC_RATIO), now),
+            )
+            job_id = cur.lastrowid
+            conn.execute(
+                "INSERT INTO cd_rips (job_id, disc_id, state, updated_at) VALUES (?, ?, 'ripping', ?)",
+                (job_id, disc_id, now),
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return job_id
+
+    async def enqueue_cd_rip(self, drive_id: str, toc: Toc, *, again: bool = False) -> int | None:
+        """Queue a rip of the disc. None if this disc is already queued or ripping, or
+        (without again) was already ripped and filed or is waiting for a look."""
+        job_id = await asyncio.to_thread(self._db, self._enqueue_cd_rip, drive_id, toc, again)
+        if job_id is not None:
+            log.info("cd: queued rip #%s on %s", job_id, drive_id)
+            self.wake(drive_id)
+        await self.drive_changed(drive_id)
+        return job_id
+
+    async def on_present(self, drive_id: str) -> None:
+        """A disc already in the drive at start-up: remember it (for the card), don't rip it."""
+        row = await asyncio.to_thread(
+            self._db, lambda conn: conn.execute("SELECT disc_type FROM drives WHERE id = ?", (drive_id,)).fetchone()
+        )
+        if row is None or row["disc_type"] not in ("audio", "mixed"):
+            return
+        try:
+            await asyncio.to_thread(self.read_toc, drive_id)
+        except OSError as exc:
+            log.warning("cd: reading the TOC on %s failed: %s", drive_id, exc)
+            return
+        await self.drive_changed(drive_id)
+
+    async def on_insert(self, drive_id: str) -> None:
+        """An audio CD went in: remember it and, with auto-start on, queue its rip
+        unless this disc was already ripped (filed or waiting for a look)."""
+        row = await asyncio.to_thread(
+            self._db, lambda conn: conn.execute("SELECT disc_type FROM drives WHERE id = ?", (drive_id,)).fetchone()
+        )
+        if row is None or row["disc_type"] not in ("audio", "mixed"):
+            return
+        try:
+            toc = await asyncio.to_thread(self.read_toc, drive_id)
+        except OSError as exc:
+            log.warning("cd: reading the TOC on %s failed: %s", drive_id, exc)
+            return
+        disc_id = musicbrainz_disc_id(toc)
+
+        def check(conn):
+            return settings.get(conn, "auto_start_rips"), cd_rips.blocking_rip_for_disc(conn, disc_id)
+
+        auto, blocking = await asyncio.to_thread(self._db, check)
+        if not auto or blocking is not None:
+            await self.drive_changed(drive_id)  # show Rip / "Already ripped" on the card
+            return
+        await self.enqueue_cd_rip(drive_id, toc)
 
     # -- Notifier ------------------------------------------------------------
 
@@ -162,6 +293,8 @@ class Services:
         conn = db.connect(self.config.db_path)
         try:
             count = jobs.mark_interrupted(conn, utc_now())
+            cd_rips.reconcile(conn, self.config.work_dir)
+            cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc))
         finally:
             conn.close()
         if count:

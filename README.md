@@ -2,12 +2,16 @@
 
 A single Docker container for Unraid that rips, encodes and burns discs from its own web UI. The design is in [Disc Ripper – Design Plan.md](Disc%20Ripper%20%E2%80%93%20Design%20Plan.md).
 
-Current state: **step 2 (detection, queues and the shutdown guard)**.
+Current state: **step 3 (audio CD ripping)**, on top of step 2 (detection, queues and the shutdown guard).
 - **Dashboard** (the home page): shows each enabled drive live, as empty, tray open or disc in, with the disc type and label. It has Eject and Close tray buttons, and lets you queue a *test job*: a pretend job with a chosen length and size that exercises the queue, progress and cache-space check.
 - **Drives page:** labels and enables drives.
+- **Audio CDs:**
+  - Insert a CD and it rips to FLAC (cyanrip), checked against AccurateRip, identified on MusicBrainz, tagged, and given its cover.
+  - A clean rip files itself into `/data/MEDIA/Music/<Album Artist>/<Album> (<Year>)/`.
+  - Anything that needs a decision waits on the **Music** page: no match, several possible releases, unverified tracks, or an album you already have.
 - **Shutdown guard:** reads the Pi's power schedule and tells unraid-backend, through `/api/busy`, to wait while a job runs, for at most the grace period after the scheduled end.
 
-Ripping comes in later steps.
+DVD, Blu-ray and data-disc ripping come in later steps.
 
 ## Install on Unraid
 
@@ -41,6 +45,36 @@ Check the guard by hand: `curl -H "X-Shutdown-Secret: <secret>" http://<unraid-i
 4. Queue a test job whose size is bigger than the work-area budget. It should wait with a "Waiting for cache space" message.
 5. On a real evening, start a test job that runs past the scheduled end. unraid-backend should hold the shutdown until the job finishes or the grace period ends.
 
+### Audio CD setup
+
+1. **Read offsets.** These are on the Drives page, pre-filled for an LG BH10LS38 (+667) and an iHAS124 A–F (+6), the AccurateRip database values. For any other drive, look its model up at accuraterip.com/driveoffsets.htm, or run `cyanrip -f` with a disc that AccurateRip knows. With a wrong offset, every track shows as "not verified".
+2. **Jellyfin.** In Settings, set the **Jellyfin address** (e.g. `http://<unraid-ip>:8096`) and an **API key** from Jellyfin's Dashboard → API Keys. They're used for the "already in the library?" check and to refresh the library after filing. The key is never shown again once saved. Both are optional: without them the duplicate check uses only the ripper's own records.
+3. **CD settings.** Settings has:
+   - **rip mode:** secure, or fast for clean discs;
+   - **retries** per bad sector;
+   - **approval:** "only check the odd ones" files clean rips automatically; "always ask" sends every album to the Music page;
+   - **cover art.**
+4. **Where files go.** Rips are made in `/work/<job>/` and then wait in `/data/downloads/disc-ripper/<job>/`. They're filed into `/data/MEDIA/Music`. Set `MUSIC_DIR` or `DOWNLOADS_DIR` on the container to change those two.
+
+Library layout:
+
+```
+Music/<Album Artist>/<Album> (<Year>)/01 - <Title>.flac
+Music/<Album Artist>/<Album> (<Year>)/1-01 - <Title>.flac          (multi-disc releases)
+Music/Various Artists/<Album> (<Year>)/01 - <Artist> - <Title>.flac (compilations)
+```
+
+### Testing step 3 on the server
+
+1. **A well-known CD.** It rips with "Track N of M" on its card, ejects, and files itself with `cover.jpg`. Jellyfin shows it after a refresh, about a minute later.
+2. **An obscure or scratched CD.** It goes to Music → Needs a look. Fix it with a release, a MusicBrainz link, or by typing the details in.
+3. **A 2-CD set.** Rip disc 1, then disc 2: both land in one folder.
+4. **Re-insert a filed CD.** The card says "Already ripped" and offers Rip again.
+5. **Cancel a rip midway** (the job shows cancelled), and **restart the container mid-rip** (it shows interrupted). Retry works with the same disc still in.
+6. **Send me the first real rip's output.** I need it to confirm the progress and AccurateRip parsing against cyanrip's real output; the test copies are reconstructed from its source code.
+   - The log: `docker exec disc-ripper sh -c 'cat /data/downloads/disc-ripper/*/rip.log'`, or the album's waiting folder.
+   - The container log lines from that rip.
+
 ## Update
 
 Docker tab → the container → Check for updates (or Force update). Settings and the database live in `/config`, so they survive updates.
@@ -56,6 +90,6 @@ python -m venv .venv
 Run locally (Windows PowerShell):
 
 ```
-$env:CONFIG_DIR="$PWD\.devconfig"; $env:SYSFS_ROOT="$PWD\.devconfig\sys"; $env:DEV_ROOT="$PWD\.devconfig\dev"; $env:WORK_DIR="$PWD\.devconfig\work"
+$env:CONFIG_DIR="$PWD\.devconfig"; $env:SYSFS_ROOT="$PWD\.devconfig\sys"; $env:DEV_ROOT="$PWD\.devconfig\dev"; $env:WORK_DIR="$PWD\.devconfig\work"; $env:MUSIC_DIR="$PWD\.devconfig\music"; $env:DOWNLOADS_DIR="$PWD\.devconfig\downloads"
 .venv\Scripts\uvicorn disc_ripper.app:create_app --factory --port 8580
 ```

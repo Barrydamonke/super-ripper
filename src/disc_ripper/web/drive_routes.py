@@ -39,11 +39,13 @@ def _drive_items(conn: sqlite3.Connection, dev_root: Path) -> list[dict]:
     return items
 
 
-def _table(request: Request, conn: sqlite3.Connection, config: AppConfig, status_code: int = 200):
+def _table(
+    request: Request, conn: sqlite3.Connection, config: AppConfig, status_code: int = 200, error: str | None = None
+):
     return templates.TemplateResponse(
         request,
         "_drive_table.html",
-        {"items": _drive_items(conn, config.dev_root)},
+        {"items": _drive_items(conn, config.dev_root), "error": error},
         status_code=status_code,
     )
 
@@ -76,10 +78,23 @@ def drives_update(
     drive_id: str = Form(...),
     label: str = Form(""),
     enabled: str | None = Form(None),
+    read_offset: str | None = Form(None),
     conn: sqlite3.Connection = Depends(get_conn),
     config: AppConfig = Depends(get_config),
 ):
-    if not drives.update_drive(conn, drive_id, label=label, enabled=enabled is not None):
+    offset = None
+    if read_offset is not None and read_offset.strip():
+        try:
+            offset = int(read_offset.strip())
+        except ValueError:
+            offset = None
+        if offset is None or not drives.READ_OFFSET_MIN <= offset <= drives.READ_OFFSET_MAX:
+            error = (
+                f"Read offset must be a whole number between {drives.READ_OFFSET_MIN} "
+                f"and {drives.READ_OFFSET_MAX}."
+            )
+            return _table(request, conn, config, status_code=400, error=error)
+    if not drives.update_drive(conn, drive_id, label=label, enabled=enabled is not None, read_offset=offset):
         return HTMLResponse('<p class="error">Unknown drive.</p>', status_code=404)
     request.app.state.services.refresh_drives()
     return _table(request, conn, config)

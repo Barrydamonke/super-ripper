@@ -46,9 +46,9 @@ def _tables(conn):
 def test_migrate_fresh_db(config):
     conn = db.connect(config.db_path)
     try:
-        assert db.migrate(conn) == 2
+        assert db.migrate(conn) == 3
         assert {"settings", "drives"} <= _tables(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     finally:
         conn.close()
 
@@ -59,7 +59,7 @@ def test_migrate_is_idempotent(config):
         db.migrate(conn)
         conn.execute("INSERT INTO settings (key, value) VALUES ('k', '1')")
         conn.commit()
-        assert db.migrate(conn) == 2
+        assert db.migrate(conn) == 3
         assert conn.execute("SELECT value FROM settings WHERE key='k'").fetchone()[0] == "1"
     finally:
         conn.close()
@@ -88,7 +88,7 @@ def test_migration_0002_from_step1_db(config):
         )
         conn.commit()
 
-        assert db.migrate(conn) == 2
+        assert db.migrate(conn) == 3
         row = conn.execute("SELECT * FROM drives").fetchone()
         assert row["media_state"] == "unknown"
         assert row["disc_type"] is None
@@ -108,3 +108,35 @@ def test_migration_0002_from_step1_db(config):
 def test_busy_secret_trimmed():
     # Pasting into the Unraid field can add a trailing space or newline; HTTP headers drop them.
     assert load_config({"BUSY_SECRET": "  s3cret \n"}).busy_secret == "s3cret"
+
+
+def test_migration_0003_prefills_offsets(config):
+    from importlib import resources
+
+    conn = db.connect(config.db_path)
+    try:
+        folder = resources.files("disc_ripper") / "migrations"
+        for name, version in (("0001_initial.sql", 1), ("0002_media_jobs.sql", 2)):
+            sql = (folder / name).read_text(encoding="utf-8")
+            conn.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = {version};\nCOMMIT;")
+        for i, model in enumerate(["BD-RE BH10LS38", "iHAS124   F", "iHAS124 Y", "DVD-RW XYZ"]):
+            conn.execute(
+                "INSERT INTO drives (id, id_source, model, first_seen, last_seen) VALUES (?, 'port', ?, 't', 't')",
+                (f"d{i}", model),
+            )
+        conn.commit()
+        assert db.migrate(conn) == 3
+        offsets = [r[0] for r in conn.execute("SELECT read_offset FROM drives ORDER BY id")]
+        assert offsets == [667, 6, 0, 0]
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"discs", "cd_rips", "albums", "album_releases"} <= tables
+    finally:
+        conn.close()
+
+
+def test_load_config_music_dirs(tmp_path):
+    cfg = load_config({})
+    assert cfg.music_dir == Path("/data/MEDIA/Music")
+    assert cfg.downloads_dir == Path("/data/downloads/disc-ripper")
+    cfg = load_config({"MUSIC_DIR": str(tmp_path / "m"), "DOWNLOADS_DIR": str(tmp_path / "d")})
+    assert (cfg.music_dir, cfg.downloads_dir) == (tmp_path / "m", tmp_path / "d")

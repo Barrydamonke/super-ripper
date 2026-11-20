@@ -9,6 +9,17 @@
   <div>
     {% if d.kind == "bool" %}
       <label><input type="checkbox" name="{{ d.key }}" {% if values[d.key] %}checked{% endif %}> {{ d.label }}</label>
+    {% elif d.kind == "choice" %}
+      <label>{{ d.label }}
+        <select name="{{ d.key }}">
+          {% for value, label in d.choices %}<option value="{{ value }}"{% if values[d.key] == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+    {% elif d.kind == "secret" %}
+      <label>{{ d.label }}
+        <input type="password" name="{{ d.key }}" value="" autocomplete="off"{% if secrets_set.get(d.key) %} placeholder="Set — leave blank to keep"{% endif %}>
+      </label>
+      {% if secrets_set.get(d.key) %}<div class="hint">Set — leave blank to keep.</div>{% endif %}
     {% else %}
       <label>{{ d.label }}{% if d.unit %} ({{ d.unit }}){% endif %}
         <input type="text" name="{{ d.key }}" value="{{ values[d.key] }}"{% if d.kind in ("int", "float") %} inputmode="decimal"{% endif %}>

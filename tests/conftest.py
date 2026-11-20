@@ -12,11 +12,15 @@ def config(tmp_path: Path) -> AppConfig:
         sysfs_root=tmp_path / "sys",
         dev_root=tmp_path / "dev",
         work_dir=tmp_path / "work",
+        music_dir=tmp_path / "music",
+        downloads_dir=tmp_path / "downloads",
         run_background=False,
     )
     cfg.sysfs_root.mkdir()
     cfg.dev_root.mkdir()
     cfg.work_dir.mkdir()
+    cfg.music_dir.mkdir()
+    cfg.downloads_dir.mkdir()
     return cfg
 
 
@@ -88,3 +92,19 @@ def logged_in_client(client):
     r = client.post("/login", data={"password": TEST_PASSWORD, "next": "/"})
     assert r.status_code == 303
     return client
+
+
+def make_flac(path: Path, seconds: float = 1.0) -> Path:
+    """A minimal FLAC file (STREAMINFO only, no audio frames) that mutagen reads.
+
+    44.1 kHz, 2 channels, 16 bits; the duration comes from the total-samples field.
+    """
+    import struct
+
+    samples = int(44100 * seconds)
+    bits = (44100 << 44) | ((2 - 1) << 41) | ((16 - 1) << 36) | samples
+    streaminfo = struct.pack(">HH", 4096, 4096) + b"\x00" * 6 + bits.to_bytes(8, "big") + b"\x00" * 16
+    header = bytes([0x80 | 0]) + len(streaminfo).to_bytes(3, "big")  # last block, type STREAMINFO
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"fLaC" + header + streaminfo)
+    return path
