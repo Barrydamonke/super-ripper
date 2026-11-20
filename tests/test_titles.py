@@ -79,3 +79,8 @@ def test_should_eject():
     assert not should_eject([(0, 5, "failed")])
     assert not should_eject([(0, 5, "done"), (1, 6, "running")])
     assert not should_eject([])
+    # A user-cancelled latest attempt is settled (an unwanted extra), as long as something is done.
+    assert should_eject([(0, 5, "done"), (1, 6, "cancelled")])
+    assert should_eject([(0, 5, "done"), (1, 6, "cancelled"), (1, 8, "done")])
+    assert not should_eject([(0, 5, "cancelled")])
+    assert not should_eject([(0, 5, "done"), (1, 6, "interrupted")])

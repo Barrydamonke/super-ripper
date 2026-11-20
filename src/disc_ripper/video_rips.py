@@ -42,19 +42,27 @@ def disc_in_drive(conn: sqlite3.Connection, drive_id: str) -> sqlite3.Row | None
     ).fetchone()
 
 
-def _work_has_files(conn: sqlite3.Connection, work_dir: Path, rip_id: int) -> bool:
-    ids = [rip_id] + [r[0] for r in conn.execute(
-        "SELECT id FROM jobs WHERE json_extract(params, '$.rip_id') = ? AND id != ?", (rip_id, rip_id))]
-    return any((work_dir / str(i)).is_dir() and any((work_dir / str(i)).rglob("*.mkv")) for i in ids)
+def stuck_in_work(conn: sqlite3.Connection, work_dir: Path, rip_id: int, finishing_job: int | None = None) -> bool:
+    """A finished title's file still sits in /work/<job>/ (its move to downloads failed).
+    finishing_job counts as finished (its handler is about to return)."""
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM jobs WHERE kind = 'rip_title' AND state = 'done' AND json_extract(params, '$.rip_id') = ?",
+        (rip_id,))]
+    if finishing_job is not None:
+        ids.append(finishing_job)
+    return any((work_dir / str(i)).is_dir() and any((work_dir / str(i)).glob("*.mkv")) for i in ids)
 
 
 def blocking_rip(conn: sqlite3.Connection, fingerprint: str, downloads_dir: Path,
-                 work_dir: Path) -> sqlite3.Row | None:
-    """A rip that means this disc shouldn't auto-start again: one in progress, one whose
-    files sit in downloads, or one whose move failed and still has its files in /work."""
+                 work_dir: Path) -> dict | None:
+    """A rip that means this disc shouldn't auto-start again: one in progress, one with a
+    folder in downloads, or one whose move failed and still has its file in /work.
+
+    Returns {"rip_id", "state"}. A row still marked 'ripping' with nothing active (it wasn't
+    settled, e.g. after a crash) is reported as what it has become, so "Rip again" is offered."""
     active = conn.execute(
         f"""
-        SELECT CAST(json_extract(params, '$.rip_id') AS INTEGER) AS rip_id, 'ripping' AS state
+        SELECT CAST(json_extract(params, '$.rip_id') AS INTEGER) AS rip_id
         FROM jobs WHERE kind = 'rip_title' AND state IN {_ACTIVE}
           AND json_extract(params, '$.fingerprint') = ?
         ORDER BY id DESC LIMIT 1
@@ -62,15 +70,16 @@ def blocking_rip(conn: sqlite3.Connection, fingerprint: str, downloads_dir: Path
         (fingerprint,),
     ).fetchone()
     if active is not None:
-        return active
+        return {"rip_id": active["rip_id"], "state": "ripping"}
     for row in conn.execute(
-        "SELECT * FROM video_rips WHERE fingerprint = ? AND state IN ('ripped', 'move_failed') "
-        "ORDER BY rip_id DESC", (fingerprint,)
+        "SELECT * FROM video_rips WHERE fingerprint = ? AND state != 'failed' ORDER BY rip_id DESC", (fingerprint,)
     ).fetchall():
-        if row["state"] == "ripped" and (downloads_dir / str(row["rip_id"])).exists():
-            return row
-        if row["state"] == "move_failed" and _work_has_files(conn, work_dir, row["rip_id"]):
-            return row
+        stuck = stuck_in_work(conn, work_dir, row["rip_id"])
+        if stuck or (downloads_dir / str(row["rip_id"])).exists():
+            state = row["state"]
+            if state == "ripping":
+                state = "move_failed" if stuck else "ripped"
+            return {"rip_id": row["rip_id"], "state": state}
     return None
 
 
@@ -102,23 +111,62 @@ def settled(conn: sqlite3.Connection, rip_id: int, finishing_job: int | None = N
     return [(t, j, "done" if j == finishing_job else s) for t, j, s in attempts(conn, rip_id)]
 
 
-def all_moved(conn: sqlite3.Connection, rip_id: int, finishing_job: int | None = None) -> bool:
-    """Nothing pending, every title's latest attempt done, and each one's file in downloads."""
+_ENDED_WORDS = {"failed": "failed", "cancelled": "cancelled", "interrupted": "was interrupted"}
+
+
+def settle(conn: sqlite3.Connection, rip_id: int, work_dir: Path, now: str,
+           finishing_job: int | None = None) -> str | None:
+    """Once nothing of a rip is pending, record what became of it. Returns the state.
+
+    A file still in /work after a failed move makes it move_failed (Move again); otherwise any
+    file in downloads makes it ripped, naming the titles that weren't; nothing ripped is failed.
+    Called whenever a rip_title job ends (or a queued one is cancelled); idempotent."""
+    rip = conn.execute("SELECT * FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    if rip is None:
+        return None
+    tries = settled(conn, rip_id, finishing_job)
+    if any(state in ("queued", "waiting_space", "running") for _t, _j, state in tries):
+        return rip["state"]
     latest: dict[int, tuple[int, str]] = {}
-    for title, job_id, state in settled(conn, rip_id, finishing_job):
+    for title, job_id, state in tries:
         if title not in latest or job_id > latest[title][0]:
             latest[title] = (job_id, state)
-    row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
-    files = json.loads(row["files"]) if row else {}
-    return bool(latest) and all(s == "done" and str(t) in files for t, (_j, s) in latest.items())
+    files = json.loads(rip["files"] or "{}")
+    stuck = stuck_in_work(conn, work_dir, rip_id, finishing_job)
+    notes = []
+    for title, (_job, state) in sorted(latest.items()):
+        if str(title) in files:
+            continue
+        if state in _ENDED_WORDS:
+            notes.append(f"title {title} {_ENDED_WORDS[state]}")
+        elif state == "done" and not stuck:
+            notes.append(f"title {title}'s file is no longer in the work area")
+    if stuck:
+        state, message = "move_failed", rip["message"] or "Moving the rip to downloads failed."
+    elif files:
+        state, message = "ripped", ("Not ripped: " + "; ".join(notes) + ".") if notes else ""
+    else:
+        state = "failed"
+        if rip["state"] == "failed" and rip["message"]:
+            message = rip["message"]
+        else:
+            message = ("Nothing ripped: " + "; ".join(notes) + ".") if notes else "Nothing ripped."
+    if (state, message) != (rip["state"], rip["message"]):
+        set_state(conn, rip_id, state, message, now)
+    return state
 
 
 def fail_if_nothing_done(conn: sqlite3.Connection, rip_id: int, failing_job: int, message: str, now: str) -> None:
-    """A rip with no title done and none pending has failed."""
+    """A rip with no title done and none pending has failed (with this job's error as its message)."""
     for _title, job_id, state in attempts(conn, rip_id):
         if job_id != failing_job and state in ("queued", "waiting_space", "running", "done"):
             return
     set_state(conn, rip_id, "failed", message, now)
+
+
+def unsettled(conn: sqlite3.Connection) -> list[int]:
+    """Rips still marked ripping (settled at start-up: a crash can leave them so)."""
+    return [r[0] for r in conn.execute("SELECT rip_id FROM video_rips WHERE state = 'ripping'")]
 
 
 def role_position(conn: sqlite3.Connection, rip_id: int, role: str, title: int) -> tuple[int, int]:

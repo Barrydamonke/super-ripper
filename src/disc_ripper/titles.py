@@ -80,11 +80,13 @@ def hold_reasons(
 
 
 def should_eject(attempts: list[tuple[int, int, str]]) -> bool:
-    """Eject when nothing is pending and each title's latest attempt is done."""
+    """Eject when nothing is pending and each title's latest attempt is done, or was cancelled
+    by the owner (an unwanted extra); at least one title must be done. A failure keeps the disc in."""
     if not attempts or any(state in _ACTIVE for _, _, state in attempts):
         return False
     latest: dict[int, tuple[int, str]] = {}
     for title, job_id, state in attempts:
         if title not in latest or job_id > latest[title][0]:
             latest[title] = (job_id, state)
-    return all(state == "done" for _, state in latest.values())
+    states = [state for _, state in latest.values()]
+    return "done" in states and all(state in ("done", "cancelled") for state in states)

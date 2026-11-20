@@ -129,13 +129,13 @@ def _label(conn, params: dict) -> str:
     return f"{'Extra' if role == 'extra' else 'Title'} {k} of {m}"
 
 
-def _after_move(conn, rip_id: int, job_id: int, title: int, path: Path | None, role: str, message: str, now: str):
+def _after_move(conn, work_dir: Path, rip_id: int, job_id: int, title: int, path: Path | None, role: str,
+                message: str, now: str):
     if path is None:
         video_rips.set_state(conn, rip_id, "move_failed", message, now)
-        return
-    video_rips.record_file(conn, rip_id, title, path, role, now)
-    if video_rips.all_moved(conn, rip_id, job_id):
-        video_rips.set_state(conn, rip_id, "ripped", "", now)
+    else:
+        video_rips.record_file(conn, rip_id, title, path, role, now)
+    video_rips.settle(conn, rip_id, work_dir, now, finishing_job=job_id)
 
 
 def _move(config, rip_id: int, role: str, src: Path, min_free_gb: float,
@@ -202,7 +202,7 @@ async def _rip_title(ctx, params: dict, work: Path) -> None:
         stop.set()
         await asyncio.gather(copying, return_exceptions=True)
         raise
-    await ctx.db(_after_move, rip_id, ctx.job_id, title, moved, role, message, utc_now())
+    await ctx.db(_after_move, ctx.config.work_dir, rip_id, ctx.job_id, title, moved, role, message, utc_now())
     if moved is not None:
         shutil.rmtree(work, ignore_errors=True)
     if await ctx.db(lambda conn: titles.should_eject(video_rips.settled(conn, rip_id, ctx.job_id))):
@@ -216,15 +216,21 @@ async def _rip_title(ctx, params: dict, work: Path) -> None:
 runner.HANDLERS["rip_title"] = run_rip_title
 
 
+NOTHING_TO_MOVE = "Nothing left to move: the ripped file is no longer in the work area."
+
+
 def move_again_sync(conn, config, rip_id: int) -> str | None:
-    """Retry the move for each finished title whose file still sits in /work."""
+    """Retry the move for each finished title whose file still sits in /work.
+    Returns an error message (also when nothing was left to move), or None."""
     min_free = settings.get(conn, "cache_min_free_gb")
     error = None
+    tried = False
     for title, job_id, state in video_rips.attempts(conn, rip_id):
         folder = config.work_dir / str(job_id)
-        found = sorted(folder.rglob("*.mkv")) if state == "done" and folder.is_dir() else []
+        found = sorted(folder.glob("*.mkv")) if state == "done" and folder.is_dir() else []
         if not found:
             continue
+        tried = True
         role = conn.execute("SELECT json_extract(params, '$.role') FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
         role = role or "title"
         moved, message = _move(config, rip_id, role, found[0], min_free)
@@ -234,6 +240,7 @@ def move_again_sync(conn, config, rip_id: int) -> str | None:
             continue
         shutil.rmtree(folder, ignore_errors=True)
         video_rips.record_file(conn, rip_id, title, moved, role, utc_now())
-    if error is None and video_rips.all_moved(conn, rip_id):
-        video_rips.set_state(conn, rip_id, "ripped", "", utc_now())
-    return error
+    if error is None:  # clear the old move message so settle writes the new outcome
+        video_rips.set_state(conn, rip_id, "ripping", "", utc_now())
+    video_rips.settle(conn, rip_id, config.work_dir, utc_now())
+    return error if tried else NOTHING_TO_MOVE

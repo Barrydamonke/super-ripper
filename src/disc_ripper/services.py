@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import cd_rips, cdrip, coverart, db, drives, jobs, schedule_source, settings, video_rips, videorip  # cdrip, videorip register handlers
+from . import cd_rips, cdrip, coverart, db, drives, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
 from .jellyfin import Jellyfin, RefreshDebouncer
 from .musicbrainz import MusicBrainz
 from .cdrom import CdDrive
@@ -377,6 +377,55 @@ class Services:
             await self.drive_changed(drive_id)
         return error
 
+    def _settle_for_job(self, conn, job_id: int) -> int | None:
+        row = jobs.get(conn, job_id)
+        if row is None or row["kind"] != "rip_title":
+            return None
+        rip_id = json.loads(row["params"]).get("rip_id")
+        video_rips.settle(conn, rip_id, self.config.work_dir, utc_now())
+        return rip_id
+
+    async def job_ended(self, job_id: int) -> None:
+        """The runner's hook: a job finished, or a queued one was cancelled. A rip_title job
+        settles its rip once nothing of it is pending (ripped, move_failed or failed)."""
+        await asyncio.to_thread(self._db, self._settle_for_job, job_id)
+
+    def _eject_target(self, conn, job_id: int) -> tuple[str, str] | None:
+        """(drive_id, sr_name) if cancelling this job left its disc's rip finished: eject then."""
+        row = jobs.get(conn, job_id)
+        if row is None or row["kind"] != "rip_title" or row["state"] != "cancelled":
+            return None
+        rip_id = json.loads(row["params"]).get("rip_id")
+        drive = conn.execute("SELECT sr_name, media_state FROM drives WHERE id = ?", (row["drive_id"],)).fetchone()
+        if drive is None or not drive["sr_name"] or drive["media_state"] != "disc":
+            return None
+        if not titles.should_eject(video_rips.attempts(conn, rip_id)):
+            return None
+        return row["drive_id"], drive["sr_name"]
+
+    def _eject(self, drive_id: str, sr_name: str) -> None:
+        lock = self.monitor.drive_lock(drive_id)
+        if not lock.acquire(timeout=5.0):
+            raise OSError("the drive is busy")
+        try:
+            self.drive_factory(self.config.dev_root / sr_name).eject()
+        finally:
+            lock.release()
+
+    async def cancel_job(self, job_id: int) -> bool:
+        """The Cancel button. Cancelling the last pending title of a rip whose other titles
+        are done (an unwanted extra) ejects the disc, as a finished rip would."""
+        cancelled = await self.runner.cancel(job_id)
+        if cancelled:
+            target = await asyncio.to_thread(self._db, self._eject_target, job_id)
+            if target is not None:
+                try:
+                    await asyncio.to_thread(self._eject, *target)
+                except Exception as exc:  # a stuck tray mustn't fail the cancel
+                    log.warning("video: eject after cancelling #%s failed: %s", job_id, exc)
+                await self.drive_changed(target[0])
+        return cancelled
+
     def _hold_video(self, conn, drive_id: str) -> list[int]:
         with conn:
             conn.execute("UPDATE drives SET video_hold = 1 WHERE id = ?", (drive_id,))
@@ -502,6 +551,8 @@ class Services:
         try:
             count = jobs.mark_interrupted(conn, utc_now())
             cd_rips.reconcile(conn, self.config.work_dir)
+            for rip_id in video_rips.unsettled(conn):  # rips whose last job ended in the last run
+                video_rips.settle(conn, rip_id, self.config.work_dir, utc_now())
             cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc))
         finally:
             conn.close()

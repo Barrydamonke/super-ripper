@@ -395,7 +395,7 @@ async def cancel_job(request: Request, job_id: int):
     row = await asyncio.to_thread(_with_conn, request, jobs.get, job_id)
     if row is None:
         return HTMLResponse('<p class="error">Unknown job.</p>', status_code=404)
-    await _services(request).runner.cancel(job_id)
+    await _services(request).cancel_job(job_id)
     # A running job finishes cancelling a moment later; the SSE update brings the card up to date.
     return await _card(request, row["drive_id"])
 

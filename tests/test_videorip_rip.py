@@ -324,3 +324,135 @@ def test_handler_cancel_during_move_keeps_file_in_work(config, setup, monkeypatc
     assert (config.work_dir / str(rip) / "title_t00.mkv").is_file()
     assert not list((config.downloads_dir / str(rip)).glob("*"))
     assert rip_state(setup, rip)["files"] == "{}"
+
+
+# --- settling the rip once nothing of it is pending (review finding #1) ---------------
+
+def fingerprint_of(conn, rip_id):
+    return rip_state(conn, rip_id)["fingerprint"]
+
+
+def blocking(config, conn, rip_id):
+    return video_rips.blocking_rip(conn, fingerprint_of(conn, rip_id), config.downloads_dir, config.work_dir)
+
+
+def test_extra_added_after_main_then_failing_settles_ripped(config, setup, monkeypatch):
+    services, rip = scanned(config, setup)
+    run_until_done(config, setup, services, rip)
+    extra = asyncio.run(services.add_video_extra(rip, 1))
+    assert extra is not None
+    monkeypatch.setenv("FAKE_MAKEMKV_MODE", "short")
+    assert run_until_done(config, setup, services, extra)["state"] == "failed"
+    row = rip_state(setup, rip)
+    assert row["state"] == "ripped"
+    assert "title 1 failed" in row["message"]
+    assert blocking(config, setup, rip) is not None
+    assert services.drive.ejected == 1  # the extra failed: the disc stays in after it
+
+
+def test_cancelled_queued_extra_settles_and_ejects(config, setup):
+    services, rip = scanned(config, setup)
+    extra = queue_extra(setup, rip)
+    assert asyncio.run(services.cancel_job(extra))
+    run_until_done(config, setup, services, rip)
+    row = rip_state(setup, rip)
+    assert row["state"] == "ripped" and "title 1 cancelled" in row["message"]
+    assert (config.downloads_dir / str(rip) / "title_t00.mkv").is_file()
+    assert blocking(config, setup, rip) is not None
+    assert services.drive.ejected == 1
+
+
+class SpaceExcept:
+    """Every job fits except ones needing exactly `refuse` bytes."""
+
+    def __init__(self, refuse):
+        self.refuse = refuse
+
+    def check(self, needs_bytes, *args):
+        return "no space" if needs_bytes == self.refuse else None
+
+    def invalidate(self):
+        pass
+
+
+def test_cancelling_the_last_queued_extra_ejects(config, setup):
+    services, rip = scanned(config, setup)
+    extra = queue_extra(setup, rip)
+    with setup:
+        setup.execute("UPDATE jobs SET needs_bytes = 12345 WHERE id = ?", (extra,))
+
+    async def main():
+        r = runner.JobRunner(config, Notifier(), SpaceExcept(12345), services=services)
+        r.sync_workers({"serial:A"})
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 15
+        while jobs.get(setup, rip)["state"] != "done":
+            assert loop.time() < deadline, "timed out"
+            await asyncio.sleep(0.05)
+        await r.stop()
+
+    asyncio.run(main())
+    assert services.drive.ejected == 0  # the extra is still queued (waiting for space)
+    assert rip_state(setup, rip)["state"] == "ripping"
+    assert asyncio.run(services.cancel_job(extra))
+    assert services.drive.ejected == 1
+    assert rip_state(setup, rip)["state"] == "ripped"
+
+
+def test_cancelled_running_main_settles_failed_and_does_not_block(config, setup, monkeypatch):
+    services, rip = scanned(config, setup)
+    monkeypatch.setenv("FAKE_MAKEMKV_MODE", "hang")
+
+    async def main():
+        r = runner.JobRunner(config, Notifier(), Space(), services=services)
+        r.sync_workers({"serial:A"})
+        while jobs.get(setup, rip)["state"] != "running" or not runner.LIVE_PROCESSES:
+            await asyncio.sleep(0.05)
+        await r.cancel(rip)
+        await r.stop()
+
+    asyncio.run(main())
+    assert jobs.get(setup, rip)["state"] == "cancelled"
+    assert rip_state(setup, rip)["state"] == "failed"
+    assert blocking(config, setup, rip) is None
+    assert services.drive.ejected == 0
+
+
+def test_stale_ripping_row_with_downloads_blocks_as_ripped(config, setup):
+    services, rip = scanned(config, setup)
+    with setup:
+        setup.execute("UPDATE jobs SET state = 'cancelled' WHERE id = ?", (rip,))
+    (config.downloads_dir / str(rip)).mkdir(parents=True)
+    found = blocking(config, setup, rip)
+    assert found is not None and found["state"] == "ripped" and found["rip_id"] == rip
+
+
+def run_held_back(config, conn, services, until, held_bytes=12345):
+    async def main():
+        r = runner.JobRunner(config, Notifier(), SpaceExcept(held_bytes), services=services)
+        r.sync_workers({"serial:A"})
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 15
+        while not until():
+            assert loop.time() < deadline, "timed out"
+            await asyncio.sleep(0.05)
+        await r.stop()
+
+    asyncio.run(main())
+
+
+def test_queued_extra_failing_after_main_settles_ripped(config, setup, monkeypatch):
+    services, rip = scanned(config, setup)
+    extra = queue_extra(setup, rip)
+    with setup:
+        setup.execute("UPDATE jobs SET needs_bytes = 12345 WHERE id = ?", (extra,))
+    run_held_back(config, setup, services, lambda: jobs.get(setup, rip)["state"] == "done")
+    assert rip_state(setup, rip)["state"] == "ripping"
+    with setup:
+        setup.execute("UPDATE jobs SET needs_bytes = 1 WHERE id = ?", (extra,))
+    monkeypatch.setenv("FAKE_MAKEMKV_MODE", "short")
+    assert run_until_done(config, setup, services, extra)["state"] == "failed"
+    row = rip_state(setup, rip)
+    assert row["state"] == "ripped" and "title 1 failed" in row["message"]
+    assert blocking(config, setup, rip) is not None
+    assert services.drive.ejected == 0
