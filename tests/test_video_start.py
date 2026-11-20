@@ -30,11 +30,17 @@ def params_of(conn):
 
 def test_start_with_extras_order(config, setup):
     services, fp = scanned_disc(config, setup)
-    rip = start(services, fp, main=0, extras=[2, 1, 2, 0])
+    rip = start(services, fp, main=0, extras=[2, 1, 2])
     ps = params_of(setup)
     assert [(p["title"], p["role"]) for p in ps] == [(0, "main"), (2, "extra"), (1, "extra")]
     assert {p["rip_id"] for p in ps} == {rip} == {rip_jobs(setup)[0]["id"]}
     assert rip_state(setup, rip)["main_title"] == 0
+
+
+def test_start_refuses_main_in_extras(config, setup):
+    services, fp = scanned_disc(config, setup)
+    assert start(services, fp, main=0, extras=[1, 0]) is None
+    assert rip_jobs(setup) == []
 
 
 def test_start_refuses_unknown_titles(config, setup):
@@ -155,3 +161,61 @@ def test_set_as_film(config, setup):
     services, fp = scanned_disc(config, setup)
     video_rips.set_as_film(setup, fp, True)
     assert setup.execute("SELECT as_film FROM video_discs").fetchone()[0] == 1
+
+
+def fake_all_titles_6730(conn):
+    with conn:
+        scan = json.loads(conn.execute("SELECT scan FROM video_discs").fetchone()[0])
+        for t in scan["titles"]:
+            t["seconds"] = 6730
+        conn.execute("UPDATE video_discs SET scan = ?", (json.dumps(scan),))
+
+
+def job_done(conn, job_id):
+    return lambda: jobs.get(conn, job_id)["state"] == "done"
+
+
+def test_extra_added_to_finished_rip_completes(config, setup):
+    services, fp = scanned_disc(config, setup)
+    fake_all_titles_6730(setup)
+    rip = start(services, fp)
+    run_free(config, services, job_done(setup, rip))
+    assert rip_state(setup, rip)["state"] == "ripped" and services.drive.ejected == 1
+    extra = asyncio.run(services.add_video_extra(rip, 1))
+    assert extra is not None
+    assert rip_state(setup, rip)["state"] == "ripping"
+    run_free(config, services, job_done(setup, extra))
+    row = rip_state(setup, rip)
+    assert row["state"] == "ripped"
+    assert set(json.loads(row["files"])) == {"0", "1"}
+    assert (config.downloads_dir / str(rip) / "title_t00.mkv").is_file()
+    assert (config.downloads_dir / str(rip) / "extras" / "title_t01.mkv").is_file()
+    assert services.drive.ejected == 2
+
+
+def test_extra_added_to_move_failed_rip_keeps_move_failed(config, setup, monkeypatch):
+    from disc_ripper import videofiles
+
+    services, fp = scanned_disc(config, setup)
+    fake_all_titles_6730(setup)
+    real = videofiles.move_to_downloads
+
+    def flaky(cfg, rip_id, role, src, **kw):
+        if role == "main":
+            raise OSError("disk full")
+        return real(cfg, rip_id, role, src, **kw)
+
+    monkeypatch.setattr(videofiles, "move_to_downloads", flaky)
+    rip = start(services, fp)
+    run_free(config, services, job_done(setup, rip))
+    assert rip_state(setup, rip)["state"] == "move_failed"
+    extra = asyncio.run(services.add_video_extra(rip, 1))
+    assert extra is not None
+    assert rip_state(setup, rip)["state"] == "move_failed"
+    run_free(config, services, job_done(setup, extra))
+    assert rip_state(setup, rip)["state"] == "move_failed"
+    assert (config.downloads_dir / str(rip) / "extras" / "title_t01.mkv").is_file()
+    monkeypatch.setattr(videofiles, "move_to_downloads", real)
+    assert asyncio.run(services.move_again(rip)) is None
+    row = rip_state(setup, rip)
+    assert row["state"] == "ripped" and set(json.loads(row["files"])) == {"0", "1"}

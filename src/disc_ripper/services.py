@@ -261,9 +261,10 @@ class Services:
                 return None
             by_number = {t["number"]: t for t in json.loads(disc["scan"])["titles"]}
             wanted = [] if main is None else [main]
+            if main is not None and main in (extras or []):
+                conn.rollback()
+                return None
             for number in extras or []:
-                if number == main:
-                    continue  # the main title is not also an extra
                 if number not in wanted:
                     wanted.append(number)
             if not wanted or any(n not in by_number for n in wanted):
@@ -343,7 +344,9 @@ class Services:
             params["rip_id"] = rip_id
             now = utc_now()
             job_id = self._insert_rip_job(conn, drive_id, params, by_number[title], now)
-            conn.execute("UPDATE video_rips SET state = 'ripping', updated_at = ? WHERE rip_id = ?", (now, rip_id))
+            if rip["state"] == "ripped":  # reopen; a move_failed rip stays so until Move again clears it
+                conn.execute("UPDATE video_rips SET state = 'ripping', updated_at = ? WHERE rip_id = ?",
+                             (now, rip_id))
             conn.commit()
         except BaseException:
             conn.rollback()
