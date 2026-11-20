@@ -154,6 +154,7 @@ def fingerprint(disc_type: str, label: str, titles: list[Title]) -> str:
 
 
 def _quote(value: str) -> str:
+    value = value.replace("\r", "").replace("\n", "")
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 

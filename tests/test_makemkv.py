@@ -58,14 +58,31 @@ def test_fingerprint_stable_and_sensitive():
 
 
 def test_settings_conf_escapes():
-    text = makemkv.settings_conf('ab"c\d', "-sel:all")
+    text = makemkv.settings_conf('ab"c\\d', "-sel:all")
     assert 'app_Key = "ab\\"c\\\\d"' in text
     assert 'app_DefaultSelectionString = "-sel:all"' in text
     assert 'app_UpdateEnable = "0"' in text
     assert "app_Key" not in makemkv.settings_conf("", "-sel:all")
+    injected = makemkv.settings_conf("k\nx\ry", "s\r\ny")
+    assert injected == 'app_Key = "kxy"'+chr(10)+'app_DefaultSelectionString = "sy"'+chr(10)+'app_UpdateEnable = "0"'+chr(10)
 
 
 def test_update_hint():
     assert makemkv.update_hint(_scan("info_too_old.txt").messages).startswith("Update MakeMKV")
     assert makemkv.update_hint(_scan("info_dvd.txt").messages) is None
-    assert _scan("info_bluray_decoy.txt").titles[1].seconds == 8162
+
+
+def test_parse_decoy_fixture():
+    titles = _scan("info_bluray_decoy.txt").titles
+    assert [t.seconds for t in titles] == [8164, 8162, 750]
+    assert titles[0].segments != titles[1].segments
+
+
+def test_parser_degrades_gracefully():
+    parser = makemkv.RobotParser()
+    parser.feed('TINFO:0,9,0,"abc"')
+    assert parser.result().titles[0].seconds == 0
+    assert parser.feed("PRGV:1,2,0") is None
+    assert parser.feed("PRGV:x,y,z") is None
+    assert makemkv.parse_line('CINFO:2,0,"abc') is not None
+    assert makemkv.parse_line('TINFO:0,9,0,""')[1][-1] == ""
