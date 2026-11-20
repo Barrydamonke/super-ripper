@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import makemkv, runner, settings, titles, video_rips, videofiles
+from . import makemkv, runner, settings, space, titles, video_rips, videofiles
 from .cdrip import _drive, _with_drive_lock
 from .clock import utc_now
 
@@ -138,11 +138,21 @@ def _after_move(conn, work_dir: Path, rip_id: int, job_id: int, title: int, path
     video_rips.settle(conn, rip_id, work_dir, now, finishing_job=job_id)
 
 
+def outstanding_bytes(conn, work_dir: Path, exclude_job: int | None) -> int:
+    """What other running jobs were admitted for but haven't written to /work/<job>/ yet."""
+    total = 0
+    for row in conn.execute("SELECT id, needs_bytes FROM jobs WHERE state = 'running' AND id IS NOT ?",
+                            (exclude_job,)):
+        written = space.tree_size(work_dir / str(row["id"]))
+        total += max(row["needs_bytes"] - written, 0)
+    return total
+
+
 def _move(config, rip_id: int, role: str, src: Path, min_free_gb: float,
-          cancel: threading.Event | None = None) -> tuple[Path | None, str]:
+          cancel: threading.Event | None = None, reserved_bytes: int = 0) -> tuple[Path | None, str]:
     try:
         return videofiles.move_to_downloads(config, rip_id, role, src, min_free_gb=min_free_gb,
-                                           cancel=cancel), ""
+                                           cancel=cancel, reserved_bytes=reserved_bytes), ""
     except OSError as exc:
         log.warning("video: moving rip #%s to downloads failed: %s", rip_id, exc)
         return None, f"Couldn't move to downloads: {exc}"
@@ -194,7 +204,8 @@ async def _rip_title(ctx, params: dict, work: Path) -> None:
     src = await asyncio.to_thread(videofiles.check_output, work, params["expected_seconds"])
     await ctx.report(0.99, "Moving to downloads…")
     stop = threading.Event()
-    copying = asyncio.ensure_future(asyncio.to_thread(_move, ctx.config, rip_id, role, src, min_free, stop))
+    reserved = await ctx.db(outstanding_bytes, ctx.config.work_dir, ctx.job_id)
+    copying = asyncio.ensure_future(asyncio.to_thread(_move, ctx.config, rip_id, role, src, min_free, stop, reserved))
     try:
         moved, message = await asyncio.shield(copying)
     except asyncio.CancelledError:
@@ -233,7 +244,8 @@ def move_again_sync(conn, config, rip_id: int) -> str | None:
         tried = True
         role = conn.execute("SELECT json_extract(params, '$.role') FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
         role = role or "title"
-        moved, message = _move(config, rip_id, role, found[0], min_free)
+        moved, message = _move(config, rip_id, role, found[0], min_free,
+                               reserved_bytes=outstanding_bytes(conn, config.work_dir, None))
         if moved is None:
             error = message
             video_rips.set_state(conn, rip_id, "move_failed", message, utc_now())

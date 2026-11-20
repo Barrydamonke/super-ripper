@@ -301,10 +301,10 @@ def test_handler_cancel_during_move_keeps_file_in_work(config, setup, monkeypatc
     inside = threading.Event()
     real = videofiles.move_to_downloads
 
-    def slow(config_, rip_id, role, src, statvfs=None, min_free_gb=0, cancel=None):
+    def slow(config_, rip_id, role, src, statvfs=None, min_free_gb=0, cancel=None, **kw):
         inside.set()
         assert cancel.wait(10)  # the handler must set the event on cancel
-        return real(config_, rip_id, role, src, min_free_gb=min_free_gb, cancel=cancel)
+        return real(config_, rip_id, role, src, min_free_gb=min_free_gb, cancel=cancel, **kw)
 
     monkeypatch.setattr(videofiles, "move_to_downloads", slow)
 
@@ -490,3 +490,52 @@ def test_eject_with_extras_queued_starts_no_extra(config, setup, monkeypatch):
     assert jobs.get(setup, rip)["state"] == "cancelled"
     assert jobs.get(setup, extra)["state"] == "cancelled" and jobs.get(setup, extra)["started_at"] is None
     assert rip_state(setup, rip)["state"] == "failed"
+
+
+# --- the move's space check counts other running rips (review finding #4) --------------
+
+def test_move_space_check_subtracts_other_running_rips(config, setup, monkeypatch):
+    from disc_ripper import settings
+
+    services, rip = scanned(config, setup)
+    settings.save(setup, {"cache_min_free_gb": 1})
+    other = jobs.enqueue(setup, "serial:A", "rip_title", {"rip_id": 999, "title": 0}, now="t",
+                         needs_bytes=10 * 1024**3)
+    with setup:  # a rip on another drive, admitted by the space check, that has barely started
+        setup.execute("UPDATE jobs SET state = 'running' WHERE id = ?", (other,))
+    (config.work_dir / str(other)).mkdir()
+    (config.work_dir / str(other) / "part.mkv").write_bytes(b"x" * 1024)
+    monkeypatch.setattr(videofiles, "STATVFS", shortfall(6))  # 6 GiB free: enough, unless the other rip grows
+    row = run_until_done(config, setup, services, rip)
+    assert row["state"] == "done"
+    state = rip_state(setup, rip)
+    assert state["state"] == "move_failed" and "other rips" in state["message"]
+    assert (config.work_dir / str(rip) / "title_t00.mkv").is_file()
+    with setup:  # the other rip finished
+        setup.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (other,))
+    assert asyncio.run(services.move_again(rip)) is None
+    assert rip_state(setup, rip)["state"] == "ripped"
+
+
+def test_move_to_downloads_reserves_bytes(config):
+    src = config.work_dir / "5" / "t.mkv"
+    src.parent.mkdir()
+    src.write_bytes(b"x" * 10)
+    with pytest.raises(OSError, match="other rips"):
+        videofiles.move_to_downloads(config, 7, "main", src, statvfs=shortfall(3), min_free_gb=1,
+                                     reserved_bytes=2 * 1024**3)
+    assert videofiles.move_to_downloads(config, 7, "main", src, statvfs=shortfall(3), min_free_gb=1,
+                                        reserved_bytes=1024**3).is_file()
+
+
+def test_outstanding_bytes_of_other_running_jobs(config, setup):
+    a = jobs.enqueue(setup, "serial:A", "rip_title", {}, needs_bytes=100, now="t")
+    b = jobs.enqueue(setup, "serial:A", "rip_title", {}, needs_bytes=50, now="t")
+    me = jobs.enqueue(setup, "serial:A", "rip_title", {}, needs_bytes=70, now="t")
+    with setup:
+        setup.execute("UPDATE jobs SET state = 'running'")
+    for job, size in ((a, 30), (b, 80)):  # b already wrote more than it asked for: floored at 0
+        (config.work_dir / str(job)).mkdir()
+        (config.work_dir / str(job) / "f").write_bytes(b"x" * size)
+    assert videorip.outstanding_bytes(setup, config.work_dir, me) == 70
+    assert videorip.outstanding_bytes(setup, config.work_dir, None) == 70 + 70

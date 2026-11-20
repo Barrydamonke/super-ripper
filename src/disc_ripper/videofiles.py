@@ -76,15 +76,20 @@ def _free_name(dest: Path, name: str) -> Iterator[Path]:
 
 
 def move_to_downloads(config, rip_id: int, role: str, src: Path, statvfs=None, min_free_gb: float = 0,
-                     cancel: threading.Event | None = None) -> Path:
-    """Copy src to downloads/<rip_id>/ (extras in extras/), never overwriting, then remove src."""
+                     cancel: threading.Event | None = None, reserved_bytes: int = 0) -> Path:
+    """Copy src to downloads/<rip_id>/ (extras in extras/), never overwriting, then remove src.
+
+    The copy needs its size free on the cache pool (statvfs of /work: /data is a FUSE share
+    that reports the array) on top of the floor and reserved_bytes, the space other running
+    rips were promised by the space check but haven't written yet."""
     statvfs = statvfs or STATVFS
     size = src.stat().st_size
     if statvfs is not None:
         st = statvfs(config.work_dir)
         free = st.f_bavail * st.f_frsize
-        if free - size < min_free_gb * GIB:
-            raise OSError(f"only {free / GIB:.1f} GB free, and the cache needs {min_free_gb:g} GB kept spare")
+        if free - reserved_bytes - size < min_free_gb * GIB:
+            others = f" ({reserved_bytes / GIB:.1f} GB of it promised to other rips)" if reserved_bytes else ""
+            raise OSError(f"only {free / GIB:.1f} GB free{others}, and the cache needs {min_free_gb:g} GB kept spare")
     dest = config.downloads_dir / str(rip_id) / ("extras" if role == "extra" else "")
     dest.mkdir(parents=True, exist_ok=True)
     part = dest / (src.name + ".part")
