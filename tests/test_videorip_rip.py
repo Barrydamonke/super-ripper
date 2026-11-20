@@ -456,3 +456,37 @@ def test_queued_extra_failing_after_main_settles_ripped(config, setup, monkeypat
     assert row["state"] == "ripped" and "title 1 failed" in row["message"]
     assert blocking(config, setup, rip) is not None
     assert services.drive.ejected == 0
+
+
+# --- queued jobs don't outlive their disc (review finding #3) --------------------------
+
+def test_disc_leaving_cancels_a_rip_waiting_for_space(config, setup):
+    services, rip = scanned(config, setup)
+    extra = queue_extra(setup, rip)
+    jobs.wait_space(setup, rip, "Waiting for cache space: needs 38.2 GB")
+    asyncio.run(services.on_remove("serial:A"))
+    assert jobs.get(setup, rip)["state"] == "cancelled"
+    assert jobs.get(setup, extra)["state"] == "cancelled"
+    assert rip_state(setup, rip)["state"] == "failed"
+    assert blocking(config, setup, rip) is None
+
+
+def test_eject_with_extras_queued_starts_no_extra(config, setup, monkeypatch):
+    services, rip = scanned(config, setup)
+    extra = queue_extra(setup, rip)
+    monkeypatch.setenv("FAKE_MAKEMKV_MODE", "hang")
+
+    async def main():
+        r = runner.JobRunner(config, Notifier(), Space(), services=services)
+        services.runner = r
+        r.sync_workers({"serial:A"})
+        while jobs.get(setup, rip)["state"] != "running" or not runner.LIVE_PROCESSES:
+            await asyncio.sleep(0.05)
+        await services.cancel_for_eject("serial:A")
+        await asyncio.sleep(0.5)  # give the worker a chance to (wrongly) start the extra
+        await r.stop()
+
+    asyncio.run(main())
+    assert jobs.get(setup, rip)["state"] == "cancelled"
+    assert jobs.get(setup, extra)["state"] == "cancelled" and jobs.get(setup, extra)["started_at"] is None
+    assert rip_state(setup, rip)["state"] == "failed"

@@ -44,6 +44,7 @@ class MediaMonitor:
         status_timeout: float = 10.0,
         on_insert: Callable[[str], Awaitable[None]] | None = None,
         on_present: Callable[[str], Awaitable[None]] | None = None,
+        on_remove: Callable[[str], Awaitable[None]] | None = None,
     ):
         self.config = config
         self.notifier = notifier
@@ -53,6 +54,7 @@ class MediaMonitor:
         self.status_timeout = status_timeout
         self.on_insert = on_insert
         self.on_present = on_present  # a disc already in at start-up: remember it, don't rip
+        self.on_remove = on_remove  # the disc left: its queued jobs must not outlive it
         self.probe = discprobe.probe
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
@@ -135,6 +137,8 @@ class MediaMonitor:
             await self.on_present(target.drive_id)
         if inserted and not first and target.previous in _BEFORE_INSERT and self.on_insert:
             await self.on_insert(target.drive_id)
+        if changed and state != "disc" and target.previous == "disc" and self.on_remove:
+            await self.on_remove(target.drive_id)
 
     async def poll_once(self, *, first: bool = False) -> None:
         for target in await asyncio.to_thread(self._targets):

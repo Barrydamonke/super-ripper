@@ -221,3 +221,20 @@ def test_monitor_survives_errors_in_first_poll(config, setup):
     # Drive B was still handled in the first round, and A's insert was seen later.
     assert row(setup, "serial:B")["media_state"] == "empty"
     assert row(setup, "serial:A")["media_state"] == "disc"
+
+
+def test_disc_leaving_fires_on_remove(config, setup):
+    fakes = {"sr0": FakeDrive(["disc", "disc", "empty", "empty"]), "sr1": FakeDrive(["empty"])}
+    removed = []
+
+    async def on_remove(drive_id):
+        removed.append(drive_id)
+
+    m = media.MediaMonitor(config, RecordingNotifier(), drive_factory=lambda p: fakes[p.name], on_remove=on_remove)
+    m.probe = lambda drive: drive.probe_result
+    asyncio.run(m.poll_once(first=True))  # sr1 empty at start-up: nothing left
+    asyncio.run(m.poll_once())
+    assert removed == []
+    asyncio.run(m.poll_once())  # sr0's disc came out
+    asyncio.run(m.poll_once())
+    assert removed == ["serial:A"]

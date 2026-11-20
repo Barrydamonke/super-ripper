@@ -534,3 +534,17 @@ def test_move_again_with_nothing_left_says_so_and_settles(dash, config):
     assert "Nothing left to move" in r.text
     assert conn.execute("SELECT state FROM video_rips").fetchone()[0] == "failed"
     assert 'hx-post="/dashboard/video/move"' not in r.text
+
+
+def test_eject_cancels_queued_disc_jobs_first(dash):
+    client, conn = dash
+    fake = FakeDrive()
+    client.app.state.services.drive_factory = lambda path: fake
+    fp = _video_disc(conn, DECOY)
+    queued = [jobs.enqueue(conn, "serial:A", kind, {"rip_id": 1, "fingerprint": fp, "title": n},
+                           uses_drive=True, now="t") for kind, n in (("rip_title", 0), ("rip_title", 4), ("scan_video", 0))]
+    test_job = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 60}, now="t")
+    r = client.post("/dashboard/eject", data={"drive_id": "serial:A"})
+    assert r.status_code == 200 and fake.ejected == 1
+    assert [jobs.get(conn, j)["state"] for j in queued] == ["cancelled"] * 3
+    assert jobs.get(conn, test_job)["state"] == "queued"  # not the disc's

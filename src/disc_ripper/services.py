@@ -65,7 +65,7 @@ class Services:
         # Indirect, so drive_factory can be swapped after construction (tests).
         self.monitor = MediaMonitor(
             config, self, drive_factory=lambda path: self.drive_factory(path), on_insert=self.on_insert,
-            on_present=self.on_present,
+            on_present=self.on_present, on_remove=self.on_remove,
         )
         self.runner = JobRunner(config, self, self.space, services=self)
         self.musicbrainz = MusicBrainz()
@@ -425,6 +425,45 @@ class Services:
                     log.warning("video: eject after cancelling #%s failed: %s", job_id, exc)
                 await self.drive_changed(target[0])
         return cancelled
+
+    def _cancel_disc_jobs(self, conn, drive_id: str) -> list[int]:
+        """Cancel the drive's queued and waiting scans and title rips, in one transaction so the
+        worker can't start one of them in between; then settle the rips they belonged to."""
+        now = utc_now()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            ids = [r[0] for r in conn.execute(
+                "SELECT id FROM jobs WHERE drive_id = ? AND kind IN ('rip_title', 'scan_video') "
+                "AND state IN ('queued', 'waiting_space')", (drive_id,))]
+            conn.executemany("UPDATE jobs SET state = 'cancelled', finished_at = ? WHERE id = ?",
+                             [(now, i) for i in ids])
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        for job_id in ids:
+            self._settle_for_job(conn, job_id)
+        return ids
+
+    async def cancel_disc_jobs(self, drive_id: str) -> list[int]:
+        ids = await asyncio.to_thread(self._db, self._cancel_disc_jobs, drive_id)
+        if ids:
+            log.info("video: cancelled queued job(s) %s on %s: the disc is leaving", ids, drive_id)
+            self.wake(drive_id)
+            await self.drive_changed(drive_id)
+        return ids
+
+    async def cancel_for_eject(self, drive_id: str) -> None:
+        """Before an eject: the disc's queued jobs first (so the worker doesn't start the next
+        one), then the running job that holds the drive."""
+        await self.cancel_disc_jobs(drive_id)
+        grouped = await asyncio.to_thread(self._db, jobs.drive_jobs, drive_id)
+        if grouped.running is not None and grouped.running["uses_drive"]:
+            await self.runner.cancel(grouped.running["id"])
+
+    async def on_remove(self, drive_id: str) -> None:
+        """The disc left the drive (ejected, or the media monitor saw it go)."""
+        await self.cancel_disc_jobs(drive_id)
 
     def _hold_video(self, conn, drive_id: str) -> list[int]:
         with conn:

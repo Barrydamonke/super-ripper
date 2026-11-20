@@ -224,9 +224,8 @@ async def _drive_action(request: Request, drive_id: str, action: str) -> str | N
     row = await asyncio.to_thread(_with_conn, request, _drive, drive_id)
     if row is None or not row["sr_name"]:
         return "This drive has no /dev/sr node."
-    running = await asyncio.to_thread(_with_conn, request, jobs.drive_jobs, drive_id)
-    if action == "eject" and running.running is not None and running.running["uses_drive"]:
-        await svc.runner.cancel(running.running["id"])
+    if action == "eject":
+        await svc.cancel_for_eject(drive_id)
     path = request.app.state.config.dev_root / row["sr_name"]
 
     def run():
