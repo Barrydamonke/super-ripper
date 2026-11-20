@@ -79,6 +79,10 @@ Music/Various Artists/<Album> (<Year>)/01 - <Artist> - <Title>.flac (compilation
 
 Docker tab → the container → Check for updates (or Force update). Settings and the database live in `/config`, so they survive updates.
 
+### Updating MakeMKV
+
+MakeMKV is compiled from makemkv.com source at a pinned version. To bump it, edit the three `ARG` lines at the top of the `Dockerfile` (`MAKEMKV_VERSION`, `MAKEMKV_OSS_SHA256`, `MAKEMKV_BIN_SHA256`). Take the version from https://www.makemkv.com/download/ and the checksums from its `makemkv-sha-<version>.txt`, and check them by hand. The build fails if a checksum does not match.
+
 ## Develop
 
 ```
