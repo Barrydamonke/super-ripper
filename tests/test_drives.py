@@ -286,6 +286,20 @@ def test_set_media_reports_change(config, conn, add_sg):
     assert drives.set_media(conn, "serial:nope", "empty", None, "", "t4") is False
 
 
+def test_set_media_clears_video_disc(config, conn, add_sg):
+    add_sg(config.sysfs_root, 1, vpd_serial=SERIAL)
+    drives.sync(conn, drives.discover(config.sysfs_root), "t0")
+    conn.execute(
+        "INSERT INTO video_discs (fingerprint, disc_type, label, drive_id, last_seen) "
+        "VALUES ('fp', 'dvd', 'MOVIE', 'serial:ABC123', 't0')"
+    )
+    conn.execute("UPDATE drives SET video_hold = 1 WHERE id = 'serial:ABC123'")
+    conn.commit()
+    drives.set_media(conn, "serial:ABC123", "empty", None, "", "t")
+    assert conn.execute("SELECT drive_id FROM video_discs").fetchone()[0] is None
+    assert conn.execute("SELECT video_hold FROM drives").fetchone()[0] == 0
+
+
 def test_new_drive_gets_known_read_offset(config, conn, add_sg):
     add_sg(config.sysfs_root, 1, sr=0, model="BD-RE BH10LS38", vpd_serial=b"\x05\x80\x00\x01A")
     add_sg(config.sysfs_root, 2, sr=1, model="iHAS124   F", vpd_serial=b"\x05\x80\x00\x01B")

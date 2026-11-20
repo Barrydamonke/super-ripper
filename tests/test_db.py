@@ -46,9 +46,9 @@ def _tables(conn):
 def test_migrate_fresh_db(config):
     conn = db.connect(config.db_path)
     try:
-        assert db.migrate(conn) == 3
+        assert db.migrate(conn) == 4
         assert {"settings", "drives"} <= _tables(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
     finally:
         conn.close()
 
@@ -59,7 +59,7 @@ def test_migrate_is_idempotent(config):
         db.migrate(conn)
         conn.execute("INSERT INTO settings (key, value) VALUES ('k', '1')")
         conn.commit()
-        assert db.migrate(conn) == 3
+        assert db.migrate(conn) == 4
         assert conn.execute("SELECT value FROM settings WHERE key='k'").fetchone()[0] == "1"
     finally:
         conn.close()
@@ -88,7 +88,7 @@ def test_migration_0002_from_step1_db(config):
         )
         conn.commit()
 
-        assert db.migrate(conn) == 3
+        assert db.migrate(conn) == 4
         row = conn.execute("SELECT * FROM drives").fetchone()
         assert row["media_state"] == "unknown"
         assert row["disc_type"] is None
@@ -125,7 +125,7 @@ def test_migration_0003_prefills_offsets(config):
                 (f"d{i}", model),
             )
         conn.commit()
-        assert db.migrate(conn) == 3
+        assert db.migrate(conn) == 4
         offsets = [r[0] for r in conn.execute("SELECT read_offset FROM drives ORDER BY id")]
         assert offsets == [667, 6, 0, 0]
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -140,3 +140,14 @@ def test_load_config_music_dirs(tmp_path):
     assert cfg.downloads_dir == Path("/data/downloads/disc-ripper")
     cfg = load_config({"MUSIC_DIR": str(tmp_path / "m"), "DOWNLOADS_DIR": str(tmp_path / "d")})
     assert (cfg.music_dir, cfg.downloads_dir) == (tmp_path / "m", tmp_path / "d")
+
+
+def test_migration_0004_tables(config):
+    conn = db.connect(config.db_path)
+    try:
+        db.migrate(conn)
+        assert {"video_discs", "video_rips"} <= _tables(conn)
+        cols = {r[1]: r for r in conn.execute("PRAGMA table_info(drives)")}
+        assert cols["video_hold"][4] == "0"
+    finally:
+        conn.close()

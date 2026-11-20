@@ -10,6 +10,7 @@ VALID = {
     "iso_dir": "/data/ISOs",
     "cd_rip_mode": "secure",
     "cd_retries": "10",
+    "video_min_title_seconds": "120",
     "cd_approval": "odd_ones",
     "cd_cover_art": "on",
 }

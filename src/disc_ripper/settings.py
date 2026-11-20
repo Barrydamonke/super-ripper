@@ -15,6 +15,10 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 INTERNAL_PREFIX = "internal."
+DEFAULT_VIDEO_SELECTION = (
+    "-sel:all,+sel:video,+sel:(eng|nolang),+sel:(audio&single),-sel:(audio&special),"
+    "+sel:(subtitle&forced),-sel:mvcvideo,=100:all,-10:eng"
+)
 _TRUE_VALUES = {"on", "true", "1"}
 
 
@@ -22,7 +26,7 @@ _TRUE_VALUES = {"on", "true", "1"}
 class SettingDef:
     key: str
     label: str
-    kind: Literal["int", "float", "bool", "path", "url", "choice", "secret"]
+    kind: Literal["int", "float", "bool", "path", "url", "choice", "secret", "text"]
     default: Any
     unit: str = ""
     minimum: float | None = None
@@ -30,6 +34,7 @@ class SettingDef:
     help: str = ""
     # (value, label) pairs for kind "choice"
     choices: tuple[tuple[str, str], ...] = ()
+    group: str = ""
 
 
 SETTINGS: tuple[SettingDef, ...] = (
@@ -91,6 +96,21 @@ SETTINGS: tuple[SettingDef, ...] = (
         "iso_dir", "ISO folder", "path", "/data/ISOs",
         help="Where data-disc ISOs are saved (a path inside the container).",
     ),
+    SettingDef(
+        "makemkv_key", "MakeMKV key", "secret", "",
+        help="Registration key from makemkv.com. Never shown again once saved.",
+        group="DVD and Blu-ray",
+    ),
+    SettingDef(
+        "video_min_title_seconds", "Shortest title to list", "int", 120, "seconds", 0, 3600,
+        "Titles shorter than this are ignored when scanning a disc.",
+        group="DVD and Blu-ray",
+    ),
+    SettingDef(
+        "video_track_selection", "Track selection", "text", DEFAULT_VIDEO_SELECTION,
+        help="MakeMKV --profile selection rule. Leave as is unless you know the syntax.",
+        group="DVD and Blu-ray",
+    ),
 )
 
 _BY_KEY = {s.key: s for s in SETTINGS}
@@ -145,6 +165,12 @@ def _parse_one(definition: SettingDef, raw: str | None) -> Any:
         return raw is not None and raw.strip().lower() in _TRUE_VALUES
     text = (raw or "").strip()
     if definition.kind == "secret":
+        return text
+    if definition.kind == "text":
+        if "\n" in text or "\r" in text:
+            raise ValueError("Must be a single line.")
+        if len(text) > 2000:
+            raise ValueError("Must be at most 2000 characters.")
         return text
     if definition.kind == "choice":
         values = [value for value, _label in definition.choices]
