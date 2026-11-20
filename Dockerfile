@@ -38,8 +38,7 @@ RUN apt-get update \
 
 COPY --from=makemkv-build /staging/usr/ /usr/
 
-ENV MAKEMKV_HOME=/config/makemkv \
-    PYTHONUNBUFFERED=1 \
+ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     CONFIG_DIR=/config \
     PUID=99 \
