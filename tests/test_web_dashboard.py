@@ -329,3 +329,22 @@ def test_old_disc_not_shown_after_tray_empties(dash):
     html = client.get("/").text
     assert "Already ripped" not in html
     assert 'hx-post="/dashboard/rip"' in html
+
+
+@pytest.mark.parametrize(
+    "state,text,css",
+    [
+        ("tray_open", "Tray open", "tray-open"),
+        ("empty", "Tray closed", "tray-closed"),
+        ("not_ready", "Tray closed", "tray-closed"),
+        ("disc", "Tray closed", "tray-closed"),
+        ("unknown", "Tray unknown", "tray-unknown"),
+    ],
+)
+def test_tray_indicator(dash, state, text, css):
+    client, conn = dash
+    drives.set_media(conn, "serial:A", state, "audio" if state == "disc" else None, "", "t")
+    html = client.get("/").text
+    head = html[html.index('class="card-head"'):html.index("</div>", html.index('class="card-head"'))]
+    assert f'class="tray {css}"' in head
+    assert text in head
