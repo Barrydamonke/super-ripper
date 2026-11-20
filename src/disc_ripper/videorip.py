@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import os
+import shutil
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import makemkv, runner, settings, titles, video_rips
+from . import makemkv, runner, settings, titles, video_rips, videofiles
+from .cdrip import _drive, _with_drive_lock
 from .clock import utc_now
 
 log = logging.getLogger(__name__)
@@ -91,3 +96,133 @@ async def run_scan_video(ctx: runner.JobContext) -> None:
 
 
 runner.HANDLERS["scan_video"] = run_scan_video
+
+
+# --- the rip_title job ---------------------------------------------------------------
+
+DIFFERENT_DISC = "A different disc is in the drive."
+
+
+def _prepare(conn, params: dict, job_id: int, now: str):
+    """Check the disc and read what the rip needs. Returns (settings, old job ids to clean up)."""
+    drive = conn.execute(
+        "SELECT disc_type, disc_label FROM drives WHERE id = (SELECT drive_id FROM jobs WHERE id = ?)",
+        (job_id,)).fetchone()
+    disc = conn.execute("SELECT disc_type, label FROM video_discs WHERE fingerprint = ?",
+                        (params["fingerprint"],)).fetchone()
+    if drive is None or disc is None or (drive["disc_type"], drive["disc_label"]) != (disc["disc_type"], disc["label"]):
+        raise RuntimeError(DIFFERENT_DISC)
+    rip = conn.execute("SELECT state FROM video_rips WHERE rip_id = ?", (params["rip_id"],)).fetchone()
+    if rip is not None and rip["state"] == "failed":  # a retry
+        video_rips.set_state(conn, params["rip_id"], "ripping", "", now)
+    old = video_rips.earlier_unfinished_jobs(conn, params["rip_id"], params["title"], job_id)
+    return (settings.get(conn, "makemkv_key"), settings.get(conn, "video_track_selection"),
+            settings.get(conn, "cache_min_free_gb")), old
+
+
+def _label(conn, params: dict) -> str:
+    role = params.get("role", "title")
+    if role == "main":
+        return "Main title"
+    k, m = video_rips.role_position(conn, params["rip_id"], role, params["title"])
+    return f"{'Extra' if role == 'extra' else 'Title'} {k} of {m}"
+
+
+def _after_move(conn, rip_id: int, job_id: int, title: int, path: Path | None, role: str, message: str, now: str):
+    if path is None:
+        video_rips.set_state(conn, rip_id, "move_failed", message, now)
+        return
+    video_rips.record_file(conn, rip_id, title, path, role, now)
+    if video_rips.all_moved(conn, rip_id, job_id):
+        video_rips.set_state(conn, rip_id, "ripped", "", now)
+
+
+def _move(config, rip_id: int, role: str, src: Path, min_free_gb: float) -> tuple[Path | None, str]:
+    try:
+        return videofiles.move_to_downloads(config, rip_id, role, src, min_free_gb=min_free_gb), ""
+    except OSError as exc:
+        log.warning("video: moving rip #%s to downloads failed: %s", rip_id, exc)
+        return None, f"Couldn't move to downloads: {exc}"
+
+
+async def run_rip_title(ctx: runner.JobContext) -> None:
+    params = ctx.params
+    work = ctx.config.work_dir / str(ctx.job_id)
+    try:
+        await _rip_title(ctx, params, work)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        shutil.rmtree(work, ignore_errors=True)
+        await ctx.db(video_rips.fail_if_nothing_done, params["rip_id"], ctx.job_id, str(exc), utc_now())
+        raise
+
+
+async def _rip_title(ctx, params: dict, work: Path) -> None:
+    rip_id, title, role = params["rip_id"], params["title"], params.get("role", "title")
+    (key, selection, min_free), old = await ctx.db(_prepare, params, ctx.job_id, utc_now())
+    for job in old:  # a cancelled or interrupted attempt's partial file would sit in the budget for a week
+        shutil.rmtree(ctx.config.work_dir / str(job), ignore_errors=True)
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    write_settings_conf(ctx.config.config_dir / "makemkv", key, selection)
+    label = await ctx.db(_label, params)
+
+    parser = makemkv.RobotParser()
+    started = time.monotonic()
+
+    async def on_line(line: str) -> None:
+        fraction = parser.feed(line)
+        if fraction is None:
+            return
+        finish = None
+        if fraction > 0.02:
+            remaining = (time.monotonic() - started) * (1 - fraction) / fraction
+            finish = datetime.now(timezone.utc) + timedelta(seconds=remaining)
+        await ctx.report(fraction * 0.98, f"{label} — {fraction:.0%}", finish)
+
+    argv = makemkv.mkv_argv(ctx.config.dev_root / params["sr_name"], title, params["minlength"], work)
+    code = await ctx.run_process(argv, cwd=ctx.config.work_dir, on_line=on_line, env=scan_env(ctx.config))
+    if code != 0:
+        messages = parser.result().messages
+        hint = makemkv.update_hint(messages)
+        detail = " / ".join(messages[-3:]) or f"makemkvcon exit code {code}"
+        raise RuntimeError(detail + (" " + hint if hint else ""))
+    src = await asyncio.to_thread(videofiles.check_output, work, params["expected_seconds"])
+    await ctx.report(0.99, "Moving to downloads…")
+    moved, message = await asyncio.to_thread(_move, ctx.config, rip_id, role, src, min_free)
+    await ctx.db(_after_move, rip_id, ctx.job_id, title, moved, role, message, utc_now())
+    if moved is not None:
+        shutil.rmtree(work, ignore_errors=True)
+    if await ctx.db(lambda conn: titles.should_eject(video_rips.settled(conn, rip_id, ctx.job_id))):
+        try:
+            await asyncio.to_thread(_with_drive_lock, ctx, lambda: _drive(ctx, params["sr_name"]).eject())
+        except Exception as exc:  # a stuck tray mustn't lose a finished rip
+            log.warning("video: eject after rip #%s failed: %s", rip_id, exc)
+    await ctx.report(1.0, "Ripped" if moved is not None else message)
+
+
+runner.HANDLERS["rip_title"] = run_rip_title
+
+
+def move_again_sync(conn, config, rip_id: int) -> str | None:
+    """Retry the move for each finished title whose file still sits in /work."""
+    min_free = settings.get(conn, "cache_min_free_gb")
+    error = None
+    for title, job_id, state in video_rips.attempts(conn, rip_id):
+        folder = config.work_dir / str(job_id)
+        found = sorted(folder.rglob("*.mkv")) if state == "done" and folder.is_dir() else []
+        if not found:
+            continue
+        role = conn.execute("SELECT json_extract(params, '$.role') FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
+        role = role or "title"
+        moved, message = _move(config, rip_id, role, found[0], min_free)
+        if moved is None:
+            error = message
+            video_rips.set_state(conn, rip_id, "move_failed", message, utc_now())
+            continue
+        shutil.rmtree(folder, ignore_errors=True)
+        video_rips.record_file(conn, rip_id, title, moved, role, utc_now())
+    if error is None and video_rips.all_moved(conn, rip_id):
+        video_rips.set_state(conn, rip_id, "ripped", "", utc_now())
+    return error

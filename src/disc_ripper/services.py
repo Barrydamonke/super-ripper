@@ -279,6 +279,19 @@ class Services:
         await self.drive_changed(drive_id)
         return rip_id
 
+    async def move_again(self, rip_id: int) -> str | None:
+        """Retry moving a rip's files to downloads. Returns an error message, or None."""
+        from . import videorip
+
+        def run(conn):
+            row = conn.execute("SELECT drive_id FROM jobs WHERE id = ?", (rip_id,)).fetchone()
+            return videorip.move_again_sync(conn, self.config, rip_id), row["drive_id"] if row else None
+
+        error, drive_id = await asyncio.to_thread(self._db, run)
+        if drive_id:
+            await self.drive_changed(drive_id)
+        return error
+
     def _hold_video(self, conn, drive_id: str) -> list[int]:
         with conn:
             conn.execute("UPDATE drives SET video_hold = 1 WHERE id = ?", (drive_id,))

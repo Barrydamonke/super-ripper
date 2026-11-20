@@ -67,3 +67,69 @@ def blocking_rip(conn: sqlite3.Connection, fingerprint: str, downloads_dir: Path
         if row["state"] == "move_failed" and _work_has_files(conn, work_dir, row["rip_id"]):
             return row
     return None
+
+
+def record_file(conn: sqlite3.Connection, rip_id: int, title: int, path: Path, role: str, now: str) -> None:
+    row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    files = json.loads(row["files"]) if row else {}
+    files[str(title)] = {"path": str(path), "role": role}
+    with conn:
+        conn.execute("UPDATE video_rips SET files = ?, updated_at = ? WHERE rip_id = ?",
+                     (json.dumps(files), now, rip_id))
+
+
+def set_state(conn: sqlite3.Connection, rip_id: int, state: str, message: str, now: str) -> None:
+    with conn:
+        conn.execute("UPDATE video_rips SET state = ?, message = ?, updated_at = ? WHERE rip_id = ?",
+                     (state, message, now, rip_id))
+
+
+def attempts(conn: sqlite3.Connection, rip_id: int) -> list[tuple[int, int, str]]:
+    """(title, job id, job state) of every rip_title job of this rip, for titles.should_eject."""
+    rows = conn.execute(
+        "SELECT CAST(json_extract(params, '$.title') AS INTEGER) AS title, id, state FROM jobs "
+        "WHERE kind = 'rip_title' AND json_extract(params, '$.rip_id') = ? ORDER BY id", (rip_id,))
+    return [(r["title"], r["id"], r["state"]) for r in rows]
+
+
+def settled(conn: sqlite3.Connection, rip_id: int, finishing_job: int | None = None) -> list[tuple[int, int, str]]:
+    """attempts(), with the job that is about to finish counted as done."""
+    return [(t, j, "done" if j == finishing_job else s) for t, j, s in attempts(conn, rip_id)]
+
+
+def all_moved(conn: sqlite3.Connection, rip_id: int, finishing_job: int | None = None) -> bool:
+    """Nothing pending, every title's latest attempt done, and each one's file in downloads."""
+    latest: dict[int, tuple[int, str]] = {}
+    for title, job_id, state in settled(conn, rip_id, finishing_job):
+        if title not in latest or job_id > latest[title][0]:
+            latest[title] = (job_id, state)
+    row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    files = json.loads(row["files"]) if row else {}
+    return bool(latest) and all(s == "done" and str(t) in files for t, (_j, s) in latest.items())
+
+
+def fail_if_nothing_done(conn: sqlite3.Connection, rip_id: int, failing_job: int, message: str, now: str) -> None:
+    """A rip with no title done and none pending has failed."""
+    for _title, job_id, state in attempts(conn, rip_id):
+        if job_id != failing_job and state in ("queued", "waiting_space", "running", "done"):
+            return
+    set_state(conn, rip_id, "failed", message, now)
+
+
+def role_position(conn: sqlite3.Connection, rip_id: int, role: str, title: int) -> tuple[int, int]:
+    """(k, m): this title's place among the rip's titles of that role."""
+    rows = conn.execute(
+        "SELECT DISTINCT CAST(json_extract(params, '$.title') AS INTEGER) AS title FROM jobs "
+        "WHERE kind = 'rip_title' AND json_extract(params, '$.rip_id') = ? AND json_extract(params, '$.role') = ? "
+        "ORDER BY 1", (rip_id, role))
+    numbers = [r["title"] for r in rows]
+    return (numbers.index(title) + 1 if title in numbers else 1), max(len(numbers), 1)
+
+
+def earlier_unfinished_jobs(conn: sqlite3.Connection, rip_id: int, title: int, job_id: int) -> list[int]:
+    rows = conn.execute(
+        "SELECT id FROM jobs WHERE kind = 'rip_title' AND id != ? AND state != 'done' "
+        "AND state NOT IN ('queued', 'waiting_space', 'running') "
+        "AND json_extract(params, '$.rip_id') = ? AND json_extract(params, '$.title') = ?",
+        (job_id, rip_id, title))
+    return [r["id"] for r in rows]

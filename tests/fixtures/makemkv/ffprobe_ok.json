@@ -1,0 +1,17 @@
+{
+    "streams": [
+        {"index": 0, "codec_name": "mpeg2video", "codec_type": "video", "width": 720, "height": 480, "r_frame_rate": "30000/1001"},
+        {"index": 1, "codec_name": "ac3", "codec_type": "audio", "sample_rate": "48000", "channels": 6, "tags": {"language": "eng"}},
+        {"index": 2, "codec_name": "ac3", "codec_type": "audio", "sample_rate": "48000", "channels": 2, "tags": {"language": "spa"}},
+        {"index": 3, "codec_name": "dvd_subtitle", "codec_type": "subtitle", "tags": {"language": "eng"}}
+    ],
+    "format": {
+        "filename": "title_t00.mkv",
+        "nb_streams": 4,
+        "format_name": "matroska,webm",
+        "start_time": "0.000000",
+        "duration": "6730.040000",
+        "size": "7516192768",
+        "bit_rate": "8934000"
+    }
+}
