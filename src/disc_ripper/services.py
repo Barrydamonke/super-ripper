@@ -411,7 +411,7 @@ class Services:
             row = conn.execute("SELECT * FROM drives WHERE id = ?", (drive_id,)).fetchone()
             if row is None:
                 return None
-            return render_drive_card(conn, row, datetime.now().astimezone())
+            return render_drive_card(conn, row, datetime.now().astimezone(), config=self.config)
         finally:
             conn.close()
 

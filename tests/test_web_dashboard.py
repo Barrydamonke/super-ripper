@@ -212,7 +212,7 @@ def test_live_card_does_not_contain_the_form(dash):
     row = conn.execute("SELECT * FROM drives WHERE id = 'serial:A'").fetchone()
     from datetime import datetime
 
-    html = dashboard_routes.render_drive_card(conn, row, datetime.now().astimezone())
+    html = dashboard_routes.render_drive_card(conn, row, datetime.now().astimezone(), config=client.app.state.config)
     assert 'name="minutes"' not in html
     page = client.get("/").text
     assert page.count('name="minutes"') == 1
@@ -348,3 +348,151 @@ def test_tray_indicator(dash, state, text, css):
     head = html[html.index('class="card-head"'):html.index("</div>", html.index('class="card-head"'))]
     assert f'class="tray {css}"' in head
     assert text in head
+
+
+# -- video disc card -----------------------------------------------------------
+
+def _title(n, seconds, size=int(38.2e9), chapters=28, source=None):
+    return {"number": n, "seconds": seconds, "size": size, "chapters": chapters,
+            "source": source or f"0080{n}.mpls", "output_name": f"t{n:02d}.mkv", "segments": "1", "name": ""}
+
+
+def _video_disc(conn, titles, held=(), label="SOME_FILM", fp="fp1", disc_type="bluray"):
+    from disc_ripper import video_rips
+
+    drives.set_media(conn, "serial:A", "disc", disc_type, label, "t")
+    video_rips.save_scan(conn, fp, disc_type, label, {"label": label, "titles": titles}, 120, list(held),
+                         "serial:A", "t")
+    return fp
+
+
+DECOY = [_title(0, 8164), _title(1, 8162), _title(4, 750, size=int(2.1e9), chapters=1, source="00020.mpls")]
+EPISODES = [_title(n, 2700, size=int(4e9), chapters=8, source=f"0000{n}.mpls") for n in range(4)]
+
+
+def _page(client):
+    return client.get("/").text
+
+
+def _rip_params(conn):
+    return [json.loads(x["params"]) for x in conn.execute("SELECT params FROM jobs WHERE kind='rip_title' ORDER BY id")]
+
+
+def test_held_card_lists_titles(dash):
+    client, conn = dash
+    _video_disc(conn, DECOY, held=["two titles of about the same length (decoy playlists?)"])
+    text = _page(client)
+    assert text.count("2:16:04") == 1 and "2:16:02" in text and "0:12:30" in text
+    assert "38.2 GB" in text and "2.1 GB" in text
+    assert "Held: two titles of about the same length" in text
+    assert 'hx-post="/dashboard/video/rip"' in text and ">Rip<" in text
+    assert 'name="main"' in text
+
+
+def test_rip_button_queues_main_and_extras(dash):
+    client, conn = dash
+    _video_disc(conn, DECOY, held=["x"])
+    r = client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": "0", "extras": ["4"]})
+    assert r.status_code == 200 and "<html" not in r.text
+    assert [(p["title"], p["role"]) for p in _rip_params(conn)] == [(0, "main"), (4, "extra")]
+
+
+def test_rip_refused_shows_error(dash):
+    client, conn = dash
+    _video_disc(conn, DECOY, held=["x"])
+    r = client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": "9"})
+    assert "start the rip" in r.text and "scan again by re-inserting" in r.text
+    r = client.post("/dashboard/video/rip", data={"drive_id": "nope", "main": "0"})
+    assert r.status_code == 404
+
+
+def test_tv_card_has_no_main_column_until_as_film(dash):
+    client, conn = dash
+    _video_disc(conn, EPISODES, held=["looks like a TV disc"], disc_type="dvd")
+    text = _page(client)
+    assert 'name="main"' not in text and "Treat as a film" in text
+    client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": "", "extras": ["0", "1"]})
+    assert [(p["title"], p["role"]) for p in _rip_params(conn)] == [(0, "title"), (1, "title")]
+    conn.execute("DELETE FROM jobs")
+    conn.commit()
+    r = client.post("/dashboard/video/as-film", data={"drive_id": "serial:A", "value": "1"})
+    assert 'name="main"' in r.text and "Treat as TV" in r.text
+    r = client.post("/dashboard/video/as-film", data={"drive_id": "serial:A", "value": "0"})
+    assert 'name="main"' not in r.text
+
+
+def test_tick_extra_mid_rip_queues_job(dash):
+    client, conn = dash
+    _video_disc(conn, DECOY, held=["x"])
+    client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": "0"})
+    conn.execute("UPDATE jobs SET state = 'running'")
+    conn.commit()
+    text = _page(client)
+    assert 'hx-trigger="change"' in text and 'hx-post="/dashboard/video/extra"' in text
+    rip_id = conn.execute("SELECT rip_id FROM video_rips").fetchone()[0]
+    r = client.post("/dashboard/video/extra", data={"drive_id": "serial:A", "rip_id": rip_id, "title": "4"})
+    assert r.status_code == 200 and "(queued)" in r.text
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='rip_title'").fetchone()[0] == 2
+    r = client.post("/dashboard/video/extra", data={"drive_id": "serial:A", "rip_id": rip_id, "title": "4"})
+    assert "already queued or ripped" in r.text
+
+
+def test_hold_button_while_scanning(dash):
+    client, conn = dash
+    drives.set_media(conn, "serial:A", "disc", "dvd", "X", "t")
+    job = jobs.enqueue(conn, "serial:A", "scan_video", {"sr_name": "sr0"}, uses_drive=True, now="t")
+    conn.execute("UPDATE jobs SET state = 'running' WHERE id = ?", (job,))
+    conn.commit()
+    assert 'hx-post="/dashboard/video/hold"' in _page(client)
+    r = client.post("/dashboard/video/hold", data={"drive_id": "serial:A"})
+    assert r.status_code == 200
+    assert conn.execute("SELECT video_hold FROM drives").fetchone()[0] == 1
+
+
+def test_move_again_button(dash):
+    client, conn = dash
+    fp = _video_disc(conn, DECOY)
+    job = jobs.enqueue(conn, "serial:A", "rip_title", {"rip_id": 0, "fingerprint": fp, "title": 0, "role": "main"},
+                       uses_drive=True, now="t")
+    conn.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (job,))
+    conn.execute("INSERT INTO video_rips (rip_id, fingerprint, state, main_title, message, created_at, updated_at) "
+                 "VALUES (?, ?, 'move_failed', 0, 'Could not move: disk full', 't', 't')", (job, fp))
+    conn.commit()
+    text = _page(client)
+    assert "Could not move: disk full" in text and 'hx-post="/dashboard/video/move"' in text
+    r = client.post("/dashboard/video/move", data={"drive_id": "serial:A", "rip_id": job})
+    assert r.status_code == 200 and "<html" not in r.text
+
+
+def test_ripped_disc_offers_rip_again_and_done_line(dash, config):
+    client, conn = dash
+    fp = _video_disc(conn, DECOY, held=["already ripped (downloads/7/)"])
+    job = jobs.enqueue(conn, "serial:A", "rip_title",
+                       {"rip_id": 7, "fingerprint": fp, "title": 0, "role": "main"}, uses_drive=True, now="t")
+    conn.execute("UPDATE jobs SET state = 'done', id = 7 WHERE id = ?", (job,))
+    conn.execute("INSERT INTO video_rips (rip_id, fingerprint, state, main_title, files, created_at, updated_at) "
+                 "VALUES (7, ?, 'ripped', 0, ?, 't', 't')",
+                 (fp, json.dumps({"0": {"path": "/downloads/7/SOME_FILM_t00.mkv", "role": "main"}})))
+    conn.commit()
+    (config.downloads_dir / "7").mkdir()
+    text = " ".join(_page(client).split())
+    assert "Already ripped (downloads/7/)" in text and "Rip again" in text
+    assert "#7 done → downloads/7/SOME_FILM_t00.mkv (2:16:04, 38.2 GB)" in text
+
+
+def test_card_escapes_disc_text(dash):
+    client, conn = dash
+    _video_disc(conn, DECOY, held=["<b>x</b>"], label="<script>x</script>")
+    text = _page(client)
+    assert "&lt;script&gt;x" in text and "<script>x" not in text and "<b>x</b>" not in text
+
+
+def test_makemkv_key_never_rendered(logged_in_client, config):
+    from disc_ripper import settings
+
+    conn = db.connect(config.db_path)
+    settings.save(conn, {"makemkv_key": "T-SECRETKEY123"})
+    assert settings.get(conn, "makemkv_key") == "T-SECRETKEY123"
+    conn.close()
+    r = logged_in_client.get("/settings")
+    assert r.status_code == 200 and "T-SECRETKEY123" not in r.text

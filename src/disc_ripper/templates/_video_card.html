@@ -1,0 +1,58 @@
+{#- A DVD / Blu-ray card: the held title table, the extras row while ripping, Move again. -#}
+{%- set busy = jobs.running or jobs.queued -%}
+{%- set vr = video_rip -%}
+{%- if vr and vr.state == "move_failed" and not busy %}
+  <div class="video-move">
+    <p class="error">{{ vr.message or "Moving the rip to downloads failed." }}</p>
+    <button hx-post="/dashboard/video/move" hx-vals='{"drive_id": {{ drive.id|tojson }}, "rip_id": {{ vr.rip_id }}}' hx-target="#drive-{{ key }}" hx-disabled-elt="this">Move again</button>
+  </div>
+{%- elif video and vr and vr.state == "ripping" and busy %}
+  <div class="video-extras">
+    Extras:
+    {% for t in video.titles if vr.main_title is none or t.number != vr.main_title -%}
+      {%- set st = vr.titles.get(t.number) %}
+      {%- if st in ("queued", "waiting_space") %}<span class="extra">#{{ t.number }} {{ t.length }} (queued)</span>
+      {%- elif st == "running" %}<span class="extra">#{{ t.number }} {{ t.length }} (ripping)</span>
+      {%- elif st == "done" %}<span class="extra">#{{ t.number }} {{ t.length }} (ripped)</span>
+      {%- else %}<label class="inline extra"><input type="checkbox" hx-post="/dashboard/video/extra" hx-trigger="change" hx-vals='{"drive_id": {{ drive.id|tojson }}, "rip_id": {{ vr.rip_id }}, "title": {{ t.number }}}' hx-target="#drive-{{ key }}"> #{{ t.number }} {{ t.length }}</label>
+      {%- endif %}
+    {% endfor %}
+  </div>
+{%- elif video and not busy %}
+  {%- set blocking = video_blocking %}
+  <div class="video-pick">
+    {% if video.held %}<p>Held: {{ video.held|join("; ") }}</p>
+    {% elif drive.video_hold %}<p>Held.</p>{% endif %}
+    {% if blocking and blocking.state == "ripping" %}<p>Ripping now (downloads/{{ blocking.rip_id }}/)</p>
+    {% elif blocking %}<p>Already ripped (downloads/{{ blocking.rip_id }}/)</p>{% endif %}
+    <form hx-post="/dashboard/video/rip" hx-target="#drive-{{ key }}" hx-disabled-elt="find button">
+      <input type="hidden" name="drive_id" value="{{ drive.id }}">
+      {% if blocking and blocking.state != "ripping" %}<input type="hidden" name="again" value="1">{% endif %}
+      <table class="titles">
+        <thead><tr>
+          {% if not video.no_main %}<th>Main</th>{% endif %}<th>Extra</th><th>#</th><th>Length</th><th>Size</th><th>Chapters</th><th class="source">Source</th>
+        </tr></thead>
+        <tbody>
+        {% for t in video.titles %}
+          <tr>
+            {% if not video.no_main %}<td><input type="radio" name="main" value="{{ t.number }}" aria-label="Main title {{ t.number }}"{% if t.number == video.default_main %} checked{% endif %}></td>{% endif %}
+            <td><input type="checkbox" name="extras" value="{{ t.number }}" aria-label="Rip title {{ t.number }}"></td>
+            <td>{{ t.number }}</td><td>{{ t.length }}</td><td>{{ t.size }}</td><td>{{ t.chapters }}</td><td class="source">{{ t.source }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% if video.no_main %}<p class="hint">Looks like a TV disc: tick the episodes to rip.</p>{% endif %}
+      {% if not (blocking and blocking.state == "ripping") %}
+        <button type="submit">{% if blocking %}Rip again{% else %}Rip{% endif %}</button>
+      {% endif %}
+      {% if video.tv %}
+        {% if video.as_film %}
+          <a href="#" hx-post="/dashboard/video/as-film" hx-vals='{"drive_id": {{ drive.id|tojson }}, "value": "0"}' hx-target="#drive-{{ key }}">Treat as TV</a>
+        {% else %}
+          <a href="#" hx-post="/dashboard/video/as-film" hx-vals='{"drive_id": {{ drive.id|tojson }}, "value": "1"}' hx-target="#drive-{{ key }}">Treat as a film</a>
+        {% endif %}
+      {% endif %}
+    </form>
+  </div>
+{%- endif %}
