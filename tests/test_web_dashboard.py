@@ -402,6 +402,18 @@ def test_rip_refused_shows_error(dash):
     _video_disc(conn, DECOY, held=["x"])
     r = client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": "9"})
     assert "start the rip" in r.text and "scan again by re-inserting" in r.text
+    r = client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": "0", "extras": ["0"]})
+    assert "can&#39;t also be an extra" in r.text and "re-inserting" not in r.text
+    client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": "0"})
+    r = client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": "0"})
+    assert "already queued or ripping" in r.text and "re-inserting" not in r.text
+
+
+def test_rip_with_nothing_ticked_says_so(dash):
+    client, conn = dash
+    _video_disc(conn, EPISODES, held=["looks like a TV disc"], disc_type="dvd")
+    r = client.post("/dashboard/video/rip", data={"drive_id": "serial:A", "main": ""})
+    assert "Tick at least one title" in r.text and "re-inserting" not in r.text
     r = client.post("/dashboard/video/rip", data={"drive_id": "nope", "main": "0"})
     assert r.status_code == 404
 

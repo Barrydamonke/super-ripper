@@ -108,7 +108,8 @@ SETTINGS: tuple[SettingDef, ...] = (
     ),
     SettingDef(
         "video_track_selection", "Track selection", "text", DEFAULT_VIDEO_SELECTION,
-        help="MakeMKV --profile selection rule. Leave as is unless you know the syntax.",
+        help="MakeMKV's default selection string (app_DefaultSelectionString): which audio and subtitle tracks "
+             "go into the MKV. Leave as is unless you know the syntax.",
         group="DVD and Blu-ray",
     ),
 )

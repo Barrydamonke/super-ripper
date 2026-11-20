@@ -180,3 +180,10 @@ def test_read_offset_update(logged_in_client, config, add_sg):
     )
     assert r.status_code == 400
     assert 'value="667"' in r.text
+
+
+def test_settings_page_shows_groups(logged_in_client):
+    text = logged_in_client.get("/settings").text
+    assert text.count("<h2>DVD and Blu-ray</h2>") == 1
+    assert text.index("<h2>DVD and Blu-ray</h2>") < text.index('name="makemkv_key"')
+    assert "app_DefaultSelectionString" in text and "--profile" not in text

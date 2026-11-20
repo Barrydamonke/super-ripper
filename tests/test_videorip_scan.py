@@ -170,7 +170,7 @@ def test_settings_conf_written_with_key(config, setup):
     run(config, Services(config), finished(setup, j))
     conf = config.config_dir / "makemkv" / ".MakeMKV" / "settings.conf"
     assert "T-SECRET" in conf.read_text()
-    assert (config.work_dir / str(j) / "env_home.txt").read_text() == str(config.config_dir / "makemkv")
+    assert (config.work_dir / "env_home.txt").read_text() == str(config.config_dir / "makemkv")
 
 
 def test_write_settings_conf_blank_selection_uses_default(tmp_path):
@@ -205,3 +205,12 @@ def test_autostart_rechecks_hold_and_cancel(config, setup):
         setup.execute("DELETE FROM jobs WHERE kind = 'rip_title'")  # the one queued above would block
         setup.execute("UPDATE drives SET video_hold = 1")
     assert services._db(services._start_video_rip, "serial:A", fp, 0) is not None
+
+
+@pytest.mark.parametrize("mode", ["ok", "fail_old"])
+def test_scan_leaves_no_work_folder(config, setup, monkeypatch, mode):
+    monkeypatch.setenv("FAKE_MAKEMKV_MODE", mode)
+    j = scan_job(setup, from_insert=False)
+    run(config, Services(config), finished(setup, j))
+    assert jobs.get(setup, j)["state"] == ("done" if mode == "ok" else "failed")
+    assert not (config.work_dir / str(j)).exists()

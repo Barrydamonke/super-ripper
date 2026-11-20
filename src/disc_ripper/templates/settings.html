@@ -6,6 +6,7 @@
 {% if errors %}<p class="error">Nothing was saved. Fix the fields marked below.</p>{% endif %}
 <form method="post" action="/settings">
   {% for d in definitions %}
+  {% if d.group and (loop.first or loop.previtem.group != d.group) %}<h2>{{ d.group }}</h2>{% endif %}
   <div>
     {% if d.kind == "bool" %}
       <label><input type="checkbox" name="{{ d.key }}" {% if values[d.key] %}checked{% endif %}> {{ d.label }}</label>

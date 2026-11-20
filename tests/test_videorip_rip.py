@@ -127,6 +127,7 @@ def test_no_audio_fails(config, setup, monkeypatch):
 
 def test_rip_refuses_different_disc(config, setup):
     services, rip = scanned(config, setup)
+    (config.work_dir / "argv.txt").unlink()  # the scan's; the rip mustn't write one
     with setup:
         setup.execute("UPDATE drives SET disc_label = 'OTHER'")
     row = run_until_done(config, setup, services, rip)

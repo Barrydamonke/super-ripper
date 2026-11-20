@@ -63,8 +63,6 @@ async def run_scan_video(ctx: runner.JobContext) -> None:
     key, selection, minlength = await ctx.db(_read)
     home = ctx.config.config_dir / "makemkv"
     write_settings_conf(home, key, selection)
-    work = ctx.config.work_dir / str(ctx.job_id)
-    work.mkdir(parents=True, exist_ok=True)
 
     parser = makemkv.RobotParser()
 
@@ -74,7 +72,8 @@ async def run_scan_video(ctx: runner.JobContext) -> None:
             await ctx.report(fraction * 0.99, f"Scanning disc… {fraction:.0%}")
 
     argv = makemkv.info_argv(ctx.config.dev_root / params["sr_name"], minlength)
-    code = await ctx.run_process(argv, cwd=work, on_line=on_line, env=scan_env(ctx.config))
+    # A scan writes nothing, so it runs in /work itself: no per-job folder to leave behind.
+    code = await ctx.run_process(argv, cwd=ctx.config.work_dir, on_line=on_line, env=scan_env(ctx.config))
     scan = parser.result()
     if code != 0 or not scan.titles:
         last = scan.messages[-1] if scan.messages else f"makemkvcon exit code {code}"

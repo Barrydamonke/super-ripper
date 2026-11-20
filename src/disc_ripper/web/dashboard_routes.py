@@ -277,6 +277,10 @@ async def rip_cd(request: Request, drive_id: str = Form(...), again: str = Form(
 # -- video discs -----------------------------------------------------------------
 
 RIP_REFUSED = "Couldn't start the rip — the disc may have changed; scan again by re-inserting it."
+RIP_NOTHING_TICKED = "Tick at least one title to rip."
+RIP_MAIN_IS_EXTRA = "The main title can't also be an extra."
+RIP_ACTIVE = "A rip of this disc is already queued or ripping."
+RIP_ALREADY = "This disc was already ripped: press Rip again to rip it once more."
 EXTRA_REFUSED = "That title is already queued or ripped."
 
 
@@ -319,10 +323,23 @@ async def rip_video(request: Request, drive_id: str = Form(...), main: str = For
     except ValueError:
         return await _card(request, drive_id, error="Pick the main title (or tick the titles to rip).",
                            status_code=400)
+    if main_number is None and not extra_numbers:
+        return await _card(request, drive_id, error=RIP_NOTHING_TICKED, status_code=400)
+    if main_number is not None and main_number in extra_numbers:
+        return await _card(request, drive_id, error=RIP_MAIN_IS_EXTRA, status_code=400)
     rip_id = await _services(request).start_video_rip(
         drive_id, disc["fingerprint"], main=main_number, extras=extra_numbers, again=bool(again))
     if rip_id is None:
-        return await _card(request, drive_id, error=RIP_REFUSED)
+        config = request.app.state.config
+        blocking = await asyncio.to_thread(_with_conn, request, video_rips.blocking_rip, disc["fingerprint"],
+                                           config.downloads_dir, config.work_dir)
+        if blocking is not None and blocking["state"] == "ripping":
+            error = RIP_ACTIVE
+        elif blocking is not None and not again:
+            error = RIP_ALREADY
+        else:  # a title that isn't on the scanned disc
+            error = RIP_REFUSED
+        return await _card(request, drive_id, error=error)
     return await _card(request, drive_id)
 
 
