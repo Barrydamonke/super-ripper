@@ -2,6 +2,10 @@
 {%- set types = {"audio": "Audio CD", "dvd": "DVD", "bluray": "Blu-ray", "data": "Data disc", "mixed": "Enhanced CD", "unknown": "Unknown type"} -%}
 <div class="card-head">
   <h2>{{ drive.label or drive.model }}</h2>
+  {#- The drive only reports "tray open"; empty, spinning up and disc-in all mean closed. #}
+  {%- if drive.media_state == "tray_open" %}<span class="tray tray-open" title="The tray is out">● Tray open</span>
+  {%- elif drive.media_state in ("empty", "not_ready", "disc") %}<span class="tray tray-closed" title="The tray is in">● Tray closed</span>
+  {%- else %}<span class="tray tray-unknown" title="The drive hasn't reported its tray yet">● Tray unknown</span>{% endif %}
   <span class="hint">{{ drive.vendor }} {{ drive.model }}</span>
   <span class="actions">
     <button hx-post="/dashboard/eject" hx-vals='{"drive_id": {{ drive.id|tojson }}}' hx-target="#drive-{{ key }}">
