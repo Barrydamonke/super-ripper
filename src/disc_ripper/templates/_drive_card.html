@@ -22,6 +22,12 @@
   {%- endif %}
 </p>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% for mv in video_moves %}
+  <div class="video-move">
+    <p class="error">Rip #{{ mv.rip_id }}: {{ mv.message or "Moving the rip to downloads failed." }}</p>
+    <button hx-post="/dashboard/video/move" hx-vals='{"drive_id": {{ drive.id|tojson }}, "rip_id": {{ mv.rip_id }}}' hx-target="#drive-{{ key }}" hx-disabled-elt="this">Move again</button>
+  </div>
+{% endfor %}
 {% if drive.media_state == "disc" and drive.disc_type in ("dvd", "bluray") %}{% include "_video_card.html" %}{% endif %}
 {% if audio and not jobs.running and not jobs.queued %}
   <p>
@@ -68,6 +74,8 @@
     {%- elif rip and rip.state == "needs_look" %} → <a href="/music/{{ job.id }}">needs a look</a>{% endif %}
     {%- set vd = video_done.get(job.id) %}
     {%- if vd %} → downloads/{{ vd.rip_id }}/{{ vd.file }} ({{ vd.length }}, {{ vd.size }}){% endif %}
+    {%- set note = video_notes.get(job.id) %}
+    {%- if note %} → {{ note }}{% endif %}
     {%- if job.state in ("interrupted", "failed", "cancelled") %}
       <button hx-post="/jobs/{{ job.id }}/retry" hx-target="#drive-{{ key }}">Retry</button>
     {%- endif %}{% if not loop.last %} ·{% endif %}

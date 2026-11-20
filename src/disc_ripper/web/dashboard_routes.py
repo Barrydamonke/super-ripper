@@ -51,7 +51,16 @@ def _gb(size: int) -> str:
 
 def _video_context(conn: sqlite3.Connection, drive_row: sqlite3.Row, grouped, config) -> dict:
     """Template context for a DVD/Blu-ray card: the scanned disc, any blocking rip, the current rip."""
-    ctx = {"video": None, "video_blocking": None, "video_rip": None, "video_done": {}}
+    ctx = {"video": None, "video_blocking": None, "video_rip": None, "video_done": {}, "video_notes": {},
+           "video_moves": []}
+    # Rips from this drive whose move to downloads failed: shown whether or not a disc is in,
+    # since the disc ejects once the rip itself is done.
+    for rip in conn.execute(
+        "SELECT rip_id, message FROM video_rips WHERE state = 'move_failed' "
+        "AND rip_id IN (SELECT id FROM jobs WHERE drive_id = ?) ORDER BY rip_id", (drive_row["id"],)
+    ).fetchall():
+        if not any(s in ("queued", "waiting_space", "running") for _t, _j, s in video_rips.attempts(conn, rip["rip_id"])):
+            ctx["video_moves"].append({"rip_id": rip["rip_id"], "message": rip["message"]})
     disc_fp = None
     if drive_row["media_state"] == "disc" and drive_row["disc_type"] in ("dvd", "bluray"):
         row = video_rips.disc_in_drive(conn, drive_row["id"])
@@ -91,8 +100,11 @@ def _video_context(conn: sqlite3.Connection, drive_row: sqlite3.Row, grouped, co
         if job["kind"] != "rip_title" or job["state"] != "done":
             continue
         params = json.loads(job["params"])
-        rip = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (params.get("rip_id"),)).fetchone()
+        rip = conn.execute("SELECT files, state, message FROM video_rips WHERE rip_id = ?",
+                           (params.get("rip_id"),)).fetchone()
         entry = json.loads(rip["files"]).get(str(params.get("title"))) if rip else None
+        if not entry and rip is not None and rip["state"] == "move_failed":
+            ctx["video_notes"][job["id"]] = rip["message"] or "Moving the rip to downloads failed."
         disc = conn.execute("SELECT scan FROM video_discs WHERE fingerprint = ?",
                             (params.get("fingerprint"),)).fetchone()
         if not entry or disc is None:

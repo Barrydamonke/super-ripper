@@ -1,11 +1,8 @@
-{#- A DVD / Blu-ray card: the held title table, the extras row while ripping, Move again. -#}
+{#- A DVD / Blu-ray card: the held title table, the extras row while ripping. Move again is on _drive_card. -#}
 {%- set busy = jobs.running or jobs.queued -%}
 {%- set vr = video_rip -%}
 {%- if vr and vr.state == "move_failed" and not busy %}
-  <div class="video-move">
-    <p class="error">{{ vr.message or "Moving the rip to downloads failed." }}</p>
-    <button hx-post="/dashboard/video/move" hx-vals='{"drive_id": {{ drive.id|tojson }}, "rip_id": {{ vr.rip_id }}}' hx-target="#drive-{{ key }}" hx-disabled-elt="this">Move again</button>
-  </div>
+  {#- Shown above with Move again; the title table comes back once the file is moved. #}
 {%- elif video and vr and vr.state == "ripping" and busy %}
   <div class="video-extras">
     Extras:

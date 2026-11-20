@@ -496,3 +496,41 @@ def test_makemkv_key_never_rendered(logged_in_client, config):
     conn.close()
     r = logged_in_client.get("/settings")
     assert r.status_code == 200 and "T-SECRETKEY123" not in r.text
+
+
+def _move_failed_rip(conn, config, fp, work_file=True):
+    job = jobs.enqueue(conn, "serial:A", "rip_title", {"rip_id": 0, "fingerprint": fp, "title": 0, "role": "main"},
+                       uses_drive=True, now="t")
+    conn.execute("UPDATE jobs SET state = 'done', params = json_set(params, '$.rip_id', id) WHERE id = ?", (job,))
+    conn.execute("INSERT INTO video_rips (rip_id, fingerprint, state, main_title, message, created_at, updated_at) "
+                 "VALUES (?, ?, 'move_failed', 0, 'Couldn''t move to downloads: disk full', 't', 't')", (job, fp))
+    conn.commit()
+    if work_file:
+        (config.work_dir / str(job)).mkdir()
+        (config.work_dir / str(job) / "SOME_FILM_t00.mkv").write_text("film")
+    return job
+
+
+def test_move_failed_shown_after_the_disc_ejects(dash, config):
+    client, conn = dash
+    fp = _video_disc(conn, DECOY)
+    job = _move_failed_rip(conn, config, fp)
+    drives.set_media(conn, "serial:A", "empty", None, "", "t2")  # the disc ejected
+    text = " ".join(_page(client).split())
+    assert text.count("Couldn&#39;t move to downloads: disk full") >= 2  # the card and the recent line
+    assert f"#{job} done → Couldn&#39;t move to downloads: disk full" in text
+    assert 'hx-post="/dashboard/video/move"' in text
+    r = client.post("/dashboard/video/move", data={"drive_id": "serial:A", "rip_id": job})
+    assert r.status_code == 200 and "Move again" not in r.text
+    assert (config.downloads_dir / str(job) / "SOME_FILM_t00.mkv").read_text() == "film"
+    assert conn.execute("SELECT state FROM video_rips").fetchone()[0] == "ripped"
+
+
+def test_move_again_with_nothing_left_says_so_and_settles(dash, config):
+    client, conn = dash
+    fp = _video_disc(conn, DECOY)
+    job = _move_failed_rip(conn, config, fp, work_file=False)  # the owner deleted the work file
+    r = client.post("/dashboard/video/move", data={"drive_id": "serial:A", "rip_id": job})
+    assert "Nothing left to move" in r.text
+    assert conn.execute("SELECT state FROM video_rips").fetchone()[0] == "failed"
+    assert 'hx-post="/dashboard/video/move"' not in r.text
