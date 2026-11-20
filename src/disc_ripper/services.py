@@ -234,7 +234,8 @@ class Services:
         await self.drive_changed(drive_id)
         return job_id
 
-    def _start_video_rip(self, conn, drive_id: str, fingerprint: str, main: int) -> int:
+    def _start_video_rip(self, conn, drive_id: str, fingerprint: str, main: int,
+                         scan_job_id: int | None = None) -> int | None:
         disc = conn.execute("SELECT * FROM video_discs WHERE fingerprint = ?", (fingerprint,)).fetchone()
         drive = conn.execute("SELECT sr_name FROM drives WHERE id = ?", (drive_id,)).fetchone()
         title = next(t for t in json.loads(disc["scan"])["titles"] if t["number"] == main)
@@ -244,6 +245,12 @@ class Services:
         now = utc_now()
         conn.execute("BEGIN IMMEDIATE")
         try:
+            if scan_job_id is not None:  # an auto-start: Hold or a cancel may have come since the scan decided
+                hold = conn.execute("SELECT video_hold FROM drives WHERE id = ?", (drive_id,)).fetchone()
+                scan = conn.execute("SELECT state FROM jobs WHERE id = ?", (scan_job_id,)).fetchone()
+                if (hold is not None and hold["video_hold"]) or scan is None or scan["state"] != "running":
+                    conn.rollback()
+                    return None
             cur = conn.execute(
                 "INSERT INTO jobs (drive_id, kind, state, params, needs_bytes, uses_drive, created_at) "
                 "VALUES (?, 'rip_title', 'queued', ?, ?, 1, ?)",
@@ -261,9 +268,12 @@ class Services:
         return job_id
 
     async def start_video_rip(self, drive_id: str, fingerprint: str, *, main: int, extras: list[int],
-                              again: bool) -> int:
+                              again: bool, scan_job_id: int | None = None) -> int | None:
         """Queue the main title's rip. (Extras, TV titles and the duplicate guard come later.)"""
-        rip_id = await asyncio.to_thread(self._db, self._start_video_rip, drive_id, fingerprint, main)
+        rip_id = await asyncio.to_thread(self._db, self._start_video_rip, drive_id, fingerprint, main,
+                                         scan_job_id)
+        if rip_id is None:
+            return None
         log.info("video: queued rip #%s on %s", rip_id, drive_id)
         self.wake(drive_id)
         await self.drive_changed(drive_id)

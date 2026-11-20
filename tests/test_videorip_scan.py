@@ -177,3 +177,30 @@ def test_write_settings_conf_blank_selection_uses_default(tmp_path):
     videorip.write_settings_conf(tmp_path, "", "  ")
     text = (tmp_path / ".MakeMKV" / "settings.conf").read_text()
     assert settings.DEFAULT_VIDEO_SELECTION in text
+
+
+def test_autostart_rechecks_hold_and_cancel(config, setup):
+    services = Services(config)
+    j = scan_job(setup)
+    run(config, services, finished(setup, j), after_start=None)  # scan done; disc saved, rip queued
+    fp = video_rips.disc_in_drive(setup, "serial:A")["fingerprint"]
+    with setup:
+        setup.execute("DELETE FROM jobs WHERE kind = 'rip_title'")
+        setup.execute("UPDATE jobs SET state = 'running' WHERE id = ?", (j,))
+    # Hold pressed after the scan decided
+    with setup:
+        setup.execute("UPDATE drives SET video_hold = 1")
+    assert services._db(services._start_video_rip, "serial:A", fp, 0, j) is None
+    # Scan cancelled after it decided
+    with setup:
+        setup.execute("UPDATE drives SET video_hold = 0")
+        setup.execute("UPDATE jobs SET state = 'cancelled' WHERE id = ?", (j,))
+    assert services._db(services._start_video_rip, "serial:A", fp, 0, j) is None
+    assert rip_jobs(setup) == []
+    # Still running and not held: it queues; a manual start (no scan id) skips the check
+    with setup:
+        setup.execute("UPDATE jobs SET state = 'running' WHERE id = ?", (j,))
+    assert services._db(services._start_video_rip, "serial:A", fp, 0, j) is not None
+    with setup:
+        setup.execute("UPDATE drives SET video_hold = 1")
+    assert services._db(services._start_video_rip, "serial:A", fp, 0) is not None

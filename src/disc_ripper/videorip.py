@@ -82,7 +82,8 @@ async def run_scan_video(ctx: runner.JobContext) -> None:
     log.info("video: scanned %r on %s: %d titles, held=%s", label, ctx.drive_id, len(scan.titles), reasons)
     main = titles.main_title(scan.titles)
     if not reasons:
-        await ctx.services.start_video_rip(ctx.drive_id, fp, main=main.number, extras=[], again=False)
+        await ctx.services.start_video_rip(ctx.drive_id, fp, main=main.number, extras=[], again=False,
+                                          scan_job_id=ctx.job_id)
     await ctx.report(1.0, "Scanned")
     drive_changed = getattr(ctx.services, "drive_changed", None)
     if drive_changed is not None:
