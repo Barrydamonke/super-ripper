@@ -127,7 +127,7 @@ SETTINGS: tuple[SettingDef, ...] = (
     ),
     SettingDef(
         "encode_slots", "Encodes at once", "int", 1, "", 1, 2,
-        "How many encodes may run at the same time.",
+        "How many encodes may run at the same time. A change applies after the container restarts.",
         group="Encoding",
     ),
     SettingDef(

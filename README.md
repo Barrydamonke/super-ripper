@@ -22,7 +22,7 @@ Data-disc ripping comes in a later step.
 2. **Create the work share.** Shares → Add Share → name `disc-ripper-work`, Primary storage **Cache**, Secondary storage **None**. With no secondary storage, Unraid 7 makes it an exclusive share (no FUSE layer), and the mover never touches it.
 3. **Add the container.** Copy `unraid/disc-ripper.xml` to `/boot/config/plugins/dockerMan/templates-user/my-disc-ripper.xml` on the flash drive, then Docker → Add Container → pick `disc-ripper` from the template list. Check the paths and `TZ`, then Apply.
 4. **First start.** Open `http://<server>:8580`, set the admin password, log in, and open Drives. Both drives should show their model, an ID starting with `serial:` (or a `wwid:`/`port:` fallback), and node status `ok`.
-5. **Check the GPU.** The template passes `/dev/dri` through (`--device=/dev/dri`) for the Fast (hardware) encoding preset. On the server, `docker exec disc-ripper vainfo` must list `VAProfileHEVCMain : VAEntrypointEncSlice`. If it doesn't, Fast won't work.
+5. **Check the GPU.** The template passes `/dev/dri` through (`--device=/dev/dri`) for the Fast (hardware) encoding preset. Check it as the app user, not root (root can open a node the app can't): on the server run `docker exec disc-ripper setpriv --reuid=99 --regid=100 --groups=$(docker exec disc-ripper stat -c %g /dev/dri/renderD128) vainfo`. It must list `VAProfileHEVCMain : VAEntrypointEncSlice`. If it doesn't, Fast won't work. If the container log (`docker logs disc-ripper`) says `render node is root-only`, the host's `/dev/dri` permissions need fixing. `--device=/dev/dri` also means the container won't start on a host that has no `/dev/dri`; remove that line from the template there and use Standard or Copy only.
 
 ### How the drives get into the container
 
@@ -126,7 +126,7 @@ Standard and Fast give one audio track, converted to E-AC-3: 5.1 at 640 kb/s whe
 
 Settings has an **Encoding** group:
 - **encode_after_rip:** Standard, Fast, Copy only or Off (default Standard). A finished rip queues its encode on its own.
-- **encode_slots:** encodes run at once, 1 or 2 (default 1).
+- **encode_slots:** encodes run at once, 1 or 2 (default 1). A change applies after the container restarts.
 - **fast_quality:** the Fast preset's quality number, 1 to 51, lower is better (default 24; tune it after a test encode).
 - **raw_keep_hours:** how long the raw file is kept after a good encode (default 24).
 - **encode_stall_minutes:** stop an encoder that prints nothing for this long (default 10).
@@ -137,7 +137,7 @@ Encodes queue behind the shutdown guard (a running encode holds shutdown like a 
 
 **Films page** (`/films`, in the nav): the running and queued encodes at the top (the dashboard's **Encoding** panel shows the same lines), then each rip, newest first, with its files. Each file has an **Encode** menu (and **Encode all** per rip), a failed encode shows its reason with **Retry** and **log**, and every encode has its own log (`/config/logs/`). It updates live.
 
-**GPU setup.** The template passes `--device=/dev/dri`. The entrypoint keeps the render group itself, clears the other groups, and warns in the container log if the render node is root-only (then Fast cannot run as the app user). Check with `docker exec disc-ripper vainfo`: it must list `VAProfileHEVCMain : VAEntrypointEncSlice`. Without it, use Standard or Copy only.
+**GPU setup.** The template passes `--device=/dev/dri`. The entrypoint keeps the render group itself, clears the other groups, and warns in the container log if the render node is root-only (then Fast cannot run as the app user). Check as the app user with the `setpriv ... vainfo` command in step 5 of the install (plain `docker exec ... vainfo` runs as root and proves nothing): it must list `VAProfileHEVCMain : VAEntrypointEncSlice`. Without it, use Standard or Copy only.
 
 ### Testing step 6 on the server
 
