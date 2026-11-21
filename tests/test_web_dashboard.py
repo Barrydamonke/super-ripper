@@ -587,3 +587,46 @@ def test_no_hold_for_a_running_main_rip(dash):
     conn.execute("UPDATE jobs SET state = 'running'")
     conn.commit()
     assert 'hx-post="/dashboard/video/hold"' not in _page(client)
+
+
+def test_job_log_page_shows_the_log_and_kept_tool_logs(dash, config):
+    client, conn = dash
+    j = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 60, "size_gb": 0}, now="t")
+    logs = config.config_dir / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / f"job-{j}.log").write_text("2026-11-21 11:33:33 job started\n", encoding="utf-8")
+    (logs / f"job-{j}-cyanrip.log").write_text("Tracks ripped accurately: 13/13\n", encoding="utf-8")
+    r = client.get(f"/jobs/{j}/log")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/plain")
+    assert "job started" in r.text
+    assert f"job-{j}-cyanrip.log" in r.text and "Tracks ripped accurately: 13/13" in r.text
+    missing = client.get("/jobs/9999/log")
+    assert missing.status_code == 404 and "No log" in missing.text
+
+
+def test_job_log_needs_login(client):
+    r = client.get("/jobs/1/log", follow_redirects=False)
+    assert r.status_code in (302, 303, 401)
+
+
+def test_failed_job_is_explained_on_the_card(dash, config):
+    client, conn = dash
+    j = jobs.enqueue(conn, "serial:A", "rip_title", {"rip_id": 1}, now="t")
+    jobs.finish(conn, j, "failed", "t2", error="MakeMKV stopped responding: it printed nothing for 10 minutes.")
+    page = client.get("/").text
+    assert f"Job #{j} failed" in page
+    assert "MakeMKV stopped responding" in page
+    assert f'href="/jobs/{j}/log"' in page
+    assert f'hx-post="/jobs/{j}/retry"' in page
+
+
+def test_recent_and_running_jobs_link_their_logs(dash):
+    client, conn = dash
+    done = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 1, "size_gb": 0}, now="t")
+    jobs.finish(conn, done, "done", "t2")
+    running = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 600, "size_gb": 0}, now="t")
+    assert jobs.start(conn, running, "t3")
+    page = client.get("/").text
+    assert f'href="/jobs/{done}/log"' in page
+    assert f'href="/jobs/{running}/log"' in page
+    assert "job-failed" not in page  # nothing failed, so no failure box

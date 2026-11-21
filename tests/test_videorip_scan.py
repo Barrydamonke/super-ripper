@@ -215,3 +215,17 @@ def test_scan_leaves_no_work_folder(config, setup, monkeypatch, mode):
     run(config, Services(config), finished(setup, j))
     assert jobs.get(setup, j)["state"] == ("done" if mode == "ok" else "failed")
     assert not (config.work_dir / str(j)).exists()
+
+
+def test_scan_stall_fails_with_a_clear_message(config, setup, monkeypatch):
+    monkeypatch.setenv("FAKE_MAKEMKV_MODE", "hang")
+    monkeypatch.setattr(videorip, "STALL_UNIT_SECONDS", 0.05)  # 10 "minutes" = 0.5 s
+    j = scan_job(setup)
+    run(config, Services(config), finished(setup, j))
+    row = jobs.get(setup, j)
+    assert row["state"] == "failed"
+    assert "MakeMKV stopped responding" in row["error"] and "Retry" in row["error"]
+    assert not runner.LIVE_PROCESSES
+    assert rip_jobs(setup) == []
+    log_text = (config.config_dir / "logs" / f"job-{j}.log").read_text(encoding="utf-8")
+    assert "makemkvcon" in log_text and "no output for" in log_text

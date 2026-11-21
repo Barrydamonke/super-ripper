@@ -20,6 +20,7 @@ VALID_FORM = {
     "cd_rip_mode": "secure",
     "cd_retries": "10",
     "video_min_title_seconds": "120",
+    "makemkv_stall_minutes": "10",
     "cd_approval": "odd_ones",
     "cd_cover_art": "on",
 }

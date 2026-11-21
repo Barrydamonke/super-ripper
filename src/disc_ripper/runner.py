@@ -10,16 +10,17 @@ a busy database never stalls the event loop.
 from __future__ import annotations
 
 import asyncio
-import os
-import signal
 import json
+import os
+import shlex
+import signal
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-from . import db, jobs, settings
+from . import db, joblog, jobs, settings
 from .clock import utc_now
 from .config import AppConfig
 from .events import Notifier
@@ -34,6 +35,14 @@ KILL_GRACE_SECONDS = 5.0
 LIVE_PROCESSES: set[asyncio.subprocess.Process] = set()
 
 
+class ProcessStalled(Exception):
+    """A child printed nothing for `seconds` and was stopped."""
+
+    def __init__(self, seconds: float):
+        super().__init__(f"no output for {seconds:g} s")
+        self.seconds = seconds
+
+
 class JobContext:
     def __init__(self, runner: JobRunner, job_id: int, drive_id: str, params: dict):
         self.job_id = job_id
@@ -43,9 +52,11 @@ class JobContext:
         self.services = runner.services
         self._runner = runner
         self._last_write: float | None = None
+        self.log = joblog.JobLog(joblog.path_for(runner.config, job_id))
 
     async def report(self, progress: float, message: str, estimated_finish: datetime | None = None) -> None:
         """Progress 0.0-1.0. Written and pushed to browsers at most once a second."""
+        self.log.progress(progress)
         now = time.monotonic()
         if progress < 1.0 and self._last_write is not None and now - self._last_write < PROGRESS_INTERVAL:
             return
@@ -62,17 +73,21 @@ class JobContext:
 
     async def run_process(
         self, argv: list[str], *, cwd: Path, on_line: Callable[[str], Awaitable[None]],
-        env: dict[str, str] | None = None,
+        env: dict[str, str] | None = None, idle_timeout: float | None = None,
     ) -> int:
         """Run a child (fixed argv, no shell), feeding each output line to on_line.
 
         Lines end at '\n' or '\r' (progress bars rewrite with '\r'). If the job is
         cancelled or the worker stops, the child gets SIGTERM, then SIGKILL after
-        KILL_GRACE_SECONDS, before the cancellation carries on.
+        KILL_GRACE_SECONDS, before the cancellation carries on. With idle_timeout, a
+        child that prints nothing for that many seconds is stopped the same way and
+        ProcessStalled is raised. The command, its output (less progress chatter) and
+        its exit code go to the job's log.
         """
         from .cyanrip import LineSplitter
 
         posix = os.name == "posix"
+        self.log.write(f"$ {shlex.join(str(a) for a in argv)}")
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
@@ -86,20 +101,35 @@ class JobContext:
         splitter = LineSplitter()
         try:
             while True:
-                chunk = await proc.stdout.read(4096)
+                try:
+                    chunk = await asyncio.wait_for(proc.stdout.read(4096), idle_timeout)
+                except TimeoutError:
+                    self.log.write(f"no output for {_duration(idle_timeout)}: stopping the process")
+                    raise ProcessStalled(idle_timeout) from None
                 if not chunk:
                     break
                 for line in splitter.feed(chunk.decode("utf-8", errors="replace")):
+                    self.log.output(line)
                     await on_line(line)
             for line in splitter.flush():
+                self.log.output(line)
                 await on_line(line)
-            return await proc.wait()
+            code = await proc.wait()
+            self.log.write(f"exit code {code}")
+            return code
         finally:
             if proc.returncode is None:
                 # Cancelled, or on_line failed: stop the child. Shielded so a second
                 # cancel (e.g. shutdown after a user cancel) can't skip the SIGKILL.
                 await asyncio.shield(_terminate(proc, posix))
             LIVE_PROCESSES.discard(proc)
+
+
+def _duration(seconds: float) -> str:
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return f"{seconds:g} s"
 
 
 async def _terminate(proc: asyncio.subprocess.Process, posix: bool) -> None:
@@ -305,11 +335,13 @@ class JobRunner:
         self.space.invalidate()  # the job is about to write into /work
         await self.notify(drive_id)
         log.info("jobs: started #%s (%s) on %s", job_id, job["kind"], drive_id)
+        ctx = JobContext(self, job_id, drive_id, json.loads(job["params"]))
+        ctx.log.write(f"job #{job_id} ({job['kind']}) started on {drive_id}")
+        ctx.log.write(f"params: {job['params']}")
         handler = self.handlers.get(job["kind"])
         if handler is None:
             await self._finish(drive_id, job_id, "failed", f"Unknown job kind: {job['kind']}")
             return
-        ctx = JobContext(self, job_id, drive_id, json.loads(job["params"]))
         task = asyncio.create_task(handler(ctx), name=f"job {job_id}")
         self._running[job_id] = task
         if job_id in self._user_cancelled:
@@ -322,6 +354,7 @@ class JobRunner:
                 task.cancel()
                 # Written synchronously: awaiting here could be cancelled again.
                 self._call(jobs.finish, job_id, "interrupted", utc_now(), message=jobs.INTERRUPTED_MESSAGE)
+                ctx.log.write("finished: interrupted (restart or shutdown)")
                 raise
             await self._finish(drive_id, job_id, "cancelled", None)
         except Exception as exc:  # a job failing must not kill the drive's worker
@@ -336,6 +369,8 @@ class JobRunner:
     async def _finish(self, drive_id: str, job_id: int, state: jobs.FinalState, error: str | None) -> None:
         await self.db(jobs.finish, job_id, state, utc_now(), error=error)
         log.info("jobs: #%s %s%s", job_id, state, f": {error}" if error else "")
+        joblog.JobLog(joblog.path_for(self.config, job_id)).write(
+            f"finished: {state}" + (f" — {error}" if error else ""))
         await self._ended(job_id)
         await self.notify(drive_id)
 

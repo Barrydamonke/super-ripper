@@ -106,12 +106,14 @@ async def run_rip_cd(ctx: runner.JobContext) -> None:
 
     code = await ctx.run_process(argv, cwd=work, on_line=on_line)
     rip_dir = work / "rip"
+    logs = sorted(rip_dir.glob("*.log")) if rip_dir.is_dir() else []
+    if logs:  # kept for good, even if the rip failed or the album is filed and its folder removed
+        ctx.log.attach("cyanrip", logs[0])
     files = cyanrip.track_files(rip_dir) if rip_dir.is_dir() else {}
     if code != 0 or any(t not in files for t in tracks):
         detail = " / ".join(tail) or f"exit code {code}"
         raise RuntimeError(f"cyanrip failed: {detail}")
 
-    logs = sorted(rip_dir.glob("*.log"))
     log_text = logs[0].read_text(encoding="utf-8", errors="replace") if logs else ""
     checks = cyanrip.parse_accuraterip(log_text, tracks)
     await ctx.db(cd_rips.update, ctx.job_id, accuraterip=[c.__dict__ for c in checks])

@@ -12,9 +12,9 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
-from .. import busy, cd_rips, db, drives, jobs, makemkv, schedule_source, video_rips
+from .. import busy, cd_rips, db, drives, joblog, jobs, makemkv, schedule_source, video_rips
 from .. import titles as titles_mod
 from ..cdtoc import musicbrainz_disc_id
 from ..clock import utc_now
@@ -426,6 +426,26 @@ async def cancel_job(request: Request, job_id: int):
     await _services(request).cancel_job(job_id)
     # A running job finishes cancelling a moment later; the SSE update brings the card up to date.
     return await _card(request, row["drive_id"])
+
+
+def _read_job_log(config, job_id: int) -> str | None:
+    """The job's log, followed by any tool logs kept beside it (job-<id>-<name>.log)."""
+    main = joblog.path_for(config, job_id)
+    if not main.is_file():
+        return None
+    parts = [main.read_text(encoding="utf-8", errors="replace")]
+    for extra in sorted(main.parent.glob(f"job-{job_id}-*.log")):
+        parts.append(f"\n===== {extra.name} =====\n" + extra.read_text(encoding="utf-8", errors="replace"))
+    return "".join(parts)
+
+
+@router.get("/jobs/{job_id}/log")
+async def job_log(request: Request, job_id: int):
+    text = await asyncio.to_thread(_read_job_log, request.app.state.config, job_id)
+    if text is None:
+        return PlainTextResponse(f"No log was kept for job #{job_id} (logs started with this version).",
+                                 status_code=404)
+    return PlainTextResponse(text)
 
 
 @router.post("/jobs/{job_id}/retry")

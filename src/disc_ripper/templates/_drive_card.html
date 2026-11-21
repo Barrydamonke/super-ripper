@@ -45,7 +45,7 @@
 {% if jobs.running %}
   {%- set job = jobs.running %}
   <div class="job">
-    Running: {{ job.kind }} job #{{ job.id }}
+    Running: {{ job.kind }} job #{{ job.id }} <a class="hint" href="/jobs/{{ job.id }}/log" target="_blank">log</a>
     <progress max="1" value="{{ job.progress }}"></progress> {{ (job.progress * 100)|round|int }}%
     {% if job.estimated_finish %}finishes ~{{ job.estimated_finish|hm }}{% endif %}
     {% if job.kind == "scan_video" %}<button hx-post="/dashboard/video/hold" hx-vals='{"drive_id": {{ drive.id|tojson }}}' hx-target="#drive-{{ key }}">Hold</button>{% endif %}
@@ -67,6 +67,15 @@
   </div>
 {% endfor %}
 
+{% set last = jobs.recent[0] if jobs.recent else none %}
+{% if last and last.state == "failed" and not jobs.running %}
+  <div class="error job-failed">
+    <strong>Job #{{ last.id }} failed:</strong> {{ last.error or "no reason was recorded" }}
+    <button hx-post="/jobs/{{ last.id }}/retry" hx-target="#drive-{{ key }}">Retry</button>
+    <a href="/jobs/{{ last.id }}/log" target="_blank">View log</a>
+  </div>
+{% endif %}
+
 {% if jobs.recent %}
   <div class="hint">Recent:
   {% for job in jobs.recent %}
@@ -78,6 +87,7 @@
     {%- if vd %} → downloads/{{ vd.rip_id }}/{{ vd.file }} ({{ vd.length }}, {{ vd.size }}){% endif %}
     {%- set note = video_notes.get(job.id) %}
     {%- if note %} → {{ note }}{% endif %}
+    <a href="/jobs/{{ job.id }}/log" target="_blank">log</a>
     {%- if job.state in ("interrupted", "failed", "cancelled") %}
       <button hx-post="/jobs/{{ job.id }}/retry" hx-target="#drive-{{ key }}">Retry</button>
     {%- endif %}{% if not loop.last %} ·{% endif %}

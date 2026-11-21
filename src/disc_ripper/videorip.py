@@ -34,11 +34,29 @@ def scan_env(config) -> dict:
     return {"HOME": str(config.config_dir / "makemkv")}
 
 
+STALL_UNIT_SECONDS = 60  # the stall setting is in minutes; tests shrink this
+
+
+def stalled_message(minutes: int) -> str:
+    return (f"MakeMKV stopped responding: it printed nothing for {minutes} minutes, so it was stopped. "
+            "This is a known MakeMKV problem with some drives on Linux. Press Retry; if it happens again, "
+            "eject and re-insert the disc. The job's log has MakeMKV's last messages.")
+
+
+async def _run_makemkv(ctx, argv: list[str], on_line, stall_minutes: int) -> int:
+    """Run makemkvcon for a job, giving up if it goes silent (see makemkv_stall_minutes)."""
+    try:
+        return await ctx.run_process(argv, cwd=ctx.config.work_dir, on_line=on_line, env=scan_env(ctx.config),
+                                     idle_timeout=stall_minutes * STALL_UNIT_SECONDS)
+    except runner.ProcessStalled:
+        raise RuntimeError(stalled_message(stall_minutes)) from None
+
+
 def _read(conn):
     key = settings.get(conn, "makemkv_key")
     selection = settings.get(conn, "video_track_selection")
     minlength = settings.get(conn, "video_min_title_seconds")
-    return key, selection, minlength
+    return key, selection, minlength, settings.get(conn, "makemkv_stall_minutes")
 
 
 def _decide(conn, drive_id, disc_type, label, scan, minlength, from_insert, downloads_dir, work_dir, now):
@@ -60,7 +78,7 @@ def _decide(conn, drive_id, disc_type, label, scan, minlength, from_insert, down
 async def run_scan_video(ctx: runner.JobContext) -> None:
     params = ctx.params
     disc_type, label = params["disc_type"], params.get("label", "")
-    key, selection, minlength = await ctx.db(_read)
+    key, selection, minlength, stall_minutes = await ctx.db(_read)
     home = ctx.config.config_dir / "makemkv"
     write_settings_conf(home, key, selection)
 
@@ -73,7 +91,7 @@ async def run_scan_video(ctx: runner.JobContext) -> None:
 
     argv = makemkv.info_argv(ctx.config.dev_root / params["sr_name"], minlength)
     # A scan writes nothing, so it runs in /work itself: no per-job folder to leave behind.
-    code = await ctx.run_process(argv, cwd=ctx.config.work_dir, on_line=on_line, env=scan_env(ctx.config))
+    code = await _run_makemkv(ctx, argv, on_line, stall_minutes)
     scan = parser.result()
     if code != 0 or not scan.titles:
         last = scan.messages[-1] if scan.messages else f"makemkvcon exit code {code}"
@@ -117,7 +135,7 @@ def _prepare(conn, params: dict, job_id: int, now: str):
         video_rips.set_state(conn, params["rip_id"], "ripping", "", now)
     old = video_rips.earlier_unfinished_jobs(conn, params["rip_id"], params["title"], job_id)
     return (settings.get(conn, "makemkv_key"), settings.get(conn, "video_track_selection"),
-            settings.get(conn, "cache_min_free_gb")), old
+            settings.get(conn, "cache_min_free_gb"), settings.get(conn, "makemkv_stall_minutes")), old
 
 
 def _label(conn, params: dict) -> str:
@@ -172,7 +190,7 @@ async def run_rip_title(ctx: runner.JobContext) -> None:
 
 async def _rip_title(ctx, params: dict, work: Path) -> None:
     rip_id, title, role = params["rip_id"], params["title"], params.get("role", "title")
-    (key, selection, min_free), old = await ctx.db(_prepare, params, ctx.job_id, utc_now())
+    (key, selection, min_free, stall_minutes), old = await ctx.db(_prepare, params, ctx.job_id, utc_now())
     for job in old:  # a cancelled or interrupted attempt's partial file would sit in the budget for a week
         shutil.rmtree(ctx.config.work_dir / str(job), ignore_errors=True)
     shutil.rmtree(work, ignore_errors=True)
@@ -194,7 +212,7 @@ async def _rip_title(ctx, params: dict, work: Path) -> None:
         await ctx.report(fraction * 0.98, f"{label} — {fraction:.0%}", finish)
 
     argv = makemkv.mkv_argv(ctx.config.dev_root / params["sr_name"], title, params["minlength"], work)
-    code = await ctx.run_process(argv, cwd=ctx.config.work_dir, on_line=on_line, env=scan_env(ctx.config))
+    code = await _run_makemkv(ctx, argv, on_line, stall_minutes)
     if code != 0:
         messages = parser.result().messages
         hint = makemkv.update_hint(messages)

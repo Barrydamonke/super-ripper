@@ -122,6 +122,8 @@ def test_rip_job_ok(config, setup, monkeypatch):
     assert argv[argv.index("-s") + 1] == "667"
     assert argv[argv.index("-d") + 1] == (config.dev_root / "sr0").as_posix()
     assert json.loads(cd_rips.get(setup, j)["accuraterip"])[1]["status"] == "mismatch"
+    kept = config.config_dir / "logs" / f"job-{j}-cyanrip.log"
+    assert kept.is_file() and "Track 1 ripped and encoded successfully!" in kept.read_text(encoding="utf-8")
 
 
 def test_after_rip_error_goes_to_look_not_failed(config, setup, monkeypatch):

@@ -96,6 +96,12 @@ Where rips land: `/data/downloads/disc-ripper/<rip_id>/`, with extras in `extras
 
 When the beta key or version expires, rips fail with an "Update MakeMKV" message. Paste the new beta key in Settings, or rebuild the image with a newer version (below).
 
+- **Stop a silent MakeMKV after** (default 10 minutes): MakeMKV 2.0 on Linux sometimes stalls with LG drives, using a full CPU core and printing nothing. If it is silent this long, the app stops it and the job fails with "MakeMKV stopped responding". Press **Retry**; if it happens again, eject and re-insert the disc. MakeMKV prints progress all the way through a rip, so a working rip is never stopped by this.
+
+### Job logs
+
+Every job (scans, rips, test jobs) keeps a log in `/config/logs/job-<id>.log`: what ran, the tool's own messages, progress every 10% and how it ended. A CD rip also keeps cyanrip's own log beside it as `job-<id>-cyanrip.log`. Progress chatter is left out, so a log is usually 10–20 KB. Logs are kept until you delete them. Each job on a drive's card has a **log** link that opens the log in a new tab, and a failed job shows its reason in a box on the card with **Retry** and **View log**.
+
 ### Testing step 4 on the server
 
 1. Insert a plain film DVD in each drive. It rips and ejects, and the MKV plays from downloads.

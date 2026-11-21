@@ -107,6 +107,12 @@ SETTINGS: tuple[SettingDef, ...] = (
         group="DVD and Blu-ray",
     ),
     SettingDef(
+        "makemkv_stall_minutes", "Stop a silent MakeMKV after", "int", 10, "minutes", 1, 240,
+        "If MakeMKV prints nothing for this long it is stopped and the job fails, so it can be retried. "
+        "MakeMKV 2.0 on Linux sometimes stalls with LG drives.",
+        group="DVD and Blu-ray",
+    ),
+    SettingDef(
         "video_track_selection", "Track selection", "text", DEFAULT_VIDEO_SELECTION,
         help="MakeMKV's default selection string (app_DefaultSelectionString): which audio and subtitle tracks "
              "go into the MKV. Leave as is unless you know the syntax.",

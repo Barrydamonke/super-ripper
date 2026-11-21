@@ -407,3 +407,64 @@ def test_run_process_env(conn, config, tmp_path):
 
     asyncio.run(main())
     assert lines == ["1"]
+
+
+def test_run_process_logs_command_output_and_exit(conn, config, tmp_path):
+    import sys
+
+    async def on_line(line):
+        pass
+
+    async def main():
+        r = runner.JobRunner(config, RecordingNotifier(), FakeSpace())
+        ctx = runner.JobContext(r, 5, "serial:A", {})
+        await ctx.run_process([sys.executable, "-c", "print('hello there')"], cwd=tmp_path, on_line=on_line)
+
+    asyncio.run(main())
+    text = (config.config_dir / "logs" / "job-5.log").read_text(encoding="utf-8")
+    assert "$ " in text and "-c" in text
+    assert "| hello there" in text
+    assert "exit code 0" in text
+
+
+def test_run_process_stops_a_silent_child(conn, config, tmp_path):
+    import sys
+
+    async def on_line(line):
+        pass
+
+    async def main():
+        r = runner.JobRunner(config, RecordingNotifier(), FakeSpace())
+        ctx = runner.JobContext(r, 6, "serial:A", {})
+        with pytest.raises(runner.ProcessStalled) as stalled:
+            await ctx.run_process(
+                [sys.executable, "-c", "import time; print('working', flush=True); time.sleep(60)"],
+                cwd=tmp_path, on_line=on_line, idle_timeout=0.5,
+            )
+        assert stalled.value.seconds == 0.5
+
+    asyncio.run(main())
+    assert not runner.LIVE_PROCESSES
+    text = (config.config_dir / "logs" / "job-6.log").read_text(encoding="utf-8")
+    assert "| working" in text and "no output for" in text
+
+
+def test_job_log_has_start_and_outcome(config, conn):
+    async def boom(ctx):
+        await ctx.report(0.5, "half")
+        raise RuntimeError("boom")
+
+    j = jobs.enqueue(conn, "serial:A", "boom", {"title": 3}, now="t")
+
+    async def main():
+        r = make_runner(config, handlers={"boom": boom})
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, j) == ["failed"])
+        await r.stop()
+
+    asyncio.run(main())
+    text = (config.config_dir / "logs" / f"job-{j}.log").read_text(encoding="utf-8")
+    assert f"job #{j} (boom) started on serial:A" in text
+    assert '"title": 3' in text
+    assert "progress 50%" in text
+    assert text.rstrip().endswith("finished: failed — boom")
