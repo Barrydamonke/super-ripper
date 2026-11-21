@@ -12,11 +12,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import shutil
 import sqlite3
-from datetime import datetime
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, encodes, encoding, joblog, jobs, schedule_source, settings
+from . import db, encodes, encoding, joblog, jobs, runner, schedule_source, settings, videofiles, videorip
+from . import space as space_mod
 from .clock import utc_now
 from .config import AppConfig
 from .events import Notifier
@@ -26,9 +30,150 @@ from .space import SpaceChecker
 log = logging.getLogger(__name__)
 
 
+STALL_UNIT_SECONDS = 60  # the stall setting is in minutes; tests shrink this
+ASPECT_TOLERANCE = 0.02
+
+
+def _read_settings(conn):
+    return (settings.get(conn, "fast_quality"), settings.get(conn, "encode_stall_minutes"),
+            settings.get(conn, "cache_min_free_gb"))
+
+
+def _other_reserved(conn, work_dir: Path, encode_id: int) -> int:
+    """What other running rips and encodes were admitted for but haven't written yet."""
+    total = videorip.outstanding_bytes(conn, work_dir, None)
+    for other in encodes.running(conn):
+        if other["id"] != encode_id:
+            written = space_mod.tree_size(work_dir / f"encode-{other['id']}")
+            total += max(encoding.estimate_size(other["source_bytes"], other["preset"]) - written, 0)
+    return total
+
+
+def _stopped_message(minutes: int) -> str:
+    unit = "minute" if minutes == 1 else "minutes"
+    return (f"The encoder stopped responding: no output for {minutes} {unit}, so it was stopped. "
+            "Press Retry; the log has the encoder's last messages.")
+
+
+async def _run_tool(ctx, argv, on_line, stall_minutes: int, work: Path, log_filter=None) -> int:
+    try:
+        return await ctx.run_process(
+            argv, cwd=work, on_line=on_line, idle_timeout=stall_minutes * STALL_UNIT_SECONDS,
+            log_filter=log_filter)
+    except runner.ProcessStalled:
+        raise RuntimeError(_stopped_message(stall_minutes)) from None
+
+
+async def _detect_interlaced(ctx, source: Path, seconds: float, stall_minutes: int, work: Path) -> bool:
+    votes = 0
+    for fraction in (0.2, 0.5, 0.8):
+        lines: list[str] = []
+
+        async def collect(line: str) -> None:
+            lines.append(line)
+
+        await _run_tool(ctx, encoding.idet_argv(source, seconds * fraction), collect, stall_minutes, work)
+        votes += encoding.parse_idet("\n".join(lines))
+    interlaced = votes >= 2
+    ctx.log.write(f"idet: {votes} of 3 samples interlaced, so {'deinterlacing' if interlaced else 'progressive'}")
+    return interlaced
+
+
+def _aspect_check(source_dar: float | None, out_dar: float | None) -> None:
+    if not source_dar or not out_dar:
+        return
+    if abs(out_dar - source_dar) / source_dar > ASPECT_TOLERANCE:
+        raise RuntimeError(f"The encode's picture shape (DAR {out_dar:.2f}) doesn't match the rip's "
+                           f"({source_dar:.2f})")
+
+
+def _move(config, rip_id, role, out, min_free, cancel, reserved) -> Path:
+    try:
+        return videofiles.move_to_downloads(config, rip_id, role, out, min_free_gb=min_free,
+                                            cancel=cancel, reserved_bytes=reserved)
+    except OSError as exc:
+        raise RuntimeError(f"Couldn't move to downloads: {exc}") from exc
+
+
 async def run_encode(ctx: JobContext, row) -> None:
-    """Encode one file (Task 6). The pool calls it through this module so tests can patch it."""
-    raise NotImplementedError("Task 6")
+    """Encode one file beside its raw. The raw is never modified or deleted; the work folder never outlives a failure."""
+    work = ctx.config.work_dir / f"encode-{ctx.job_id}"
+    try:
+        await _encode(ctx, row, work)
+    except BaseException:  # failure, cancel or shutdown: nothing of this attempt stays in /work
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+
+
+async def _encode(ctx: JobContext, row, work: Path) -> None:
+    source = Path(row["source"])
+    if not source.is_file():
+        raise RuntimeError("The ripped file is no longer there.")
+    preset, seconds = row["preset"], float(row["source_seconds"])
+    fast_quality, stall_minutes, min_free = await ctx.db(_read_settings)
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+
+    interlaced = False
+    if preset == "fast" and row["disc_type"] == "dvd":
+        interlaced = await _detect_interlaced(ctx, source, seconds, stall_minutes, work)
+    info = await asyncio.to_thread(videofiles.PROBE, source)
+    channels = info.audio_channels[0] if info.audio_channels else None
+    output = work / encoding.output_name(source, preset)
+    argv = encoding.priority_prefix() + encoding.encode_argv(
+        preset, source, output, disc_type=row["disc_type"], audio_channels=channels,
+        interlaced=interlaced, fast_quality=fast_quality, sar=info.sar)
+
+    parser = encoding.HandBrakeProgress() if preset == "standard" else encoding.FfmpegProgress(seconds)
+    label = encoding.PRESET_LABEL[preset]
+    tail: list[str] = []
+    noise = encoding.ProgressNoise()
+    quiet = [False]
+
+    def log_filter(line: str) -> bool:  # run_process asks this just before on_line, per line
+        quiet[0] = noise(line)
+        return quiet[0]
+
+    started = time.monotonic()
+
+    async def on_line(line: str) -> None:
+        if line.strip() and not quiet[0]:
+            tail.append(line.strip())
+            del tail[:-3]
+        fraction = parser.feed(line)
+        if fraction is None:
+            return
+        finish = None
+        if fraction > 0.02:
+            remaining = (time.monotonic() - started) * (1 - fraction) / fraction
+            finish = datetime.now(timezone.utc) + timedelta(seconds=remaining)
+        await ctx.report(fraction * 0.98, f"{label} — {fraction:.0%}", finish)
+
+    code = await _run_tool(ctx, argv, on_line, stall_minutes, work, log_filter=log_filter)
+    elapsed = time.monotonic() - started
+    if code != 0:
+        raise RuntimeError(" / ".join(tail) or f"The encoder exited with code {code}")
+
+    out = await asyncio.to_thread(videofiles.check_output, work, round(seconds), row["source_audio"])
+    out_info = await asyncio.to_thread(videofiles.PROBE, out)
+    _aspect_check(info.dar, out_info.dar)
+
+    await ctx.report(0.99, "Moving to downloads…")
+    stop = threading.Event()
+    reserved = await ctx.db(_other_reserved, ctx.config.work_dir, ctx.job_id)
+    copying = asyncio.ensure_future(asyncio.to_thread(
+        _move, ctx.config, row["rip_id"], row["role"], out, min_free, stop, reserved))
+    try:
+        landed = await asyncio.shield(copying)
+    except asyncio.CancelledError:
+        # The thread outlives the cancel: stop it between chunks so nothing lands in downloads.
+        stop.set()
+        await asyncio.gather(copying, return_exceptions=True)
+        raise
+    shutil.rmtree(work, ignore_errors=True)
+    await ctx.db(encodes.finish, ctx.job_id, "done", utc_now(), output=str(landed),
+                 output_bytes=landed.stat().st_size, speed=seconds / max(elapsed, 0.001))
+    await ctx.report(1.0, "Done")
 
 
 class EncodePool:
@@ -207,6 +352,7 @@ class EncodePool:
             await self._run_encode(row)
         finally:
             self._finished.pop(encode_id).set()
+            self.wake()  # a slot waiting on space or the schedule can recheck at once
 
     async def _run_encode(self, row) -> None:
         encode_id = row["id"]

@@ -367,9 +367,3 @@ def test_reserved_bytes(conn):
     encodes.start(conn, a, "t")
     encodes.start(conn, b, "t")
     assert encodes.reserved_bytes(conn) == 3_500_000_000 + 10_000_000_000
-
-
-@sync
-async def test_run_encode_default_is_a_stub():
-    with pytest.raises(NotImplementedError):
-        await encodepool.run_encode(None, None)
