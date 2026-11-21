@@ -12,16 +12,17 @@ import json
 import logging
 import math
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import cd_rips, cdrip, coverart, db, drives, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
+from . import cd_rips, cdrip, coverart, db, drives, encodes, joblog, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
 from .jellyfin import Jellyfin, RefreshDebouncer
 from .musicbrainz import MusicBrainz
 from .cdrom import CdDrive
 from .cdtoc import Toc, musicbrainz_disc_id
 from .clock import utc_now
 from .config import AppConfig
+from .encodepool import EncodePool
 from .events import Broker
 from .media import MediaMonitor
 from .runner import JobRunner
@@ -30,6 +31,7 @@ from .space import SpaceChecker
 log = logging.getLogger(__name__)
 
 SCHEDULE_REFRESH_SECONDS = 300
+RAW_SWEEP_SECONDS = 600
 GUARD_TICK_SECONDS = 60
 CD_BYTES_PER_SECOND = 176_400  # 44.1 kHz, 16-bit stereo
 FLAC_RATIO = 0.75  # generous: FLAC is usually 50-70% of the raw audio
@@ -38,6 +40,18 @@ FLAC_RATIO = 0.75  # generous: FLAC is usually 50-70% of the raw audio
 def drive_key(drive_id: str) -> str:
     """Short stable name for a drive in HTML ids and SSE event names (its ID has ':' and spaces)."""
     return hashlib.sha1(drive_id.encode()).hexdigest()[:10]
+
+
+def _parse_utc(value: str) -> datetime:
+    moment = datetime.fromisoformat(value)
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.samefile(b)
+    except OSError:  # one of them doesn't exist
+        return a == b
 
 
 def _configure_logging() -> None:
@@ -68,6 +82,7 @@ class Services:
             on_present=self.on_present, on_remove=self.on_remove,
         )
         self.runner = JobRunner(config, self, self.space, services=self)
+        self.encoder = EncodePool(config, self, self.space, services=self)
         self.musicbrainz = MusicBrainz()
         self.refresher = RefreshDebouncer(self.jellyfin)
         self.cover_fetch = coverart.fetch_front
@@ -369,14 +384,170 @@ class Services:
         """Retry moving a rip's files to downloads. Returns an error message, or None."""
         from . import videorip
 
+        recorded: list[tuple[int, int]] = []
+
         def run(conn):
             row = conn.execute("SELECT drive_id FROM jobs WHERE id = ?", (rip_id,)).fetchone()
-            return videorip.move_again_sync(conn, self.config, rip_id), row["drive_id"] if row else None
+            error = videorip.move_again_sync(conn, self.config, rip_id,
+                                             on_recorded=lambda r, t: recorded.append((r, t)))
+            return error, row["drive_id"] if row else None
 
         error, drive_id = await asyncio.to_thread(self._db, run)
+        for rec_rip, rec_title in recorded:
+            await self.file_recorded(rec_rip, rec_title)
         if drive_id:
             await self.drive_changed(drive_id)
         return error
+
+    # -- encodes ---------------------------------------------------------------
+
+    def _queue_encode(self, conn, rip_id: int, title: int, preset: str) -> int | None:
+        rip = conn.execute("SELECT * FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+        if rip is None:
+            return None
+        entry = json.loads(rip["files"] or "{}").get(str(title))
+        if entry is None or entry.get("raw_deleted_at"):
+            return None
+        source = Path(entry["path"])
+        try:
+            size = source.stat().st_size
+        except OSError:  # the raw file is gone
+            return None
+        disc = conn.execute("SELECT disc_type, scan FROM video_discs WHERE fingerprint = ?",
+                            (rip["fingerprint"],)).fetchone()
+        scanned = {}
+        if disc is not None:
+            scanned = {t["number"]: t for t in json.loads(disc["scan"] or "{}").get("titles", [])}.get(title, {})
+        return encodes.create(
+            conn, rip_id=rip_id, title=title, role=entry.get("role", "title"), source=source,
+            disc_type=disc["disc_type"] if disc is not None else "dvd",
+            source_seconds=float(scanned.get("seconds", 0)), source_bytes=size,
+            source_audio=int(scanned.get("audio", -1)), preset=preset, now=utc_now())
+
+    async def queue_encode(self, rip_id: int, title: int, preset: str) -> int | None:
+        """Queue an encode of one ripped file. None when refused: the raw is deleted or unknown,
+        or this file already has an encode queued or running."""
+        encode_id = await asyncio.to_thread(self._db, self._queue_encode, rip_id, title, preset)
+        if encode_id is not None:
+            self.encoder.wake()
+            await self.encodes_changed()
+        return encode_id
+
+    def _queue_all(self, conn, rip_id: int, preset: str) -> list[int]:
+        row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+        numbers = sorted(int(t) for t in json.loads(row["files"] or "{}")) if row else []
+        ids = [self._queue_encode(conn, rip_id, t, preset) for t in numbers]
+        return [i for i in ids if i is not None]
+
+    async def encode_all(self, rip_id: int, preset: str) -> list[int]:
+        ids = await asyncio.to_thread(self._db, self._queue_all, rip_id, preset)
+        if ids:
+            self.encoder.wake()
+            await self.encodes_changed()
+        return ids
+
+    def _retry_encode(self, conn, encode_id: int) -> int | None:
+        row = encodes.get(conn, encode_id)
+        if row is None:
+            return None
+        rip = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (row["rip_id"],)).fetchone()
+        entry = json.loads(rip["files"] or "{}").get(str(row["title"])) if rip else None
+        if entry is None or entry.get("raw_deleted_at") or not Path(row["source"]).is_file():
+            return None
+        return encodes.retry(conn, encode_id, utc_now())
+
+    async def retry_encode(self, encode_id: int) -> int | None:
+        new_id = await asyncio.to_thread(self._db, self._retry_encode, encode_id)
+        if new_id is not None:
+            self.encoder.wake()
+            await self.encodes_changed()
+        return new_id
+
+    async def cancel_encode(self, encode_id: int) -> bool:
+        return await self.encoder.cancel(encode_id)
+
+    async def file_recorded(self, rip_id: int, title: int) -> None:
+        """A ripped file reached downloads: queue the automatic encode, unless that is off."""
+        try:
+            preset = await asyncio.to_thread(self._db, lambda conn: settings.get(conn, "encode_after_rip"))
+            if preset != "off":
+                await self.queue_encode(rip_id, title, preset)
+        except Exception:  # a failed queueing must not fail the rip that just succeeded
+            log.exception("encode: queueing after rip #%s title %s failed", rip_id, title)
+
+    def delete_raw_sync(self, conn, rip_id: int, title: int, *, now: datetime,
+                        keep_hours: float | None) -> str | None:
+        """Delete the raw rip of a title once a finished encode's output is safely on disk.
+
+        Returns why it was refused, or None when the raw is deleted. keep_hours None means "now";
+        otherwise the first good encode must have finished that long ago. Only the raw file goes:
+        never an encode's output, never a folder."""
+        rip = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+        entry = json.loads(rip["files"] or "{}").get(str(title)) if rip else None
+        if entry is None:
+            return "That file isn't part of this rip."
+        if entry.get("raw_deleted_at"):
+            return "The raw rip has already been deleted."
+        rows = conn.execute("SELECT * FROM encodes WHERE rip_id = ? AND title = ? ORDER BY id",
+                            (rip_id, title)).fetchall()
+        if any(r["state"] in ("queued", "running") for r in rows):
+            return "Another encode of this file is waiting or running, so the raw rip is kept."
+        good = [r for r in rows if r["state"] == "done" and r["output"] and Path(r["output"]).is_file()]
+        if not good:
+            return "The raw rip is kept until an encode has finished and its file is still there."
+        raw = Path(entry["path"])
+        for (output,) in conn.execute("SELECT output FROM encodes WHERE output IS NOT NULL").fetchall():
+            if _same_file(raw, Path(output)):
+                return "The raw file is also an encode's output, so it is kept."
+        if keep_hours is not None:
+            finished = min(_parse_utc(r["finished_at"]) for r in good if r["finished_at"])
+            if now < finished + timedelta(hours=keep_hours):
+                return "The raw rip is kept for a while after its encode."
+        try:
+            raw.unlink(missing_ok=True)
+        except OSError as exc:
+            return f"Couldn't delete the raw rip: {exc.strerror or exc}."
+        video_rips.mark_raw_deleted(conn, rip_id, title, now.isoformat(timespec="seconds"))
+        joblog.JobLog(self.config.config_dir / "logs" / f"encode-{good[-1]['id']}.log").write(
+            f"raw rip deleted: {raw}")
+        return None
+
+    async def delete_raw_now(self, rip_id: int, title: int) -> str | None:
+        """"Delete raw now". Returns why it was refused, or None."""
+        error = await asyncio.to_thread(
+            self._db, lambda conn: self.delete_raw_sync(conn, rip_id, title, now=datetime.now(timezone.utc),
+                                                        keep_hours=None))
+        if error is None:
+            await self.encodes_changed()
+        return error
+
+    def _sweep_raw(self, conn) -> int:
+        keep = settings.get(conn, "raw_keep_hours")
+        now = datetime.now(timezone.utc)
+        pairs = conn.execute("SELECT DISTINCT rip_id, title FROM encodes WHERE state = 'done'").fetchall()
+        return sum(self.delete_raw_sync(conn, p["rip_id"], p["title"], now=now, keep_hours=keep) is None
+                   for p in pairs)  # refusals are normal (not yet, or already gone)
+
+    async def _raw_sweep_loop(self) -> None:
+        while True:
+            try:
+                if await asyncio.to_thread(self._db, self._sweep_raw):
+                    await self.encodes_changed()
+            except Exception:  # never let the sweep die
+                log.exception("encode: deleting old raw rips failed")
+            await asyncio.sleep(RAW_SWEEP_SECONDS)
+
+    def _render_films(self) -> str | None:
+        return None  # Task 8 supplies the renderer
+
+    def _render_encodes(self) -> str | None:
+        return None  # Task 8 supplies the renderer
+
+    async def encodes_changed(self) -> None:
+        for name, render in (("films", self._render_films), ("encodes", self._render_encodes)):
+            html = await asyncio.to_thread(render)
+            if html is not None:
+                self.broker.publish(name, html)
 
     def _settle_for_job(self, conn, job_id: int) -> int | None:
         row = jobs.get(conn, job_id)
@@ -598,6 +769,8 @@ class Services:
         conn = db.connect(self.config.db_path)
         try:
             count = jobs.mark_interrupted(conn, utc_now())
+            encodes.mark_interrupted(conn, utc_now())  # a stale running row can survive a stop race
+            encodes.requeue_interrupted(conn, utc_now())
             cd_rips.reconcile(conn, self.config.work_dir)
             for rip_id in video_rips.unsettled(conn):  # rips whose last job ended in the last run
                 video_rips.settle(conn, rip_id, self.config.work_dir, utc_now())
@@ -607,7 +780,9 @@ class Services:
         if count:
             log.info("jobs: %d job(s) were running at the last stop; marked interrupted", count)
         await self._refresh_drives()
+        self.encoder.start()
         for coro, name in (
+            (self._raw_sweep_loop(), "raw sweep"),
             (self.monitor.run(), "media monitor"),
             (self._schedule_loop(), "schedule refresh"),
             (self._guard_loop(), "guard tick"),
@@ -620,4 +795,5 @@ class Services:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
         await self.runner.stop()
+        await self.encoder.stop()
         self._loop = None
