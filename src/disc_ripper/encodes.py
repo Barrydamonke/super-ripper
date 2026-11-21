@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from . import encoding
@@ -119,12 +120,31 @@ def retry(conn: sqlite3.Connection, encode_id: int, now: str) -> int | None:
     return _insert_unless_active(conn, {k: row[k] for k in _SOURCE_FIELDS}, now)
 
 
+MIN_SPEED_PROGRESS = 0.05  # an interrupted encode this far along has told us how fast the machine is
+
+
+def _observed_speed(row, now: str) -> float | None:
+    """Seconds of film per second so far, or None if it hadn't got far enough (or the times don't parse)."""
+    if (row["progress"] or 0) < MIN_SPEED_PROGRESS or not row["started_at"]:
+        return None
+    try:
+        elapsed = (datetime.fromisoformat(now) - datetime.fromisoformat(row["started_at"])).total_seconds()
+    except (ValueError, TypeError):
+        return None
+    return row["source_seconds"] * row["progress"] / elapsed if elapsed > 0 else None
+
+
 def mark_interrupted(conn: sqlite3.Connection, now: str) -> int:
+    """Running encodes become interrupted. One that got at least 5% along keeps its observed speed,
+    so the next guard decision isn't made on the optimistic default again."""
     with conn:
-        cur = conn.execute(
-            "UPDATE encodes SET state = 'interrupted', finished_at = ?, "
-            "message = 'Interrupted by a restart or shutdown.' WHERE state = 'running'", (now,))
-    return cur.rowcount
+        rows = conn.execute("SELECT * FROM encodes WHERE state = 'running'").fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE encodes SET state = 'interrupted', finished_at = ?, speed = ?, "
+                "message = 'Interrupted by a restart or shutdown.' WHERE id = ? AND state = 'running'",
+                (now, _observed_speed(row, now), row["id"]))
+    return len(rows)
 
 
 def requeue_interrupted(conn: sqlite3.Connection, now: str) -> int:
@@ -166,10 +186,12 @@ def for_rip(conn: sqlite3.Connection, rip_id: int) -> list[sqlite3.Row]:
 
 
 def recent_speeds(conn: sqlite3.Connection, preset: str, disc_type: str, n: int = 5) -> list[float]:
-    """Speeds (seconds of film per second) of the last n finished encodes of this preset and disc type."""
+    """Speeds (seconds of film per second) of the last n encodes of this preset and disc type that
+    finished, or were interrupted far enough along to measure (still counting once requeued)."""
     rows = conn.execute(
-        "SELECT speed FROM encodes WHERE state = 'done' AND speed IS NOT NULL AND preset = ? AND disc_type = ? "
-        "ORDER BY finished_at DESC, id DESC LIMIT ?", (preset, disc_type, n)).fetchall()
+        "SELECT speed FROM encodes WHERE state IN ('done', 'interrupted', 'queued', 'running') "
+        "AND speed IS NOT NULL AND preset = ? AND disc_type = ? "
+        "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC LIMIT ?", (preset, disc_type, n)).fetchall()
     return [r[0] for r in rows]
 
 

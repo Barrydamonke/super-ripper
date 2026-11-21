@@ -124,3 +124,42 @@ def test_unique_index_is_a_backstop(conn):
         conn.execute(
             "INSERT INTO encodes (rip_id, title, role, source, disc_type, source_seconds, source_bytes, "
             "preset, state, created_at) VALUES (1, 1, 'main', 'x', 'bluray', 1, 1, 'fast', 'running', 't')")
+
+
+def _running(conn, progress, rip_id=1, preset="standard", started="2026-01-01T00:00:00+00:00"):
+    eid = _create(conn, rip_id=rip_id, preset=preset)
+    assert encodes.start(conn, eid, started)
+    encodes.set_progress(conn, eid, progress, "x", None)
+    return eid
+
+
+def test_interrupted_encode_records_observed_speed(conn):
+    eid = _running(conn, 0.2)  # 20% of 6035 s of film in 1000 s
+    assert encodes.mark_interrupted(conn, "2026-01-01T00:16:40+00:00") == 1
+    row = encodes.get(conn, eid)
+    assert row["state"] == "interrupted"
+    assert row["speed"] == pytest.approx(6035.0 * 0.2 / 1000)
+
+
+def test_interrupted_below_five_percent_records_no_speed(conn):
+    eid = _running(conn, 0.04)
+    encodes.mark_interrupted(conn, "2026-01-01T00:16:40+00:00")
+    assert encodes.get(conn, eid)["speed"] is None
+
+
+def test_interrupted_with_unreadable_times_records_no_speed(conn):
+    eid = _running(conn, 0.5, started="t")
+    encodes.mark_interrupted(conn, "t2")
+    assert encodes.get(conn, eid)["speed"] is None
+
+
+def test_recent_speeds_include_interrupted_and_requeued(conn):
+    done = _create(conn, rip_id=1)
+    encodes.start(conn, done, "2026-01-01T00:00:00+00:00")
+    encodes.finish(conn, done, "done", "2026-01-01T01:00:00+00:00", speed=7.0)
+    eid = _running(conn, 0.2, rip_id=2, started="2026-01-02T00:00:00+00:00")
+    encodes.mark_interrupted(conn, "2026-01-02T00:16:40+00:00")
+    assert sorted(encodes.recent_speeds(conn, "standard", "bluray")) == pytest.approx([6035.0 * 0.2 / 1000, 7.0])
+    encodes.requeue_interrupted(conn, "t3")  # a restart puts it back in the queue; its speed still counts
+    assert encodes.get(conn, eid)["state"] == "queued"
+    assert len(encodes.recent_speeds(conn, "standard", "bluray")) == 2
