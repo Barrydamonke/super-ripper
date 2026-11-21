@@ -1,0 +1,97 @@
+from pathlib import Path
+
+import pytest
+
+from disc_ripper import db, encodes
+
+
+@pytest.fixture
+def conn(config):
+    c = db.connect(config.db_path)
+    db.migrate(c)
+    yield c
+    c.close()
+
+
+def _create(conn, rip_id=1, title=1, preset="standard", disc_type="bluray", now="2026-01-01T00:00:00+00:00"):
+    return encodes.create(
+        conn, rip_id=rip_id, title=title, role="main", source=Path("/d/1/film.mkv"), disc_type=disc_type,
+        source_seconds=6035.0, source_bytes=30_000_000_000, source_audio=2, preset=preset, now=now)
+
+
+def test_create_refuses_second_active_for_same_file(conn):
+    first = _create(conn)
+    assert first is not None
+    assert _create(conn) is None
+    assert _create(conn, title=2) is not None  # another file is fine
+    assert encodes.start(conn, first, "t")
+    assert _create(conn) is None  # running still blocks
+    encodes.finish(conn, first, "done", "t")
+    assert _create(conn) is not None
+
+
+def test_retry_copies_source_fields(conn):
+    first = _create(conn, preset="fast")
+    assert encodes.retry(conn, first, "t") is None  # still queued
+    encodes.start(conn, first, "t")
+    encodes.finish(conn, first, "failed", "t", error="boom")
+    new = encodes.retry(conn, first, "t2")
+    assert new is not None and new != first
+    a, b = encodes.get(conn, first), encodes.get(conn, new)
+    for k in ("rip_id", "title", "role", "source", "disc_type", "source_seconds", "source_bytes",
+              "source_audio", "preset"):
+        assert a[k] == b[k]
+    assert b["state"] == "queued" and b["created_at"] == "t2"
+    assert encodes.retry(conn, first, "t3") is None  # refused while the retry is active
+
+
+def test_requeue_interrupted(conn):
+    a, b = _create(conn), _create(conn, title=2)
+    encodes.start(conn, a, "t")
+    assert encodes.mark_interrupted(conn, "t2") == 1
+    assert encodes.get(conn, a)["state"] == "interrupted"
+    assert encodes.requeue_interrupted(conn, "t3") == 1
+    row = encodes.get(conn, a)
+    assert row["state"] == "queued" and row["id"] == a
+    assert [r["id"] for r in encodes.queued(conn)] == [a, b]
+    assert encodes.next_queued(conn)["id"] == a
+
+
+def test_recent_speeds_last_five_by_preset_and_type(conn):
+    ids = []
+    for i in range(7):
+        eid = _create(conn, rip_id=10 + i)
+        encodes.start(conn, eid, "t")
+        encodes.finish(conn, eid, "done", "t", speed=float(i + 1))
+        ids.append(eid)
+    other = _create(conn, rip_id=50, preset="fast")
+    encodes.start(conn, other, "t")
+    encodes.finish(conn, other, "done", "t", speed=99.0)
+    dvd = _create(conn, rip_id=51, disc_type="dvd")
+    encodes.start(conn, dvd, "t")
+    encodes.finish(conn, dvd, "done", "t", speed=98.0)
+    failed = _create(conn, rip_id=52)
+    encodes.start(conn, failed, "t")
+    encodes.finish(conn, failed, "failed", "t", speed=97.0)
+    assert sorted(encodes.recent_speeds(conn, "standard", "bluray")) == [3.0, 4.0, 5.0, 6.0, 7.0]
+    assert encodes.recent_speeds(conn, "fast", "bluray") == [99.0]
+    assert encodes.recent_speeds(conn, "copy", "bluray") == []
+
+
+def test_cancel_queued_and_progress(conn):
+    a = _create(conn)
+    encodes.wait(conn, a, "Waiting for the next session")
+    row = encodes.get(conn, a)
+    assert (row["state"], row["message"]) == ("queued", "Waiting for the next session")
+    assert encodes.start(conn, a, "t") and not encodes.start(conn, a, "t")
+    encodes.set_progress(conn, a, 0.5, "50%", "2026-01-01T01:00:00+00:00")
+    assert encodes.get(conn, a)["progress"] == 0.5
+    assert [r["id"] for r in encodes.running(conn)] == [a]
+    assert encodes.cancel_queued(conn, a, "t") == "running"
+    encodes.finish(conn, a, "done", "t")
+    assert encodes.cancel_queued(conn, a, "t") == "gone"
+    assert encodes.cancel_queued(conn, 999, "t") == "gone"
+    b = _create(conn, title=2)
+    assert encodes.cancel_queued(conn, b, "t") == "cancelled"
+    assert encodes.get(conn, b)["state"] == "cancelled"
+    assert [r["id"] for r in encodes.for_rip(conn, 1)] == [a, b]

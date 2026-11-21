@@ -23,6 +23,11 @@ VALID_FORM = {
     "makemkv_stall_minutes": "10",
     "cd_approval": "odd_ones",
     "cd_cover_art": "on",
+    "encode_after_rip": "standard",
+    "encode_slots": "1",
+    "fast_quality": "24",
+    "raw_keep_hours": "24",
+    "encode_stall_minutes": "10",
 }
 
 
@@ -150,3 +155,22 @@ def test_text_setting_round_trip(conn):
         settings.parse_form({**VALID_FORM, "video_track_selection": "x" * 2001})
     assert settings.get(conn, "video_min_title_seconds") == 120
     assert settings.get(conn, "makemkv_key") == ""
+
+
+def test_encoding_settings_defaults(conn):
+    values = settings.get_all(conn)
+    assert values["encode_after_rip"] == "standard"
+    assert values["encode_slots"] == 1
+    assert values["fast_quality"] == 24
+    assert values["raw_keep_hours"] == 24
+    assert values["encode_stall_minutes"] == 10
+    by_key = {s.key: s for s in settings.SETTINGS}
+    assert all(by_key[k].group == "Encoding" for k in (
+        "encode_after_rip", "encode_slots", "fast_quality", "raw_keep_hours", "encode_stall_minutes"))
+    assert [c[0] for c in by_key["encode_after_rip"].choices] == ["standard", "fast", "copy", "off"]
+    assert [c[1] for c in by_key["encode_after_rip"].choices] == [
+        "Standard (HandBrake x265)", "Fast (hardware)", "Copy only", "Off"]
+    assert (by_key["encode_slots"].minimum, by_key["encode_slots"].maximum) == (1, 2)
+    assert (by_key["fast_quality"].minimum, by_key["fast_quality"].maximum) == (1, 51)
+    assert (by_key["raw_keep_hours"].minimum, by_key["raw_keep_hours"].maximum) == (0, 720)
+    assert (by_key["encode_stall_minutes"].minimum, by_key["encode_stall_minutes"].maximum) == (1, 240)
