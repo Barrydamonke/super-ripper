@@ -41,6 +41,17 @@ def test_audio_plan():
     assert encoding.audio_plan(6) == (6, 640)
     assert encoding.audio_plan(2) == (2, 224)
     assert encoding.audio_plan(1) == (1, 224)
+    assert encoding.audio_plan(0) == (2, 224)
+    assert encoding.audio_plan(4) == (6, 640)
+    assert encoding.audio_plan(3) == (6, 640)
+
+
+@pytest.mark.parametrize("channels,ab,mix,ffac", [(0, "224", "stereo", "2"), (4, "640", "5point1", "6")])
+def test_odd_channel_counts_agree_between_presets(channels, ab, mix, ffac):
+    s = std(audio_channels=channels)
+    assert s[s.index("--ab"):s.index("--ab") + 4] == ["--ab", ab, "--mixdown", mix]
+    f = fast(audio_channels=channels)
+    assert f[f.index("-b:a"):f.index("-b:a") + 4] == ["-b:a", ab + "k", "-ac", ffac]
 
 
 def test_env_overrides(monkeypatch):

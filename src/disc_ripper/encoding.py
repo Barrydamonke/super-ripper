@@ -16,10 +16,12 @@ def output_name(raw: Path, preset: str) -> str:
 
 
 def audio_plan(channels: int) -> tuple[int, int]:
-    """(output channels, kb/s): surround stays 5.1 at 640, anything smaller keeps its layout at 224."""
-    if channels >= 6:
-        return 6, 640
-    return channels, 224
+    """(output channels, kb/s): mono stays mono, stereo or unknown is stereo, 3+ channels become 5.1 at 640."""
+    if channels < 1:
+        return 2, 224
+    if channels <= 2:
+        return channels, 224
+    return 6, 640
 
 
 def _prefix(var: str, default: str) -> list[str]:
@@ -56,7 +58,7 @@ def _standard(src: str, out: str, disc_type: str, audio_channels: int | None) ->
         argv += ["--audio", "none"]
     else:
         channels, kbps = audio_plan(audio_channels)
-        mixdown = {6: "5point1", 2: "stereo", 1: "mono"}.get(channels, "stereo")
+        mixdown = {6: "5point1", 2: "stereo", 1: "mono"}[channels]
         argv += ["--audio", "1", "--aencoder", "eac3", "--ab", str(kbps), "--mixdown", mixdown]
     return argv + ["--all-subtitles", "--subtitle-burned=none", "--json"]
 
