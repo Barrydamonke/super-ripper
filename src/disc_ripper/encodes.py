@@ -29,6 +29,9 @@ def _insert_unless_active(conn: sqlite3.Connection, fields: dict, now: str) -> i
             {**fields, "now": now})
         conn.commit()
         return cur.lastrowid
+    except sqlite3.IntegrityError:  # the unique index on active files: refused, like the check above
+        conn.rollback()
+        return None
     except BaseException:
         conn.rollback()
         raise
@@ -104,7 +107,7 @@ def cancel_queued(conn: sqlite3.Connection, encode_id: int, now: str) -> str:
 def retry(conn: sqlite3.Connection, encode_id: int, now: str) -> int | None:
     """A new queued encode with the same source fields; None if refused (like create)."""
     row = get(conn, encode_id)
-    if row is None:
+    if row is None or row["state"] not in ("failed", "cancelled", "interrupted"):
         return None
     return _insert_unless_active(conn, {k: row[k] for k in _SOURCE_FIELDS}, now)
 
@@ -118,12 +121,29 @@ def mark_interrupted(conn: sqlite3.Connection, now: str) -> int:
 
 
 def requeue_interrupted(conn: sqlite3.Connection, now: str) -> int:
-    """Interrupted encodes go back in the queue (the same rows, started afresh)."""
-    with conn:
-        cur = conn.execute(
-            "UPDATE encodes SET state = 'queued', progress = 0, message = '', error = NULL, "
-            "estimated_finish = NULL, started_at = NULL, finished_at = NULL WHERE state = 'interrupted'")
-    return cur.rowcount
+    """Interrupted encodes go back in the queue (the same rows, started afresh).
+
+    One that has an active sibling (a newer encode of the same file) is cancelled instead."""
+    n = 0
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for row in conn.execute("SELECT id, rip_id, title FROM encodes WHERE state = 'interrupted' ORDER BY id").fetchall():
+            busy = conn.execute(
+                f"SELECT 1 FROM encodes WHERE rip_id = ? AND title = ? AND state IN {_ACTIVE}",  # noqa: S608
+                (row["rip_id"], row["title"])).fetchone()
+            if busy:
+                conn.execute("UPDATE encodes SET state = 'cancelled', message = ? WHERE id = ?",
+                             ("Superseded by a newer encode of this file", row["id"]))
+                continue
+            conn.execute(
+                "UPDATE encodes SET state = 'queued', progress = 0, message = '', error = NULL, "
+                "estimated_finish = NULL, started_at = NULL, finished_at = NULL WHERE id = ?", (row["id"],))
+            n += 1
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return n
 
 
 def running(conn: sqlite3.Connection) -> list[sqlite3.Row]:

@@ -24,3 +24,4 @@ CREATE TABLE encodes (
 
 CREATE INDEX encodes_state ON encodes (state, id);
 CREATE INDEX encodes_rip_title ON encodes (rip_id, title);
+CREATE UNIQUE INDEX encodes_active_file ON encodes (rip_id, title) WHERE state IN ('queued','running');

@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -95,3 +96,31 @@ def test_cancel_queued_and_progress(conn):
     assert encodes.cancel_queued(conn, b, "t") == "cancelled"
     assert encodes.get(conn, b)["state"] == "cancelled"
     assert [r["id"] for r in encodes.for_rip(conn, 1)] == [a, b]
+
+
+def test_requeue_interrupted_cancels_superseded(conn):
+    a = _create(conn)
+    encodes.start(conn, a, "t")
+    encodes.mark_interrupted(conn, "t2")
+    newer = _create(conn)  # an interrupted row is not active, so this is allowed
+    assert newer is not None
+    assert encodes.requeue_interrupted(conn, "t3") == 0
+    row = encodes.get(conn, a)
+    assert row["state"] == "cancelled" and row["message"] == "Superseded by a newer encode of this file"
+    assert [r["id"] for r in encodes.queued(conn)] == [newer]
+
+
+def test_retry_refused_unless_ended_badly(conn):
+    a = _create(conn)
+    encodes.start(conn, a, "t")
+    encodes.finish(conn, a, "done", "t")
+    assert encodes.retry(conn, a, "t") is None
+    assert encodes.retry(conn, 999, "t") is None
+
+
+def test_unique_index_is_a_backstop(conn):
+    _create(conn)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO encodes (rip_id, title, role, source, disc_type, source_seconds, source_bytes, "
+            "preset, state, created_at) VALUES (1, 1, 'main', 'x', 'bluray', 1, 1, 'fast', 'running', 't')")
