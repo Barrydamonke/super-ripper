@@ -226,10 +226,9 @@ async def retry_encode(request: Request, encode_id: int):
     row = await asyncio.to_thread(_with_conn, request, encodes.get, encode_id)
     if row is None:
         return HTMLResponse('<p class="error">Unknown encode.</p>', status_code=404)
-    new_id = await _services(request).retry_encode(encode_id)
+    new_id, reason = await _services(request).retry_encode_result(encode_id)
     if new_id is None:
-        return await _respond(request, error="This encode can't be retried (it isn't finished, or the file "
-                              "already has another encode waiting).", status_code=409)
+        return await _respond(request, error=reason, status_code=409)
     return await _respond(request)
 
 

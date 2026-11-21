@@ -472,22 +472,36 @@ class Services:
             await self.encodes_changed()
         return ids
 
-    def _retry_encode(self, conn, encode_id: int) -> int | None:
+    def _retry_encode(self, conn, encode_id: int) -> tuple[int | None, str | None]:
+        """(new encode id, None) or (None, why it was refused)."""
         row = encodes.get(conn, encode_id)
         if row is None:
-            return None
+            return None, "Unknown encode."
+        if row["state"] not in ("failed", "cancelled", "interrupted"):
+            return None, "Only an encode that failed, was cancelled or was interrupted can be retried."
         rip = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (row["rip_id"],)).fetchone()
         entry = json.loads(rip["files"] or "{}").get(str(row["title"])) if rip else None
-        if entry is None or entry.get("raw_deleted_at") or not Path(row["source"]).is_file():
-            return None
-        return encodes.retry(conn, encode_id, utc_now())
+        if entry is None:
+            return None, "That file isn't part of this rip any more."
+        if entry.get("raw_deleted_at"):
+            return None, "The raw rip has been deleted, so it can't be encoded."
+        if not Path(row["source"]).is_file():
+            return None, "The raw rip is no longer on disk."
+        new_id = encodes.retry(conn, encode_id, utc_now())
+        if new_id is None:
+            return None, "This file already has an encode waiting or running."
+        return new_id, None
 
-    async def retry_encode(self, encode_id: int) -> int | None:
-        new_id = await asyncio.to_thread(self._db, self._retry_encode, encode_id)
+    async def retry_encode_result(self, encode_id: int) -> tuple[int | None, str | None]:
+        """Retry a failed, cancelled or interrupted encode: (new id, None) or (None, why it was refused)."""
+        new_id, error = await asyncio.to_thread(self._db, self._retry_encode, encode_id)
         if new_id is not None:
             self.encoder.wake()
             await self.encodes_changed()
-        return new_id
+        return new_id, error
+
+    async def retry_encode(self, encode_id: int) -> int | None:
+        return (await self.retry_encode_result(encode_id))[0]
 
     async def cancel_encode(self, encode_id: int) -> bool:
         return await self.encoder.cancel(encode_id)

@@ -172,3 +172,34 @@ def test_notice_lives_outside_the_swapped_list(films):
     assert 'id="films-notice" hx-swap-oob="true"' in r.text and "Queued 1 of 1 files." in r.text
     # what the SSE stream publishes carries no notice element, so it can't wipe or blank one
     assert "films-notice" not in client.app.state.services._render_films()
+
+
+def _retry_error(client, eid):
+    r = client.post(f"/encodes/{eid}/retry")
+    assert r.status_code == 409
+    return r.text
+
+
+def test_retry_refusals_say_why(films):
+    client, conn, config = films
+    rip = make_rip(conn, config, names=("a.mkv", "b.mkv", "c.mkv", "d.mkv", "e.mkv"))
+    queued = queue(conn, rip, title=0)  # not ended
+    assert "Only an encode that failed" in _retry_error(client, queued)
+
+    failed = queue(conn, rip, title=1, state="failed", error="x")
+    queue(conn, rip, title=1)  # a newer one is waiting
+    assert "already has an encode waiting or running" in _retry_error(client, failed)
+
+    deleted = queue(conn, rip, title=2, state="failed", error="x")
+    files = json.loads(conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip,)).fetchone()[0])
+    video_rips.mark_raw_deleted(conn, rip, 2, "2026-11-21T10:00:00+00:00")
+    assert "raw rip has been deleted" in _retry_error(client, deleted)
+
+    gone = queue(conn, rip, title=3, state="failed", error="x")
+    Path(files["3"]["path"]).unlink()
+    assert "no longer on disk" in _retry_error(client, gone)
+
+    orphan = queue(conn, rip, title=4, state="cancelled")
+    with conn:
+        conn.execute("UPDATE video_rips SET files = '{}' WHERE rip_id = ?", (rip,))
+    assert "part of this rip any more" in _retry_error(client, orphan)
