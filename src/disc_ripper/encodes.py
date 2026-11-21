@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from . import encoding
+
 _ACTIVE = "('queued', 'running')"
 _SOURCE_FIELDS = ("rip_id", "title", "role", "source", "disc_type", "source_seconds", "source_bytes",
                   "source_audio", "preset")
@@ -83,7 +85,7 @@ def finish(conn: sqlite3.Connection, encode_id: int, state: str, now: str, *, er
     with conn:
         conn.execute(
             "UPDATE encodes SET state = ?, finished_at = ?, error = ?, output = ?, output_bytes = ?, speed = ? "
-            "WHERE id = ?",
+            "WHERE id = ? AND state = 'running'",  # a late finish must not overwrite a row that already ended
             (state, now, error, output, output_bytes, speed, encode_id))
 
 
@@ -164,3 +166,8 @@ def recent_speeds(conn: sqlite3.Connection, preset: str, disc_type: str, n: int 
         "SELECT speed FROM encodes WHERE state = 'done' AND speed IS NOT NULL AND preset = ? AND disc_type = ? "
         "ORDER BY finished_at DESC, id DESC LIMIT ?", (preset, disc_type, n)).fetchall()
     return [r[0] for r in rows]
+
+
+def reserved_bytes(conn: sqlite3.Connection) -> int:
+    """Disk the running encodes are expected to still write (estimated output sizes)."""
+    return sum(encoding.estimate_size(r["source_bytes"], r["preset"]) for r in running(conn))

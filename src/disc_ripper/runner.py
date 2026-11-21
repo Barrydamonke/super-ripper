@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-from . import db, joblog, jobs, settings
+from . import db, encodes, joblog, jobs, settings
 from .clock import utc_now
 from .config import AppConfig
 from .events import Notifier
@@ -44,7 +44,8 @@ class ProcessStalled(Exception):
 
 
 class JobContext:
-    def __init__(self, runner: JobRunner, job_id: int, drive_id: str, params: dict):
+    def __init__(self, runner: JobRunner, job_id: int, drive_id: str, params: dict,
+                 log: joblog.JobLog | None = None):
         self.job_id = job_id
         self.drive_id = drive_id
         self.params = params
@@ -52,7 +53,7 @@ class JobContext:
         self.services = runner.services
         self._runner = runner
         self._last_write: float | None = None
-        self.log = joblog.JobLog(joblog.path_for(runner.config, job_id))
+        self.log = log if log is not None else joblog.JobLog(joblog.path_for(runner.config, job_id))
 
     async def report(self, progress: float, message: str, estimated_finish: datetime | None = None) -> None:
         """Progress 0.0-1.0. Written and pushed to browsers at most once a second."""
@@ -62,7 +63,7 @@ class JobContext:
             return
         self._last_write = now
         finish = estimated_finish.isoformat(timespec="seconds") if estimated_finish else None
-        await self._runner.db(jobs.set_progress, self.job_id, min(max(progress, 0.0), 1.0), message, finish)
+        await self._runner.db(getattr(self._runner, "set_progress", jobs.set_progress), self.job_id, min(max(progress, 0.0), 1.0), message, finish)
         await self._runner.notify(self.drive_id)
 
     async def sleep(self, seconds: float) -> None:
@@ -74,6 +75,7 @@ class JobContext:
     async def run_process(
         self, argv: list[str], *, cwd: Path, on_line: Callable[[str], Awaitable[None]],
         env: dict[str, str] | None = None, idle_timeout: float | None = None,
+        log_filter: Callable[[str], bool] | None = None,
     ) -> int:
         """Run a child (fixed argv, no shell), feeding each output line to on_line.
 
@@ -81,7 +83,7 @@ class JobContext:
         cancelled or the worker stops, the child gets SIGTERM, then SIGKILL after
         KILL_GRACE_SECONDS, before the cancellation carries on. With idle_timeout, a
         child that prints nothing for that many seconds is stopped the same way and
-        ProcessStalled is raised. The command, its output (less progress chatter) and
+        ProcessStalled is raised. Lines log_filter returns True for stay out of the log (on_line still sees them). The command, its output (less progress chatter) and
         its exit code go to the job's log.
         """
         from .cyanrip import LineSplitter
@@ -109,10 +111,12 @@ class JobContext:
                 if not chunk:
                     break
                 for line in splitter.feed(chunk.decode("utf-8", errors="replace")):
-                    self.log.output(line)
+                    if log_filter is None or not log_filter(line):
+                        self.log.output(line)
                     await on_line(line)
             for line in splitter.flush():
-                self.log.output(line)
+                if log_filter is None or not log_filter(line):
+                    self.log.output(line)
                 await on_line(line)
             code = await proc.wait()
             self.log.write(f"exit code {code}")
@@ -288,7 +292,7 @@ class JobRunner:
     def _space_check(self, conn, needs_bytes: int) -> str | None:
         return self.space.check(
             needs_bytes,
-            jobs.running_bytes(conn),
+            jobs.running_bytes(conn) + encodes.reserved_bytes(conn),
             settings.get(conn, "work_budget_gb"),
             settings.get(conn, "cache_min_free_gb"),
         )
