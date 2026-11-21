@@ -596,8 +596,12 @@ class Services:
 
         return self._db(render_encodes)
 
-    async def encodes_changed(self) -> None:
-        for name, render in (("films", self._render_films), ("encodes", self._render_encodes)):
+    async def encodes_changed(self, progress_only: bool = False) -> None:
+        """Publish the Films list and the Encoding panel. A progress tick refreshes the panel only:
+        re-rendering the Films page every second would reset a menu the user is choosing from."""
+        views = (("encodes", self._render_encodes),) if progress_only else (
+            ("films", self._render_films), ("encodes", self._render_encodes))
+        for name, render in views:
             html = await asyncio.to_thread(render)
             if html is not None:
                 self.broker.publish(name, html)

@@ -262,3 +262,22 @@ def test_no_finish_time_refuses_instead_of_raising(filed, setup):
         setup.execute("UPDATE encodes SET finished_at = NULL WHERE id = ?", (enc,))
     assert "isn't recorded" in services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=24)
     assert raw.exists()
+
+
+# -- what a notification publishes ------------------------------------------------
+
+
+def _published(config, setup, **kw):
+    services = Services(config)
+    seen = []
+    services.broker.publish = lambda name, html: seen.append(name)
+    asyncio.run(services.encodes_changed(**kw))
+    return seen
+
+
+def test_state_change_publishes_films_and_encodes(config, setup):
+    assert _published(config, setup) == ["films", "encodes"]
+
+
+def test_progress_tick_publishes_only_the_panel(config, setup):
+    assert _published(config, setup, progress_only=True) == ["encodes"]

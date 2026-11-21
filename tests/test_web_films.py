@@ -162,3 +162,13 @@ def test_services_render_for_sse(films):
     queue(conn, rip)
     services = client.app.state.services
     assert "Rip " in services._render_films() and "Queued: #" in services._render_encodes()
+
+
+def test_notice_lives_outside_the_swapped_list(films):
+    client, conn, config = films
+    rip = make_rip(conn, config)
+    assert '<div id="films-notice"></div>' in client.get("/films").text  # outside #films, so SSE swaps keep it
+    r = client.post("/films/encode-all", data={"rip_id": rip, "preset": "standard"})
+    assert 'id="films-notice" hx-swap-oob="true"' in r.text and "Queued 1 of 1 files." in r.text
+    # what the SSE stream publishes carries no notice element, so it can't wipe or blank one
+    assert "films-notice" not in client.app.state.services._render_films()

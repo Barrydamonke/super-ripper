@@ -102,7 +102,7 @@ def _file_view(key: str, entry: dict, scan_titles: dict, rows: list[sqlite3.Row]
 
 
 def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, error: str | None = None,
-                  notice: str | None = None) -> dict:
+                  notice: str | None = None, oob: bool = False) -> dict:
     now = now or datetime.now(timezone.utc)
     keep_hours = settings.get(conn, "raw_keep_hours")
     rips = []
@@ -129,7 +129,7 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
             "can_encode_all": any(not f["deleted"] for f in views),
         })
     return {"active": _active_rows(conn), "rips": rips, "presets": encoding.PRESET_LABEL,
-            "error": error, "notice": notice}
+            "error": error, "notice": notice, "oob": oob}
 
 
 def render_films(conn: sqlite3.Connection, **kwargs) -> str:
@@ -162,7 +162,7 @@ async def _respond(request: Request, *, error: str | None = None, notice: str | 
         html = await asyncio.to_thread(_with_conn, request, render_encodes)
     else:
         html = await asyncio.to_thread(_with_conn, request,
-                                       lambda conn: render_films(conn, error=error, notice=notice))
+                                       lambda conn: render_films(conn, error=error, notice=notice, oob=True))
     return HTMLResponse(html, status_code=status_code)
 
 

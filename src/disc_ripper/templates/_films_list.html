@@ -1,5 +1,4 @@
-{% if error %}<p class="error">{{ error }}</p>{% endif %}
-{% if notice %}<p class="ok">{{ notice }}</p>{% endif %}
+{% if oob %}<div id="films-notice" hx-swap-oob="true">{% if error %}<p class="error">{{ error }}</p>{% endif %}{% if notice %}<p class="ok">{{ notice }}</p>{% endif %}</div>{% endif %}
 <section class="encodes-top">
   <h2>Encoding</h2>
   {% set target = "films" %}{% include "_encodes_panel.html" %}

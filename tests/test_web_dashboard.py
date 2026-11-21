@@ -176,7 +176,10 @@ def test_event_stream_initial_burst(dash):
     chunks = asyncio.run(main())
     assert chunks[0].startswith("event: guard\n")
     assert chunks[1].startswith(f"event: drive-{KEY}\n")
-    assert len(chunks) == 2
+    # a reconnecting browser also gets the Encoding panel and the Films list
+    assert [c.split("\n")[0] for c in chunks[2:]] == ["event: encodes", "event: films"]
+    assert "Nothing is encoding" in chunks[2]
+    assert len(chunks) == 4
     assert svc.broker.subscriber_count == 0
 
 

@@ -64,7 +64,7 @@ class JobContext:
         self._last_write = now
         finish = estimated_finish.isoformat(timespec="seconds") if estimated_finish else None
         await self._runner.db(getattr(self._runner, "set_progress", jobs.set_progress), self.job_id, min(max(progress, 0.0), 1.0), message, finish)
-        await self._runner.notify(self.drive_id)
+        await getattr(self._runner, "notify_progress", self._runner.notify)(self.drive_id)
 
     async def sleep(self, seconds: float) -> None:
         await asyncio.sleep(seconds * self._runner.time_scale)

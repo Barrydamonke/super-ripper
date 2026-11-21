@@ -207,12 +207,19 @@ class EncodePool:
     # -- what JobContext needs ----------------------------------------------
 
     async def notify(self, _drive_id: str = "") -> None:
-        """Tell the services the encode list changed. Must never stop an encode."""
+        """Tell the services an encode changed state. Must never stop an encode."""
+        await self._tell()
+
+    async def notify_progress(self, _drive_id: str = "") -> None:
+        """A progress tick (JobContext.report): only the Encoding panel needs refreshing."""
+        await self._tell(progress_only=True)
+
+    async def _tell(self, **kwargs) -> None:
         hook = getattr(self.services, "encodes_changed", None)
         if hook is None:
             return
         try:
-            result = hook()
+            result = hook(**kwargs)
             if inspect.isawaitable(result):
                 await result
         except Exception:

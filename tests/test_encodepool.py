@@ -21,9 +21,11 @@ def sync(fn):
 class FakeServices:
     def __init__(self):
         self.changes = 0
+        self.calls = []
 
-    def encodes_changed(self):
+    def encodes_changed(self, progress_only=False):
         self.changes += 1
+        self.calls.append(progress_only)
 
 
 class FakeSpace:
@@ -328,6 +330,8 @@ async def test_progress_goes_through_encodes_and_notifies(config, conn, monkeypa
     await wait_until(lambda: state(conn, eid) == "done")
     assert seen["progress"] == 0.25 and seen["message"] == "Encoding 25%"
     assert svc.changes >= 2
+    assert True in svc.calls  # the progress tick said so: only the panel needs a refresh
+    assert svc.calls[0] is False and svc.calls[-1] is False  # start and finish are state changes
     await pool.stop()
 
 
