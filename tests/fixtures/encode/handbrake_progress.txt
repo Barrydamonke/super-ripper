@@ -1,0 +1,112 @@
+# synthetic: replace with a real capture
+[01:00:00] hb_init: starting libhb thread
+Progress: {
+    "State": "SCANNING",
+    "Scanning": {
+        "Preview": 1,
+        "PreviewCount": 10,
+        "Title": 1,
+        "TitleCount": 1,
+        "Progress": 0.1,
+        "Rate": 21.5,
+        "RateAvg": 20.9
+    }
+}
+Progress: {
+    "State": "SCANNING",
+    "Scanning": {
+        "Preview": 1,
+        "PreviewCount": 10,
+        "Title": 1,
+        "TitleCount": 1,
+        "Progress": 0.5,
+        "Rate": 21.5,
+        "RateAvg": 20.9
+    }
+}
+Progress: {
+    "State": "SCANNING",
+    "Scanning": {
+        "Preview": 1,
+        "PreviewCount": 10,
+        "Title": 1,
+        "TitleCount": 1,
+        "Progress": 1.0,
+        "Rate": 21.5,
+        "RateAvg": 20.9
+    }
+}
+[01:00:05] sync: expected 144000 video frames
+Progress: {
+    "State": "WORKING",
+    "Working": {
+        "ETASeconds": 1234,
+        "Pass": 1,
+        "PassCount": 1,
+        "Progress": 0.0,
+        "Rate": 21.5,
+        "RateAvg": 20.9
+    }
+}
+Progress: {
+    "State": "WORKING",
+    "Working": {
+        "ETASeconds": 1234,
+        "Pass": 1,
+        "PassCount": 1,
+        "Progress": 0.04123,
+        "Rate": 21.5,
+        "RateAvg": 20.9
+    }
+}
+Progress: {
+    "State": "WORKING",
+    "Working": {
+        "ETASeconds": 1234,
+        "Pass": 1,
+        "PassCount": 1,
+        "Progress": 0.04123,
+        "Rate": 21.5,
+        "RateAvg": 20.9
+    }
+}
+Progress: {
+    "State": "WORKING",
+    "Working": {
+        "ETASeconds": 1234,
+        "Pass": 1,
+        "PassCount": 1,
+        "Progress": 0.41231,
+        "Rate": 21.5,
+        "RateAvg": 20.9
+    }
+}
+Progress: {
+    "State": "WORKING",
+    "Working": {
+        "ETASeconds": 1234,
+        "Pass": 1,
+        "PassCount": 1,
+        "Progress": 0.8,
+        "Rate": 21.5,
+        "RateAvg": 20.9
+    }
+}
+Progress: {
+    "State": "WORKING",
+    "Working": {
+        "ETASeconds": 1234,
+        "Pass": 1,
+        "PassCount": 1,
+        "Progress": 0.99876,
+        "Rate": 21.5,
+        "RateAvg": 20.9
+    }
+}
+Progress: {
+    "State": "WORKDONE",
+    "WorkDone": {
+        "Error": 0
+    }
+}
+Encode done!
