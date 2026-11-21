@@ -4,6 +4,10 @@
 <h1>Dashboard</h1>
 <div hx-ext="sse" sse-connect="/events">
   <div id="guard" sse-swap="guard">{{ guard_html|safe }}</div>
+  <section class="encodes-panel">
+    <h2>Encoding</h2>
+    <div id="encodes" sse-swap="encodes">{{ encodes_html|safe }}</div>
+  </section>
   {% for card in cards %}
     <section class="drive-card">
       <div id="drive-{{ card.key }}" sse-swap="drive-{{ card.key }}">{{ card.html|safe }}</div>

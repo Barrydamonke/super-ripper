@@ -587,10 +587,14 @@ class Services:
             await asyncio.sleep(RAW_SWEEP_SECONDS)
 
     def _render_films(self) -> str | None:
-        return None  # Task 8 supplies the renderer
+        from .web.films_routes import render_films
+
+        return self._db(render_films)
 
     def _render_encodes(self) -> str | None:
-        return None  # Task 8 supplies the renderer
+        from .web.films_routes import render_encodes
+
+        return self._db(render_encodes)
 
     async def encodes_changed(self) -> None:
         for name, render in (("films", self._render_films), ("encodes", self._render_encodes)):

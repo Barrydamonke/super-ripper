@@ -207,7 +207,10 @@ def _dashboard_sync(conn, config) -> dict:
         for row in drives.list_drives(conn)
         if row["present"] and row["enabled"]
     ]
-    return {"cards": cards, "guard_html": render_guard(conn, now), "default_minutes": DEFAULT_TEST_MINUTES}
+    from .films_routes import render_encodes
+
+    return {"cards": cards, "guard_html": render_guard(conn, now), "encodes_html": render_encodes(conn),
+            "default_minutes": DEFAULT_TEST_MINUTES}
 
 
 @router.get("/")

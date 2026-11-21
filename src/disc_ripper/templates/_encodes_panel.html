@@ -1,0 +1,16 @@
+{%- for e in active %}
+  <div class="job encode-line">
+    {% if e.state == "running" -%}
+      Encoding now: #{{ e.id }} {{ e.name }} · {{ e.preset_label }} · {{ e.percent }}%
+      <progress max="1" value="{{ e.progress or 0 }}"></progress>
+      {%- if e.estimated_finish %} · finishes ~{{ e.estimated_finish|hm }}{% endif %}
+    {%- else -%}
+      Queued: #{{ e.id }} {{ e.name }} · {{ e.preset_label }} · ~{{ e.estimate }}{% if e.rough %} (rough){% endif %}
+    {%- endif %}
+    <button hx-post="/encodes/{{ e.id }}/cancel" hx-target="#{{ target }}">Cancel</button>
+    <a class="hint" href="/encodes/{{ e.id }}/log" target="_blank">log</a>
+    {% if e.message %}<div class="hint">{{ e.message }}</div>{% endif %}
+  </div>
+{% else %}
+  <p class="hint">Nothing is encoding.</p>
+{% endfor %}

@@ -25,3 +25,8 @@ label.inline { display: inline; margin: 0; }
 table.titles th, table.titles td { padding: .25rem .4rem; }
 @media (max-width: 480px) { table.titles .source { display: none; } }
 .job-failed { border: 1px solid currentColor; border-radius: 4px; padding: 0.5em; margin: 0.5em 0; }
+.film-rip, .encodes-panel, .encodes-top { border: 1px solid #ccc; border-radius: 6px; padding: .5rem 1rem; margin: 1rem 0; }
+.film-rip h2, .encodes-panel h2, .encodes-top h2 { font-size: 1.1rem; margin: .25rem 0; }
+.film-file { margin: .5rem 0; }
+.encode-row { margin: .2rem 0 .2rem 1rem; }
+.encode-line progress { width: 10rem; vertical-align: middle; }

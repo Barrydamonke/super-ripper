@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Films - Disc Ripper{% endblock %}
+{% block content %}
+<h1>Films</h1>
+<div hx-ext="sse" sse-connect="/events">
+  <div id="films" sse-swap="films">{{ films_html|safe }}</div>
+</div>
+{% endblock %}
