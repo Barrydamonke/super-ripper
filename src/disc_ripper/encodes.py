@@ -198,3 +198,27 @@ def recent_speeds(conn: sqlite3.Connection, preset: str, disc_type: str, n: int 
 def reserved_bytes(conn: sqlite3.Connection) -> int:
     """Disk the running encodes are expected to still write (estimated output sizes)."""
     return sum(encoding.estimate_size(r["source_bytes"], r["preset"]) for r in running(conn))
+
+
+def same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.samefile(b)
+    except OSError:  # one of them doesn't exist
+        return a == b
+
+
+def output_intact(row) -> bool:
+    """The encode's output is still a file of the size it was recorded with (and not empty)."""
+    if not row["output"]:
+        return False
+    try:
+        path = Path(row["output"])
+        return path.is_file() and path.stat().st_size > 0 and path.stat().st_size == row["output_bytes"]
+    except OSError:
+        return False
+
+
+def good_encodes(rows, raw: Path) -> list:
+    """The finished encodes whose output is intact and that were made from this raw file: the only
+    ones that let the raw go. (A later re-rip of the same title is a different file.)"""
+    return [r for r in rows if r["state"] == "done" and output_intact(r) and same_file(Path(r["source"]), raw)]

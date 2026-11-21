@@ -30,15 +30,16 @@
               <a class="hint" href="/encodes/{{ e.id }}/log" target="_blank">log</a>
             {% elif e.state == "failed" %}
               <span class="error job-failed"><strong>Encode #{{ e.id }} failed:</strong> {{ e.error or "no reason was recorded" }}
-                <button hx-post="/encodes/{{ e.id }}/retry" hx-target="#films">Retry</button>
+                {% if not e.superseded %}<button hx-post="/encodes/{{ e.id }}/retry" hx-target="#films">Retry</button>{% endif %}
                 <a href="/encodes/{{ e.id }}/log" target="_blank">log</a></span>
             {% else %}
               {{ e.state }} ({{ e.preset_label }}){% if e.message %} · {{ e.message }}{% endif %}
-              <button hx-post="/encodes/{{ e.id }}/retry" hx-target="#films">Retry</button>
+              {% if not e.superseded %}<button hx-post="/encodes/{{ e.id }}/retry" hx-target="#films">Retry</button>{% endif %}
               <a class="hint" href="/encodes/{{ e.id }}/log" target="_blank">log</a>
             {% endif %}
           </div>
         {% endfor %}
+        {% if f.no_intact %}<span class="hint">raw kept: no intact encode</span>{% endif %}
         {% if f.countdown %}<span class="hint">raw deleted {{ f.countdown }}</span>{% endif %}
         {% if f.can_delete %}
           <button hx-post="/films/delete-raw" hx-vals='{"rip_id": {{ rip.rip_id }}, "title": {{ f.title }}}' hx-target="#films"

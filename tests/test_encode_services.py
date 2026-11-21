@@ -281,3 +281,11 @@ def test_state_change_publishes_films_and_encodes(config, setup):
 
 def test_progress_tick_publishes_only_the_panel(config, setup):
     assert _published(config, setup, progress_only=True) == ["encodes"]
+
+
+def test_encode_of_another_rip_of_the_file_does_not_free_the_raw(filed, setup):
+    services, rip, raw, out, enc = filed
+    with setup:  # the good encode was made from some earlier file at that path, not this raw
+        setup.execute("UPDATE encodes SET source = ? WHERE id = ?", (str(raw.parent / "earlier.mkv"), enc))
+    assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0) is not None
+    assert raw.exists()

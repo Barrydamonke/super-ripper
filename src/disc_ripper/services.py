@@ -48,24 +48,6 @@ def _parse_utc(value: str) -> datetime:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
-def _same_file(a: Path, b: Path) -> bool:
-    try:
-        return a.samefile(b)
-    except OSError:  # one of them doesn't exist
-        return a == b
-
-
-def _output_intact(row) -> bool:
-    """The encode's output is still a file of the size it was recorded with (and not empty)."""
-    if not row["output"]:
-        return False
-    try:
-        path = Path(row["output"])
-        return path.is_file() and path.stat().st_size > 0 and path.stat().st_size == row["output_bytes"]
-    except OSError:
-        return False
-
-
 def _configure_logging() -> None:
     logger = logging.getLogger("disc_ripper")
     if not logger.handlers:
@@ -559,13 +541,13 @@ class Services:
                             (rip_id, title)).fetchall()
         if any(r["state"] in ("queued", "running") for r in rows):
             return "Another encode of this file is waiting or running, so the raw rip is kept.", [], None
-        good = [r for r in rows if r["state"] == "done" and _output_intact(r)]
+        raw = Path(entry["path"])
+        good = encodes.good_encodes(rows, raw)  # intact, and made from this very raw file
         if not good:
             return ("The raw rip is kept until an encode has finished and its file is still there "
                     "and complete."), [], None
-        raw = Path(entry["path"])
         for (output,) in conn.execute("SELECT output FROM encodes WHERE output IS NOT NULL").fetchall():
-            if _same_file(raw, Path(output)):
+            if encodes.same_file(raw, Path(output)):
                 return "The raw file is also an encode's output, so it is kept.", [], None
         if keep_hours is not None:
             stamps = [_parse_utc(r["finished_at"]) for r in good if r["finished_at"]]

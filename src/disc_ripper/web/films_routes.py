@@ -89,15 +89,19 @@ def _file_view(key: str, entry: dict, scan_titles: dict, rows: list[sqlite3.Row]
         r["preset_label"] = encoding.PRESET_LABEL.get(r["preset"], r["preset"])
         r["percent"] = int(round((r["progress"] or 0) * 100))
         r["output_name"] = Path(r["output"]).name if r["output"] else ""
-    done = [r for r in rows if str(r["title"]) == key and r["state"] == "done"]
+        r["superseded"] = any(o["id"] > r["id"] for o in mine)  # a later attempt exists: no Retry
+    theirs = [r for r in rows if str(r["title"]) == key]
+    done = [r for r in theirs if r["state"] == "done"]
+    good = encodes.good_encodes(theirs, path)  # the same rule the raw sweep and Delete use
     busy = any(r["state"] in ("queued", "running") for r in mine)
     name = f"{path.parent.name}/{path.name}" if path.parent.name == "extras" else path.name
     return {
         "title": int(key), "name": name, "role": entry.get("role", ""),
         "seconds": scan_titles.get(int(key), {}).get("seconds"),
         "size": size, "deleted": deleted, "encodes": mine,
-        "countdown": None if deleted or busy or not done else _raw_countdown(done, keep_hours, now),
-        "can_delete": bool(done) and not deleted and not busy,
+        "countdown": None if deleted or busy or not good else _raw_countdown(good, keep_hours, now),
+        "no_intact": bool(done) and not good and not deleted and not busy,
+        "can_delete": bool(good) and not deleted and not busy,
     }
 
 

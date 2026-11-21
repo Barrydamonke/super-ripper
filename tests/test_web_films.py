@@ -203,3 +203,31 @@ def test_retry_refusals_say_why(films):
     with conn:
         conn.execute("UPDATE video_rips SET files = '{}' WHERE rip_id = ?", (rip,))
     assert "part of this rip any more" in _retry_error(client, orphan)
+
+
+def test_countdown_follows_the_intact_output_rule(films):
+    client, conn, config = films
+    rip = make_rip(conn, config)
+    out = config.downloads_dir / str(rip) / "film_t01-out.mkv"
+    out.write_bytes(b"y" * 500)
+    eid = queue(conn, rip, state="done", output=str(out))
+    page = client.get("/films").text
+    assert "raw deleted in" in page or "raw deleted soon" in page
+    assert "no intact encode" not in page
+    out.write_bytes(b"")  # the output was emptied: the sweep would refuse, so the page must not promise
+    page = client.get("/films").text
+    assert "raw kept: no intact encode" in page
+    assert "raw deleted in" not in page and "raw deleted soon" not in page
+    assert "Delete raw now" not in page
+    assert eid
+
+
+def test_superseded_failure_has_no_retry(films):
+    client, conn, config = films
+    rip = make_rip(conn, config)
+    old = queue(conn, rip, state="failed", error="boom")
+    assert f'hx-post="/encodes/{old}/retry"' in client.get("/films").text
+    newer = queue(conn, rip, state="cancelled")
+    page = client.get("/films").text
+    assert f'hx-post="/encodes/{old}/retry"' not in page
+    assert f'hx-post="/encodes/{newer}/retry"' in page
