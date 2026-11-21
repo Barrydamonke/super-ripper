@@ -2,7 +2,7 @@
 
 A single Docker container for Unraid that rips, encodes and burns discs from its own web UI. The design is in [Disc Ripper – Design Plan.md](Disc%20Ripper%20%E2%80%93%20Design%20Plan.md).
 
-Current state: **step 3 (audio CD ripping)**, on top of step 2 (detection, queues and the shutdown guard).
+Current state: **step 4 (DVD and Blu-ray ripping)**, on top of step 3 (audio CD ripping) and step 2 (detection, queues and the shutdown guard).
 - **Dashboard** (the home page): shows each enabled drive live, as empty, tray open or disc in, with the disc type and label. It has Eject and Close tray buttons, and lets you queue a *test job*: a pretend job with a chosen length and size that exercises the queue, progress and cache-space check.
 - **Drives page:** labels and enables drives.
 - **Audio CDs:**
@@ -10,8 +10,9 @@ Current state: **step 3 (audio CD ripping)**, on top of step 2 (detection, queue
   - A clean rip files itself into `/data/MEDIA/Music/<Album Artist>/<Album> (<Year>)/`.
   - Anything that needs a decision waits on the **Music** page: no match, several possible releases, unverified tracks, or an album you already have.
 - **Shutdown guard:** reads the Pi's power schedule and tells unraid-backend, through `/api/busy`, to wait while a job runs, for at most the grace period after the scheduled end.
+- **DVDs and Blu-rays:** insert a disc and it is scanned with MakeMKV, then the main title is ripped to MKV into the downloads folder and the disc ejects. Identification, encoding and filing come in later steps.
 
-DVD, Blu-ray and data-disc ripping come in later steps.
+Data-disc ripping comes in a later step.
 
 ## Install on Unraid
 
@@ -75,9 +76,44 @@ Music/Various Artists/<Album> (<Year>)/01 - <Artist> - <Title>.flac (compilation
    - The log: `docker exec disc-ripper sh -c 'cat /data/downloads/disc-ripper/*/rip.log'`, or the album's waiting folder.
    - The container log lines from that rip.
 
+### DVD and Blu-ray setup
+
+Settings has a **DVD and Blu-ray** group:
+- **MakeMKV key:** paste the current beta key from the MakeMKV forum (it changes every month or two) or a purchased key. It is never shown again once saved.
+- **Shortest title to list:** titles shorter than this (default 120 s) are ignored in the scan.
+- **Track selection:** MakeMKV's default selection string (`app_DefaultSelectionString`). The default keeps English audio without commentary (or the only audio track if there is no English), plus English and forced subtitles. Change it only if you know the MakeMKV syntax.
+
+What happens on insert: the disc is scanned and the **longest title** is taken as the main one. It rips straight away and the disc ejects when done, unless the disc is **held** for you to choose. A disc is held when:
+- the main title is unclear, or the disc looks like TV (several titles of similar length);
+- you pressed **Hold** during the scan, or while the main-title rip was still queued;
+- **auto-start** is off in Settings;
+- it was already ripped (the card says "Already ripped" and offers Rip again);
+- it was already in the drive when the container started.
+
+A held card lists the titles; pick one and press **Rip**. While a rip runs you can tick **extras** on the card; they are ripped after the main title, and the eject waits for them. Cancelling an unwanted extra still lets the disc eject; a failed title keeps the disc in for Retry. **Eject** also cancels anything still queued for that disc, as does taking the disc out.
+
+Where rips land: `/data/downloads/disc-ripper/<rip_id>/`, with extras in `extras/`. Files keep MakeMKV's own names and are never overwritten. Nothing tidies the downloads folder yet (that is step 5), so delete a rip's folder to discard it. If the move out of the work area fails (for example the cache is short of space), the rip still counts as done and the disc ejects; the file stays in `/work/<job>/`, and the drive's card keeps the message and a **Move again** button, with or without a disc in. If the file is gone from the work area by then, Move again says there is nothing left to move.
+
+When the beta key or version expires, rips fail with an "Update MakeMKV" message. Paste the new beta key in Settings, or rebuild the image with a newer version (below).
+
+### Testing step 4 on the server
+
+1. Insert a plain film DVD in each drive. It rips and ejects, and the MKV plays from downloads.
+2. Insert a Blu-ray with decoy playlists, if you have one. It is held, then rips after you pick a title.
+3. Tick an extra mid-rip. It lands in `extras/`, and the eject waits for it.
+4. Press Hold during a scan. Check one rip's tracks with `ffprobe`: English audio, English and forced subtitles, no commentary.
+5. Cancel mid-rip. Restart the container mid-rip; Retry works.
+6. Re-insert a ripped disc: "Already ripped". Rip again works.
+7. Insert a disc too big for the remaining budget: "Waiting for cache space".
+8. Capture real `makemkvcon -r` output (info and mkv) from a DVD and a Blu-ray into `tests/fixtures/makemkv/`, and check the parser against it. The current fixtures are written from MakeMKV's documented format, not captured.
+
 ## Update
 
 Docker tab → the container → Check for updates (or Force update). Settings and the database live in `/config`, so they survive updates.
+
+### Updating MakeMKV
+
+MakeMKV is compiled from makemkv.com source at a pinned version. To bump it, edit the three `ARG` lines at the top of the `Dockerfile` (`MAKEMKV_VERSION`, `MAKEMKV_OSS_SHA256`, `MAKEMKV_BIN_SHA256`). Take the version from https://www.makemkv.com/download/ and the checksums from its `makemkv-sha-<version>.txt`, and check them by hand. The build fails if a checksum does not match. Then rebuild and redeploy the image. A new beta key (Settings) is enough when only the key has expired.
 
 ## Develop
 

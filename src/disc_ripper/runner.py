@@ -61,7 +61,8 @@ class JobContext:
         return await self._runner.db(fn, *args, **kwargs)
 
     async def run_process(
-        self, argv: list[str], *, cwd: Path, on_line: Callable[[str], Awaitable[None]]
+        self, argv: list[str], *, cwd: Path, on_line: Callable[[str], Awaitable[None]],
+        env: dict[str, str] | None = None,
     ) -> int:
         """Run a child (fixed argv, no shell), feeding each output line to on_line.
 
@@ -75,6 +76,7 @@ class JobContext:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
+            env={**os.environ, **env} if env else None,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -213,6 +215,7 @@ class JobRunner:
         result = await self.db(jobs.cancel_queued, job_id, utc_now())
         if result == "cancelled":
             row = await self.db(jobs.get, job_id)
+            await self._ended(job_id)  # a queued job never reaches its handler
             await self.notify(row["drive_id"])
             self.wake(row["drive_id"])
             return True
@@ -333,4 +336,15 @@ class JobRunner:
     async def _finish(self, drive_id: str, job_id: int, state: jobs.FinalState, error: str | None) -> None:
         await self.db(jobs.finish, job_id, state, utc_now(), error=error)
         log.info("jobs: #%s %s%s", job_id, state, f": {error}" if error else "")
+        await self._ended(job_id)
         await self.notify(drive_id)
+
+    async def _ended(self, job_id: int) -> None:
+        """Tell the services a job reached a final state (e.g. to settle a video rip)."""
+        hook = getattr(self.services, "job_ended", None)
+        if hook is None:
+            return
+        try:
+            await hook(job_id)
+        except Exception:  # bookkeeping after a job must never stop the worker
+            log.exception("jobs: after #%s ended", job_id)

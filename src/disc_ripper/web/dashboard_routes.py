@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import hmac
+import json
 import math
 import sqlite3
 from collections.abc import AsyncIterator
@@ -13,7 +14,8 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from .. import busy, cd_rips, db, drives, jobs, schedule_source
+from .. import busy, cd_rips, db, drives, jobs, makemkv, schedule_source, video_rips
+from .. import titles as titles_mod
 from ..cdtoc import musicbrainz_disc_id
 from ..clock import utc_now
 from ..events import format_sse
@@ -39,8 +41,87 @@ def _past_grace(guard, finish: datetime | None) -> bool:
     return finish > guard.grace_ends_at
 
 
+def _hms(seconds: int) -> str:
+    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+
+def _gb(size: int) -> str:
+    return f"{size / 1e9:.1f} GB"
+
+
+def _video_context(conn: sqlite3.Connection, drive_row: sqlite3.Row, grouped, config) -> dict:
+    """Template context for a DVD/Blu-ray card: the scanned disc, any blocking rip, the current rip."""
+    ctx = {"video": None, "video_blocking": None, "video_rip": None, "video_done": {}, "video_notes": {},
+           "video_moves": []}
+    # Rips from this drive whose move to downloads failed: shown whether or not a disc is in,
+    # since the disc ejects once the rip itself is done.
+    for rip in conn.execute(
+        "SELECT rip_id, message FROM video_rips WHERE state = 'move_failed' "
+        "AND rip_id IN (SELECT id FROM jobs WHERE drive_id = ?) ORDER BY rip_id", (drive_row["id"],)
+    ).fetchall():
+        if not any(s in ("queued", "waiting_space", "running") for _t, _j, s in video_rips.attempts(conn, rip["rip_id"])):
+            ctx["video_moves"].append({"rip_id": rip["rip_id"], "message": rip["message"]})
+    disc_fp = None
+    if drive_row["media_state"] == "disc" and drive_row["disc_type"] in ("dvd", "bluray"):
+        row = video_rips.disc_in_drive(conn, drive_row["id"])
+        if row is not None:
+            disc_fp = row["fingerprint"]
+            scan = json.loads(row["scan"])
+            parsed = [makemkv.Title(**t) for t in scan.get("titles", [])]
+            tv = titles_mod.looks_like_tv(parsed)
+            default = titles_mod.main_title(parsed)
+            ctx["video"] = {
+                "fingerprint": row["fingerprint"],
+                "held": json.loads(row["held"]),
+                "as_film": bool(row["as_film"]),
+                "tv": tv,
+                "no_main": tv and not row["as_film"],
+                "default_main": default.number if default else None,
+                "titles": [
+                    {"number": t.number, "length": _hms(t.seconds), "size": _gb(t.size),
+                     "chapters": t.chapters, "source": t.source}
+                    for t in parsed
+                ],
+            }
+            ctx["video_blocking"] = video_rips.blocking_rip(conn, disc_fp, config.downloads_dir, config.work_dir)
+            rip = conn.execute(
+                "SELECT * FROM video_rips WHERE fingerprint = ? ORDER BY rip_id DESC LIMIT 1", (disc_fp,)
+            ).fetchone()
+            if rip is not None:
+                latest: dict[int, str] = {}
+                for title, _job, state in video_rips.attempts(conn, rip["rip_id"]):
+                    latest[title] = state  # attempts are in job order: the last one wins
+                ctx["video_rip"] = {
+                    "rip_id": rip["rip_id"], "state": rip["state"], "message": rip["message"],
+                    "main_title": rip["main_title"], "titles": latest,
+                }
+    # The recent line for each finished rip_title job: the file it made and the scanned length/size.
+    for job in grouped.recent:
+        if job["kind"] != "rip_title" or job["state"] != "done":
+            continue
+        params = json.loads(job["params"])
+        rip = conn.execute("SELECT files, state, message FROM video_rips WHERE rip_id = ?",
+                           (params.get("rip_id"),)).fetchone()
+        entry = json.loads(rip["files"]).get(str(params.get("title"))) if rip else None
+        if not entry and rip is not None and rip["state"] == "move_failed":
+            ctx["video_notes"][job["id"]] = rip["message"] or "Moving the rip to downloads failed."
+        disc = conn.execute("SELECT scan FROM video_discs WHERE fingerprint = ?",
+                            (params.get("fingerprint"),)).fetchone()
+        if not entry or disc is None:
+            continue
+        found = next((t for t in json.loads(disc["scan"]).get("titles", [])
+                      if t["number"] == params.get("title")), None)
+        if found:
+            ctx["video_done"][job["id"]] = {
+                "rip_id": params["rip_id"], "file": entry["path"].replace("\\", "/").rsplit("/", 1)[-1],
+                "length": _hms(found["seconds"]), "size": _gb(found["size"]),
+            }
+    return ctx
+
+
 def render_drive_card(
-    conn: sqlite3.Connection, drive_row: sqlite3.Row, now: datetime, *, error: str | None = None
+    conn: sqlite3.Connection, drive_row: sqlite3.Row, now: datetime, *, error: str | None = None,
+    config,
 ) -> str:
     guard = schedule_source.current_guard(conn, now)
     grouped = jobs.drive_jobs(conn, drive_row["id"])
@@ -65,6 +146,7 @@ def render_drive_card(
         disc=disc,
         blocking=blocking,
         rips=rips,
+        **_video_context(conn, drive_row, grouped, config),
         default_minutes=DEFAULT_TEST_MINUTES,
         running_past_grace=_past_grace(guard, running_finish),
         new_job_past_grace=_past_grace(guard, now + timedelta(minutes=DEFAULT_TEST_MINUTES)),
@@ -102,15 +184,15 @@ def _drive(conn: sqlite3.Connection, drive_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM drives WHERE id = ?", (drive_id,)).fetchone()
 
 
-def _card_sync(conn, drive_id: str, error: str | None) -> str | None:
+def _card_sync(conn, config, drive_id: str, error: str | None) -> str | None:
     row = _drive(conn, drive_id)
     if row is None:
         return None
-    return render_drive_card(conn, row, datetime.now().astimezone(), error=error)
+    return render_drive_card(conn, row, datetime.now().astimezone(), error=error, config=config)
 
 
 async def _card(request: Request, drive_id: str, *, error: str | None = None, status_code: int = 200):
-    html = await asyncio.to_thread(_with_conn, request, _card_sync, drive_id, error)
+    html = await asyncio.to_thread(_with_conn, request, _card_sync, request.app.state.config, drive_id, error)
     if html is None:
         return HTMLResponse('<p class="error">Unknown drive.</p>', status_code=404)
     return HTMLResponse(html, status_code=status_code)
@@ -118,10 +200,10 @@ async def _card(request: Request, drive_id: str, *, error: str | None = None, st
 
 # -- pages ---------------------------------------------------------------------
 
-def _dashboard_sync(conn) -> dict:
+def _dashboard_sync(conn, config) -> dict:
     now = datetime.now().astimezone()
     cards = [
-        {"key": drive_key(row["id"]), "drive_id": row["id"], "html": render_drive_card(conn, row, now)}
+        {"key": drive_key(row["id"]), "drive_id": row["id"], "html": render_drive_card(conn, row, now, config=config)}
         for row in drives.list_drives(conn)
         if row["present"] and row["enabled"]
     ]
@@ -130,7 +212,7 @@ def _dashboard_sync(conn) -> dict:
 
 @router.get("/")
 async def dashboard(request: Request):
-    context = await asyncio.to_thread(_with_conn, request, _dashboard_sync)
+    context = await asyncio.to_thread(_with_conn, request, _dashboard_sync, request.app.state.config)
     return templates.TemplateResponse(request, "dashboard.html", context)
 
 
@@ -142,9 +224,8 @@ async def _drive_action(request: Request, drive_id: str, action: str) -> str | N
     row = await asyncio.to_thread(_with_conn, request, _drive, drive_id)
     if row is None or not row["sr_name"]:
         return "This drive has no /dev/sr node."
-    running = await asyncio.to_thread(_with_conn, request, jobs.drive_jobs, drive_id)
-    if action == "eject" and running.running is not None and running.running["uses_drive"]:
-        await svc.runner.cancel(running.running["id"])
+    if action == "eject":
+        await svc.cancel_for_eject(drive_id)
     path = request.app.state.config.dev_root / row["sr_name"]
 
     def run():
@@ -193,6 +274,118 @@ async def rip_cd(request: Request, drive_id: str = Form(...), again: str = Form(
     return await _card(request, drive_id)
 
 
+# -- video discs -----------------------------------------------------------------
+
+RIP_REFUSED = "Couldn't start the rip — the disc may have changed; scan again by re-inserting it."
+RIP_NOTHING_TICKED = "Tick at least one title to rip."
+RIP_MAIN_IS_EXTRA = "The main title can't also be an extra."
+RIP_ACTIVE = "A rip of this disc is already queued or ripping."
+RIP_ALREADY = "This disc was already ripped: press Rip again to rip it once more."
+EXTRA_REFUSED = "That title is already queued or ripped."
+
+
+def _video_disc_view(conn, drive_id: str):
+    """(disc row, parsed titles) of the disc in a drive, or (None, [])."""
+    disc = video_rips.disc_in_drive(conn, drive_id)
+    if disc is None:
+        return None, []
+    return disc, [makemkv.Title(**t) for t in json.loads(disc["scan"]).get("titles", [])]
+
+
+def _rip_drive(conn, rip_id: int) -> str | None:
+    row = conn.execute("SELECT drive_id FROM jobs WHERE id = ?", (rip_id,)).fetchone()
+    return row["drive_id"] if row else None
+
+
+async def _known_drive(request: Request, drive_id: str):
+    return await asyncio.to_thread(_with_conn, request, _drive, drive_id)
+
+
+_UNKNOWN_DRIVE = '<p class="error">Unknown drive.</p>'
+
+
+@router.post("/dashboard/video/rip")
+async def rip_video(request: Request, drive_id: str = Form(...), main: str = Form(""),
+                    extras: list[str] = Form([]), again: str = Form("")):
+    if await _known_drive(request, drive_id) is None:
+        return HTMLResponse(_UNKNOWN_DRIVE, status_code=404)
+    disc, parsed = await asyncio.to_thread(_with_conn, request, _video_disc_view, drive_id)
+    if disc is None:
+        return await _card(request, drive_id, error=RIP_REFUSED, status_code=400)
+    try:
+        extra_numbers = [int(x) for x in extras]
+        if main.strip():
+            main_number = int(main)
+        elif titles_mod.looks_like_tv(parsed) and not disc["as_film"]:
+            main_number = None
+        else:
+            raise ValueError("main")
+    except ValueError:
+        return await _card(request, drive_id, error="Pick the main title (or tick the titles to rip).",
+                           status_code=400)
+    if main_number is None and not extra_numbers:
+        return await _card(request, drive_id, error=RIP_NOTHING_TICKED, status_code=400)
+    if main_number is not None and main_number in extra_numbers:
+        return await _card(request, drive_id, error=RIP_MAIN_IS_EXTRA, status_code=400)
+    rip_id = await _services(request).start_video_rip(
+        drive_id, disc["fingerprint"], main=main_number, extras=extra_numbers, again=bool(again))
+    if rip_id is None:
+        config = request.app.state.config
+        blocking = await asyncio.to_thread(_with_conn, request, video_rips.blocking_rip, disc["fingerprint"],
+                                           config.downloads_dir, config.work_dir)
+        if blocking is not None and blocking["state"] == "ripping":
+            error = RIP_ACTIVE
+        elif blocking is not None and not again:
+            error = RIP_ALREADY
+        else:  # a title that isn't on the scanned disc
+            error = RIP_REFUSED
+        return await _card(request, drive_id, error=error)
+    return await _card(request, drive_id)
+
+
+@router.post("/dashboard/video/hold")
+async def hold_video(request: Request, drive_id: str = Form(...)):
+    if await _known_drive(request, drive_id) is None:
+        return HTMLResponse(_UNKNOWN_DRIVE, status_code=404)
+    await _services(request).hold_video(drive_id)
+    return await _card(request, drive_id)
+
+
+@router.post("/dashboard/video/extra")
+async def extra_video(request: Request, drive_id: str = Form(...), rip_id: int = Form(...), title: int = Form(...)):
+    if await _known_drive(request, drive_id) is None:
+        return HTMLResponse(_UNKNOWN_DRIVE, status_code=404)
+    if await asyncio.to_thread(_with_conn, request, _rip_drive, rip_id) != drive_id:
+        return await _card(request, drive_id, error=EXTRA_REFUSED)
+    job_id = await _services(request).add_video_extra(rip_id, title)
+    return await _card(request, drive_id, error=None if job_id is not None else EXTRA_REFUSED)
+
+
+@router.post("/dashboard/video/move")
+async def move_video(request: Request, drive_id: str = Form(...), rip_id: int = Form(...)):
+    if await _known_drive(request, drive_id) is None:
+        return HTMLResponse(_UNKNOWN_DRIVE, status_code=404)
+    if await asyncio.to_thread(_with_conn, request, _rip_drive, rip_id) != drive_id:
+        return await _card(request, drive_id, error="That rip isn't on this drive.")
+    return await _card(request, drive_id, error=await _services(request).move_again(rip_id))
+
+
+@router.post("/dashboard/video/as-film")
+async def as_film_video(request: Request, drive_id: str = Form(...), value: str = Form(...)):
+    if await _known_drive(request, drive_id) is None:
+        return HTMLResponse(_UNKNOWN_DRIVE, status_code=404)
+    if value not in ("0", "1"):
+        return await _card(request, drive_id, error="Unknown choice.", status_code=400)
+
+    def run(conn):
+        disc = video_rips.disc_in_drive(conn, drive_id)
+        if disc is not None:
+            video_rips.set_as_film(conn, disc["fingerprint"], value == "1")
+
+    await asyncio.to_thread(_with_conn, request, run)
+    return await _card(request, drive_id)
+
+
 def _parse_test_job(minutes: str, size_gb: str) -> tuple[int, float]:
     try:
         mins = int(minutes.strip())
@@ -230,7 +423,7 @@ async def cancel_job(request: Request, job_id: int):
     row = await asyncio.to_thread(_with_conn, request, jobs.get, job_id)
     if row is None:
         return HTMLResponse('<p class="error">Unknown job.</p>', status_code=404)
-    await _services(request).runner.cancel(job_id)
+    await _services(request).cancel_job(job_id)
     # A running job finishes cancelling a moment later; the SSE update brings the card up to date.
     return await _card(request, row["drive_id"])
 
@@ -253,7 +446,7 @@ async def event_stream(svc: Services, request) -> AsyncIterator[str]:
         # Subscribe first so nothing published during the burst is missed.
         conn = db.connect(svc.config.db_path)
         try:
-            burst = await asyncio.to_thread(_dashboard_sync, conn)
+            burst = await asyncio.to_thread(_dashboard_sync, conn, svc.config)
         finally:
             conn.close()
         yield format_sse("guard", burst["guard_html"])

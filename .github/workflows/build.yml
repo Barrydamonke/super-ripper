@@ -56,6 +56,9 @@ jobs:
           test "$(docker exec smoke awk '/^Uid:/{print $2}' /proc/$app_pid/status)" = "99"
           # cyanrip (Debian trixie) must run as the app user.
           docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups cyanrip -V | grep -q "^cyanrip 0.9"
+          # MakeMKV (built from source) and ffprobe must run as the app user.
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HOME=/tmp makemkvcon -r info disc:9999' | grep -q '^MSG:'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups ffprobe -version | grep -q '^ffprobe version'
           docker logs smoke
           docker rm -f smoke
 

@@ -19,6 +19,7 @@ VALID_FORM = {
     "iso_dir": "/data/ISOs",
     "cd_rip_mode": "secure",
     "cd_retries": "10",
+    "video_min_title_seconds": "120",
     "cd_approval": "odd_ones",
     "cd_cover_art": "on",
 }
@@ -135,3 +136,16 @@ def test_cd_defaults(conn):
         "secure", 10, "odd_ones", True,
     )
     assert values["jellyfin_url"] == "" and values["jellyfin_api_key"] == ""
+
+
+def test_text_setting_round_trip(conn):
+    form = {**VALID_FORM, "video_track_selection": "  -sel:all,+sel:eng  "}
+    settings.save(conn, settings.parse_form(form))
+    assert settings.get(conn, "video_track_selection") == "-sel:all,+sel:eng"
+    with pytest.raises(settings.SettingsError) as exc:
+        settings.parse_form({**VALID_FORM, "video_track_selection": "a\nb"})
+    assert "video_track_selection" in exc.value.errors
+    with pytest.raises(settings.SettingsError):
+        settings.parse_form({**VALID_FORM, "video_track_selection": "x" * 2001})
+    assert settings.get(conn, "video_min_title_seconds") == 120
+    assert settings.get(conn, "makemkv_key") == ""

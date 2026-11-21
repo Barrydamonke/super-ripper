@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import cd_rips, cdrip, coverart, db, drives, jobs, schedule_source, settings  # cdrip registers rip_cd
+from . import cd_rips, cdrip, coverart, db, drives, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
 from .jellyfin import Jellyfin, RefreshDebouncer
 from .musicbrainz import MusicBrainz
 from .cdrom import CdDrive
@@ -65,7 +65,7 @@ class Services:
         # Indirect, so drive_factory can be swapped after construction (tests).
         self.monitor = MediaMonitor(
             config, self, drive_factory=lambda path: self.drive_factory(path), on_insert=self.on_insert,
-            on_present=self.on_present,
+            on_present=self.on_present, on_remove=self.on_remove,
         )
         self.runner = JobRunner(config, self, self.space, services=self)
         self.musicbrainz = MusicBrainz()
@@ -160,6 +160,9 @@ class Services:
         row = await asyncio.to_thread(
             self._db, lambda conn: conn.execute("SELECT disc_type FROM drives WHERE id = ?", (drive_id,)).fetchone()
         )
+        if row is not None and row["disc_type"] in ("dvd", "bluray"):
+            await self.enqueue_video_scan(drive_id, from_insert=False)
+            return
         if row is None or row["disc_type"] not in ("audio", "mixed"):
             return
         try:
@@ -175,6 +178,9 @@ class Services:
         row = await asyncio.to_thread(
             self._db, lambda conn: conn.execute("SELECT disc_type FROM drives WHERE id = ?", (drive_id,)).fetchone()
         )
+        if row is not None and row["disc_type"] in ("dvd", "bluray"):
+            await self.enqueue_video_scan(drive_id, from_insert=True)
+            return
         if row is None or row["disc_type"] not in ("audio", "mixed"):
             return
         try:
@@ -193,6 +199,304 @@ class Services:
             return
         await self.enqueue_cd_rip(drive_id, toc)
 
+    # -- DVD / Blu-ray ---------------------------------------------------------
+
+    def _enqueue_video_scan(self, conn, drive_id: str, from_insert: bool) -> int | None:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            drive = conn.execute(
+                "SELECT sr_name, disc_type, disc_label FROM drives WHERE id = ?", (drive_id,)).fetchone()
+            busy = conn.execute(
+                "SELECT 1 FROM jobs WHERE drive_id = ? AND kind = 'scan_video' "
+                "AND state IN ('queued', 'waiting_space', 'running')", (drive_id,)).fetchone()
+            if drive is None or not drive["sr_name"] or busy:
+                conn.rollback()
+                return None
+            params = {"sr_name": drive["sr_name"], "disc_type": drive["disc_type"],
+                      "label": drive["disc_label"] or "", "from_insert": from_insert}
+            cur = conn.execute(
+                "INSERT INTO jobs (drive_id, kind, state, params, needs_bytes, uses_drive, created_at) "
+                "VALUES (?, 'scan_video', 'queued', ?, 0, 1, ?)",
+                (drive_id, json.dumps(params), utc_now()),
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return cur.lastrowid
+
+    async def enqueue_video_scan(self, drive_id: str, *, from_insert: bool) -> int | None:
+        """Queue a scan of the disc in a drive. None while one is already queued or running."""
+        job_id = await asyncio.to_thread(self._db, self._enqueue_video_scan, drive_id, from_insert)
+        if job_id is not None:
+            log.info("video: queued scan #%s on %s", job_id, drive_id)
+            self.wake(drive_id)
+        await self.drive_changed(drive_id)
+        return job_id
+
+    @staticmethod
+    def _rip_params(disc, drive, fingerprint: str, title: dict, role: str) -> dict:
+        return {"rip_id": 0, "fingerprint": fingerprint, "title": title["number"], "role": role,
+                "minlength": disc["minlength"], "expected_seconds": title["seconds"],
+                "sr_name": drive["sr_name"]}
+
+    @staticmethod
+    def _insert_rip_job(conn, drive_id: str, params: dict, title: dict, now: str) -> int:
+        cur = conn.execute(
+            "INSERT INTO jobs (drive_id, kind, state, params, needs_bytes, uses_drive, created_at) "
+            "VALUES (?, 'rip_title', 'queued', ?, ?, 1, ?)",
+            (drive_id, json.dumps(params), math.ceil(title["size"] * 1.02), now),
+        )
+        return cur.lastrowid
+
+    def _start_video_rip(self, conn, drive_id: str, fingerprint: str, main: int | None,
+                         scan_job_id: int | None = None, extras: list[int] | None = None,
+                         again: bool = False) -> int | None:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            disc = conn.execute("SELECT * FROM video_discs WHERE fingerprint = ?", (fingerprint,)).fetchone()
+            drive = conn.execute("SELECT sr_name, video_hold FROM drives WHERE id = ?", (drive_id,)).fetchone()
+            if disc is None or drive is None:
+                conn.rollback()
+                return None
+            by_number = {t["number"]: t for t in json.loads(disc["scan"])["titles"]}
+            wanted = [] if main is None else [main]
+            if main is not None and main in (extras or []):
+                conn.rollback()
+                return None
+            for number in extras or []:
+                if number not in wanted:
+                    wanted.append(number)
+            if not wanted or any(n not in by_number for n in wanted):
+                conn.rollback()
+                return None
+            if scan_job_id is not None:  # an auto-start: Hold or a cancel may have come since the scan decided
+                scan = conn.execute("SELECT state FROM jobs WHERE id = ?", (scan_job_id,)).fetchone()
+                if drive["video_hold"] or scan is None or scan["state"] != "running":
+                    conn.rollback()
+                    return None
+            blocking = video_rips.blocking_rip(conn, fingerprint, self.config.downloads_dir, self.config.work_dir)
+            if blocking is not None and (blocking["state"] == "ripping" or not again):
+                conn.rollback()
+                return None
+            now = utc_now()
+            ids = []
+            for number in wanted:
+                role = "title" if main is None else ("main" if number == main else "extra")
+                params = self._rip_params(disc, drive, fingerprint, by_number[number], role)
+                ids.append(self._insert_rip_job(conn, drive_id, params, by_number[number], now))
+            rip_id = ids[0]
+            conn.execute("UPDATE jobs SET params = json_set(params, '$.rip_id', ?) WHERE id IN (%s)"
+                         % ",".join("?" * len(ids)), (rip_id, *ids))
+            conn.execute(
+                "INSERT INTO video_rips (rip_id, fingerprint, state, main_title, created_at, updated_at) "
+                "VALUES (?, ?, 'ripping', ?, ?, ?)", (rip_id, fingerprint, main, now, now))
+            if scan_job_id is None:  # a manual start lifts the hold
+                conn.execute("UPDATE drives SET video_hold = 0 WHERE id = ?", (drive_id,))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return rip_id
+
+    async def start_video_rip(self, drive_id: str, fingerprint: str, *, main: int | None, extras: list[int],
+                              again: bool, scan_job_id: int | None = None) -> int | None:
+        """Queue the main title then the extras (or every ticked title as a peer when there is no
+        main). None when refused: a rip is active, the disc is already ripped (without again),
+        or a title isn't on the disc."""
+        rip_id = await asyncio.to_thread(self._db, self._start_video_rip, drive_id, fingerprint, main,
+                                         scan_job_id, extras, again)
+        if rip_id is None:
+            return None
+        log.info("video: queued rip #%s on %s", rip_id, drive_id)
+        self.wake(drive_id)
+        await self.drive_changed(drive_id)
+        return rip_id
+
+    def _add_video_extra(self, conn, rip_id: int, title: int) -> tuple[int | None, str | None]:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rip = conn.execute("SELECT * FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+            first = conn.execute("SELECT drive_id FROM jobs WHERE id = ?", (rip_id,)).fetchone()
+            if rip is None or first is None or first["drive_id"] is None:
+                conn.rollback()
+                return None, None
+            drive_id, fingerprint = first["drive_id"], rip["fingerprint"]
+            disc = conn.execute("SELECT * FROM video_discs WHERE fingerprint = ?", (fingerprint,)).fetchone()
+            drive = conn.execute("SELECT sr_name FROM drives WHERE id = ?", (drive_id,)).fetchone()
+            by_number = {t["number"]: t for t in json.loads(disc["scan"])["titles"]} if disc else {}
+            if title not in by_number or drive is None:
+                conn.rollback()
+                return None, None
+            active = conn.execute(
+                "SELECT 1 FROM jobs WHERE kind = 'rip_title' AND drive_id = ? "
+                "AND state IN ('queued', 'waiting_space', 'running') LIMIT 1", (drive_id,)).fetchone()
+            here = video_rips.disc_in_drive(conn, drive_id)
+            if active is None and (here is None or here["fingerprint"] != fingerprint):
+                conn.rollback()  # the extra has to rip from this disc
+                return None, None
+            if any(t == title and s in ("queued", "waiting_space", "running", "done")
+                   for t, _j, s in video_rips.attempts(conn, rip_id)):
+                conn.rollback()
+                return None, None
+            role = "title" if rip["main_title"] is None else "extra"
+            params = self._rip_params(disc, drive, fingerprint, by_number[title], role)
+            params["rip_id"] = rip_id
+            now = utc_now()
+            job_id = self._insert_rip_job(conn, drive_id, params, by_number[title], now)
+            if rip["state"] == "ripped":  # reopen; a move_failed rip stays so until Move again clears it
+                conn.execute("UPDATE video_rips SET state = 'ripping', updated_at = ? WHERE rip_id = ?",
+                             (now, rip_id))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return job_id, drive_id
+
+    async def add_video_extra(self, rip_id: int, title: int) -> int | None:
+        """Queue one more title for a rip (an extra, or a peer when the rip has no main).
+        None when refused, e.g. the title already has a queued, running or finished attempt."""
+        job_id, drive_id = await asyncio.to_thread(self._db, self._add_video_extra, rip_id, title)
+        if job_id is None:
+            return None
+        log.info("video: queued title %s as job #%s of rip #%s", title, job_id, rip_id)
+        self.wake(drive_id)
+        await self.drive_changed(drive_id)
+        return job_id
+
+    async def move_again(self, rip_id: int) -> str | None:
+        """Retry moving a rip's files to downloads. Returns an error message, or None."""
+        from . import videorip
+
+        def run(conn):
+            row = conn.execute("SELECT drive_id FROM jobs WHERE id = ?", (rip_id,)).fetchone()
+            return videorip.move_again_sync(conn, self.config, rip_id), row["drive_id"] if row else None
+
+        error, drive_id = await asyncio.to_thread(self._db, run)
+        if drive_id:
+            await self.drive_changed(drive_id)
+        return error
+
+    def _settle_for_job(self, conn, job_id: int) -> int | None:
+        row = jobs.get(conn, job_id)
+        if row is None or row["kind"] != "rip_title":
+            return None
+        rip_id = json.loads(row["params"]).get("rip_id")
+        video_rips.settle(conn, rip_id, self.config.work_dir, utc_now())
+        return rip_id
+
+    async def job_ended(self, job_id: int) -> None:
+        """The runner's hook: a job finished, or a queued one was cancelled. A rip_title job
+        settles its rip once nothing of it is pending (ripped, move_failed or failed)."""
+        await asyncio.to_thread(self._db, self._settle_for_job, job_id)
+
+    def _eject_target(self, conn, job_id: int) -> tuple[str, str] | None:
+        """(drive_id, sr_name) if cancelling this job left its disc's rip finished: eject then."""
+        row = jobs.get(conn, job_id)
+        if row is None or row["kind"] != "rip_title" or row["state"] != "cancelled":
+            return None
+        rip_id = json.loads(row["params"]).get("rip_id")
+        drive = conn.execute("SELECT sr_name, media_state FROM drives WHERE id = ?", (row["drive_id"],)).fetchone()
+        if drive is None or not drive["sr_name"] or drive["media_state"] != "disc":
+            return None
+        if not titles.should_eject(video_rips.attempts(conn, rip_id)):
+            return None
+        return row["drive_id"], drive["sr_name"]
+
+    def _eject(self, drive_id: str, sr_name: str) -> None:
+        lock = self.monitor.drive_lock(drive_id)
+        if not lock.acquire(timeout=5.0):
+            raise OSError("the drive is busy")
+        try:
+            self.drive_factory(self.config.dev_root / sr_name).eject()
+        finally:
+            lock.release()
+
+    async def cancel_job(self, job_id: int) -> bool:
+        """The Cancel button. Cancelling the last pending title of a rip whose other titles
+        are done (an unwanted extra) ejects the disc, as a finished rip would."""
+        cancelled = await self.runner.cancel(job_id)
+        if cancelled:
+            target = await asyncio.to_thread(self._db, self._eject_target, job_id)
+            if target is not None:
+                try:
+                    await asyncio.to_thread(self._eject, *target)
+                except Exception as exc:  # a stuck tray mustn't fail the cancel
+                    log.warning("video: eject after cancelling #%s failed: %s", job_id, exc)
+                await self.drive_changed(target[0])
+        return cancelled
+
+    def _cancel_disc_jobs(self, conn, drive_id: str) -> list[int]:
+        """Cancel the drive's queued and waiting scans and title rips, in one transaction so the
+        worker can't start one of them in between; then settle the rips they belonged to."""
+        now = utc_now()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            ids = [r[0] for r in conn.execute(
+                "SELECT id FROM jobs WHERE drive_id = ? AND kind IN ('rip_title', 'scan_video') "
+                "AND state IN ('queued', 'waiting_space')", (drive_id,))]
+            conn.executemany("UPDATE jobs SET state = 'cancelled', finished_at = ? WHERE id = ?",
+                             [(now, i) for i in ids])
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        for job_id in ids:
+            self._settle_for_job(conn, job_id)
+        return ids
+
+    async def cancel_disc_jobs(self, drive_id: str) -> list[int]:
+        ids = await asyncio.to_thread(self._db, self._cancel_disc_jobs, drive_id)
+        if ids:
+            log.info("video: cancelled queued job(s) %s on %s: the disc is leaving", ids, drive_id)
+            self.wake(drive_id)
+            await self.drive_changed(drive_id)
+        return ids
+
+    async def cancel_for_eject(self, drive_id: str) -> None:
+        """Before an eject: the disc's queued jobs first (so the worker doesn't start the next
+        one), then the running job that holds the drive."""
+        await self.cancel_disc_jobs(drive_id)
+        grouped = await asyncio.to_thread(self._db, jobs.drive_jobs, drive_id)
+        if grouped.running is not None and grouped.running["uses_drive"]:
+            await self.runner.cancel(grouped.running["id"])
+
+    async def on_remove(self, drive_id: str) -> None:
+        """The disc left the drive (ejected, or the media monitor saw it go)."""
+        await self.cancel_disc_jobs(drive_id)
+
+    def _hold_video(self, conn, drive_id: str) -> list[int]:
+        with conn:
+            conn.execute("UPDATE drives SET video_hold = 1 WHERE id = ?", (drive_id,))
+        disc = video_rips.disc_in_drive(conn, drive_id)
+        if disc is None:
+            return []
+        # One write transaction, so the worker can't start the main title or an extra in between.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            mains = [r[0] for r in conn.execute(
+                "SELECT id FROM jobs WHERE kind = 'rip_title' AND state IN ('queued', 'waiting_space') "
+                "AND json_extract(params, '$.fingerprint') = ? AND json_extract(params, '$.role') = 'main'",
+                (disc["fingerprint"],))]
+            cancelled = []
+            for main in mains:  # a held rip never started: drop it and its queued extras
+                cancelled += [r[0] for r in conn.execute(
+                    "SELECT id FROM jobs WHERE kind = 'rip_title' AND state IN ('queued', 'waiting_space') "
+                    "AND (id = ? OR json_extract(params, '$.rip_id') = ?)", (main, main))]
+            # video_rips cascades with the main job
+            conn.executemany("DELETE FROM jobs WHERE id = ?", [(i,) for i in cancelled])
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return cancelled
+
+    async def hold_video(self, drive_id: str) -> None:
+        """Hold the disc: no automatic rip, and a queued (not yet running) main rip is cancelled."""
+        await asyncio.to_thread(self._db, self._hold_video, drive_id)
+        self.wake(drive_id)
+        await self.drive_changed(drive_id)
+
     # -- Notifier ------------------------------------------------------------
 
     def _render_drive(self, drive_id: str) -> str | None:
@@ -203,7 +507,7 @@ class Services:
             row = conn.execute("SELECT * FROM drives WHERE id = ?", (drive_id,)).fetchone()
             if row is None:
                 return None
-            return render_drive_card(conn, row, datetime.now().astimezone())
+            return render_drive_card(conn, row, datetime.now().astimezone(), config=self.config)
         finally:
             conn.close()
 
@@ -294,6 +598,8 @@ class Services:
         try:
             count = jobs.mark_interrupted(conn, utc_now())
             cd_rips.reconcile(conn, self.config.work_dir)
+            for rip_id in video_rips.unsettled(conn):  # rips whose last job ended in the last run
+                video_rips.settle(conn, rip_id, self.config.work_dir, utc_now())
             cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc))
         finally:
             conn.close()

@@ -386,3 +386,24 @@ def test_cancel_running_job_returns_after_state_is_written(config, conn):
         await r.stop()
 
     asyncio.run(main())
+
+
+def test_run_process_env(conn, config, tmp_path):
+    import sys
+
+    lines = []
+
+    async def on_line(line):
+        lines.append(line)
+
+    async def main():
+        r = runner.JobRunner(config, RecordingNotifier(), FakeSpace())
+        ctx = runner.JobContext(r, 1, "serial:A", {})
+        code = await ctx.run_process(
+            [sys.executable, "-c", "import os; print(os.environ['X_TEST'])"],
+            cwd=tmp_path, on_line=on_line, env={"X_TEST": "1"},
+        )
+        assert code == 0
+
+    asyncio.run(main())
+    assert lines == ["1"]
