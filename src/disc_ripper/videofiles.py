@@ -24,15 +24,32 @@ class MkvInfo:
     seconds: float
     video: int
     audio: int
+    audio_channels: tuple[int, ...] = ()
+    sar: tuple[int, int] = (1, 1)
+    dar: float | None = None
+
+
+def _ratio(text) -> tuple[int, int] | None:
+    try:
+        n, d = (int(x) for x in str(text).split(":"))
+    except ValueError:
+        return None
+    return (n, d) if n > 0 and d > 0 else None
 
 
 def parse_ffprobe(text: str) -> MkvInfo:
     data = json.loads(text)
     streams = data.get("streams", [])
+    video = [s for s in streams if s.get("codec_type") == "video"]
+    audio = [s for s in streams if s.get("codec_type") == "audio"]
+    dar = _ratio(video[0].get("display_aspect_ratio")) if video else None
     return MkvInfo(
         seconds=float(data.get("format", {}).get("duration") or 0),
-        video=sum(1 for s in streams if s.get("codec_type") == "video"),
-        audio=sum(1 for s in streams if s.get("codec_type") == "audio"),
+        video=len(video),
+        audio=len(audio),
+        audio_channels=tuple(int(s.get("channels") or 0) for s in audio),
+        sar=(_ratio(video[0].get("sample_aspect_ratio")) if video else None) or (1, 1),
+        dar=dar[0] / dar[1] if dar else None,
     )
 
 

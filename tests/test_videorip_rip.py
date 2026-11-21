@@ -197,7 +197,7 @@ def test_move_never_overwrites_and_ignores_part(config, tmp_path):
 
 def test_parse_ffprobe():
     info = videofiles.parse_ffprobe((FIXTURES / "ffprobe_ok.json").read_text())
-    assert info == videofiles.MkvInfo(seconds=6730.04, video=1, audio=2)
+    assert info == videofiles.MkvInfo(seconds=6730.04, video=1, audio=2, audio_channels=(6, 2))
 
 
 def test_attempts_feed_should_eject(config, setup):
@@ -544,7 +544,7 @@ def test_outstanding_bytes_of_other_running_jobs(config, setup):
 
 def test_parse_real_ffprobe_silent_title():
     info = videofiles.parse_ffprobe((FIXTURES / "ffprobe_bluray_real.json").read_text())
-    assert info == videofiles.MkvInfo(seconds=340.298, video=1, audio=0)
+    assert info == videofiles.MkvInfo(seconds=340.298, video=1, audio=0, dar=pytest.approx(16 / 9))
 
 
 def test_check_output_silent_title_only_when_disc_says_so(tmp_path):
