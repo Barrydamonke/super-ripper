@@ -47,8 +47,12 @@ def ffprobe(path: Path) -> MkvInfo:
 PROBE: Callable[[Path], MkvInfo] = ffprobe  # tests replace this
 
 
-def check_output(work: Path, expected_seconds: int) -> Path:
-    """The one ripped file in work, if it looks right; RuntimeError says what's wrong."""
+def check_output(work: Path, expected_seconds: int, expected_audio: int = -1) -> Path:
+    """The one ripped file in work, if it looks right; RuntimeError says what's wrong.
+
+    expected_audio is how many audio streams the scan listed for the title: a title
+    that is silent on the disc (0) may come out silent; unknown (-1) still needs audio.
+    """
     files = sorted(work.glob("*.mkv")) if work.is_dir() else []
     if not files:
         raise RuntimeError("MakeMKV finished but wrote no file.")
@@ -58,7 +62,7 @@ def check_output(work: Path, expected_seconds: int) -> Path:
     info = PROBE(path)
     if info.video < 1:
         raise RuntimeError("The ripped file has no video.")
-    if info.audio < 1:
+    if info.audio < 1 and expected_audio != 0:
         raise RuntimeError("The ripped file has no audio.")
     if expected_seconds and abs(info.seconds - expected_seconds) > max(0.02 * expected_seconds, 5):
         raise RuntimeError(

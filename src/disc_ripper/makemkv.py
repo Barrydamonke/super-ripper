@@ -29,6 +29,7 @@ class Title:
     output_name: str
     segments: str
     name: str
+    audio: int = -1  # audio streams the scan listed; -1 when the scan gave no stream list
 
 
 @dataclass
@@ -106,6 +107,7 @@ def _int(text: str) -> int:
 class RobotParser:
     def __init__(self):
         self._tinfo: dict[int, dict[int, str]] = {}
+        self._streams: dict[int, dict[int, str]] = {}  # title -> stream -> type (SINFO id 1)
         self._label = ""
         self._messages: list[str] = []
 
@@ -121,6 +123,8 @@ class RobotParser:
                     return max(0.0, min(total / maximum, 1.0))
             elif key == "TINFO" and len(values) >= 4:
                 self._tinfo.setdefault(int(values[0]), {})[int(values[1])] = values[3]
+            elif key == "SINFO" and len(values) >= 5 and values[2] == "1":
+                self._streams.setdefault(int(values[0]), {})[int(values[1])] = values[4]
             elif key == "CINFO" and len(values) >= 3 and values[0] == "2":
                 self._label = values[2]
             elif key == "MSG" and len(values) >= 4:
@@ -128,6 +132,12 @@ class RobotParser:
         except ValueError:
             pass
         return None
+
+    def _audio_count(self, title: int) -> int:
+        streams = self._streams.get(title)
+        if streams is None:
+            return -1
+        return sum(1 for kind in streams.values() if kind == "Audio")
 
     def result(self) -> Scan:
         titles = [
@@ -140,6 +150,7 @@ class RobotParser:
                 output_name=attrs.get(27, ""),
                 segments=attrs.get(26, ""),
                 name=attrs.get(2, ""),
+                audio=self._audio_count(number),
             )
             for number, attrs in sorted(self._tinfo.items())
         ]

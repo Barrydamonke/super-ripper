@@ -200,7 +200,8 @@ async def _rip_title(ctx, params: dict, work: Path) -> None:
         hint = makemkv.update_hint(messages)
         detail = " / ".join(messages[-3:]) or f"makemkvcon exit code {code}"
         raise RuntimeError(detail + (" " + hint if hint else ""))
-    src = await asyncio.to_thread(videofiles.check_output, work, params["expected_seconds"])
+    src = await asyncio.to_thread(videofiles.check_output, work, params["expected_seconds"],
+                                    params.get("expected_audio", -1))
     await ctx.report(0.99, "Moving to downloads…")
     stop = threading.Event()
     reserved = await ctx.db(outstanding_bytes, ctx.config.work_dir, ctx.job_id)

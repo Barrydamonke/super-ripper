@@ -540,3 +540,17 @@ def test_outstanding_bytes_of_other_running_jobs(config, setup):
         (config.work_dir / str(job) / "f").write_bytes(b"x" * size)
     assert videorip.outstanding_bytes(setup, config.work_dir, me) == 70
     assert videorip.outstanding_bytes(setup, config.work_dir, None) == 70 + 70
+
+
+def test_parse_real_ffprobe_silent_title():
+    info = videofiles.parse_ffprobe((FIXTURES / "ffprobe_bluray_real.json").read_text())
+    assert info == videofiles.MkvInfo(seconds=340.298, video=1, audio=0)
+
+
+def test_check_output_silent_title_only_when_disc_says_so(tmp_path):
+    stub_mkv(tmp_path, "t.mkv", 340, audio=0)
+    assert videofiles.check_output(tmp_path, 340, expected_audio=0).name == "t.mkv"
+    with pytest.raises(RuntimeError, match="no audio"):
+        videofiles.check_output(tmp_path, 340, expected_audio=3)
+    with pytest.raises(RuntimeError, match="no audio"):
+        videofiles.check_output(tmp_path, 340)  # unknown: still required

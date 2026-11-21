@@ -85,6 +85,7 @@ def test_scan_saves_titles_and_autostarts(config, setup):
     params = json.loads(rip["params"])
     assert (params["role"], params["title"], params["minlength"]) == ("main", 0, 120)
     assert params["rip_id"] == rip["id"] and params["fingerprint"] == disc["fingerprint"]
+    assert params["expected_audio"] == 2  # the scan listed two audio streams for title 0
     assert rip["needs_bytes"] == math.ceil(7516192768 * 1.02)
     row = setup.execute("SELECT * FROM video_rips WHERE rip_id = ?", (rip["id"],)).fetchone()
     assert row["state"] == "ripping" and row["main_title"] == 0

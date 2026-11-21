@@ -238,6 +238,7 @@ class Services:
     def _rip_params(disc, drive, fingerprint: str, title: dict, role: str) -> dict:
         return {"rip_id": 0, "fingerprint": fingerprint, "title": title["number"], "role": role,
                 "minlength": disc["minlength"], "expected_seconds": title["seconds"],
+                "expected_audio": title.get("audio", -1),
                 "sr_name": drive["sr_name"]}
 
     @staticmethod

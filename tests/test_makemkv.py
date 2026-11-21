@@ -86,3 +86,35 @@ def test_parser_degrades_gracefully():
     assert parser.feed("PRGV:x,y,z") is None
     assert makemkv.parse_line('CINFO:2,0,"abc') is not None
     assert makemkv.parse_line('TINFO:0,9,0,""')[1][-1] == ""
+
+
+def _fixture(name):
+    return (FIXTURES / name).read_text(encoding="utf-8").split("\n", 1)[1]
+
+
+def _real_scan(name="info_bluray_real.txt"):
+    return _scan(name)
+
+
+def test_real_bluray_scan():
+    scan = _real_scan()
+    assert scan.label == "The Lego Movie"
+    assert len(scan.titles) == 13
+    main = scan.titles[1]
+    assert (main.seconds, main.size, main.chapters, main.source) == (6035, 26743830528, 11, "00100.mpls")
+    assert main.output_name == "The Lego Movie_t01.mkv"
+    assert main.audio == 15
+    assert scan.titles[0].audio == 0  # a silent clip: video only on the disc
+
+
+def test_audio_counts_and_unknown_without_sinfo():
+    scan = _real_scan("info_dvd.txt")  # synthetic: streams listed for title 0 only
+    assert [t.audio for t in scan.titles] == [2, -1, -1]
+
+
+def test_real_bluray_mkv_output():
+    parser = makemkv.RobotParser()
+    progress = [p for line in _fixture("mkv_bluray_real.txt").splitlines() if (p := parser.feed(line)) is not None]
+    assert progress[-1] == 1.0
+    assert "Copy complete. 1 titles saved." in parser.result().messages
+    assert makemkv.update_hint(parser.result().messages) is None

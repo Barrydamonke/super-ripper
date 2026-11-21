@@ -84,3 +84,12 @@ def test_should_eject():
     assert should_eject([(0, 5, "done"), (1, 6, "cancelled"), (1, 8, "done")])
     assert not should_eject([(0, 5, "cancelled")])
     assert not should_eject([(0, 5, "done"), (1, 6, "interrupted")])
+
+
+def test_real_bluray_picks_the_film_and_starts():
+    from tests.test_makemkv import _real_scan
+
+    scan = _real_scan()
+    assert main_title(scan.titles).number == 1
+    assert hold_reasons(scan.titles, auto_start=True, hold_pressed=False, already_ripped=None,
+                               from_insert=True) == []
