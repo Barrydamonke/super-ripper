@@ -554,3 +554,8 @@ def test_check_output_silent_title_only_when_disc_says_so(tmp_path):
         videofiles.check_output(tmp_path, 340, expected_audio=3)
     with pytest.raises(RuntimeError, match="no audio"):
         videofiles.check_output(tmp_path, 340)  # unknown: still required
+
+
+def test_check_output_rip_wording_is_unchanged(tmp_path):
+    with pytest.raises(RuntimeError, match=r"^MakeMKV finished but wrote no file\.$"):
+        videofiles.check_output(tmp_path / "none", 100)

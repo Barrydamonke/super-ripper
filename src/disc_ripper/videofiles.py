@@ -64,26 +64,29 @@ def ffprobe(path: Path) -> MkvInfo:
 PROBE: Callable[[Path], MkvInfo] = ffprobe  # tests replace this
 
 
-def check_output(work: Path, expected_seconds: int, expected_audio: int = -1) -> Path:
+def check_output(work: Path, expected_seconds: int, expected_audio: int = -1, *, encoded: bool = False) -> Path:
     """The one ripped file in work, if it looks right; RuntimeError says what's wrong.
 
     expected_audio is how many audio streams the scan listed for the title: a title
     that is silent on the disc (0) may come out silent; unknown (-1) still needs audio.
+    encoded=True words the problems for an encoder's output instead of a MakeMKV rip.
     """
+    maker, noun, source = ("The encoder", "encoded file", "the source") if encoded else (
+        "MakeMKV", "ripped file", "the disc")
     files = sorted(work.glob("*.mkv")) if work.is_dir() else []
     if not files:
-        raise RuntimeError("MakeMKV finished but wrote no file.")
+        raise RuntimeError(f"{maker} finished but wrote no file.")
     if len(files) > 1:
-        raise RuntimeError(f"MakeMKV wrote more than one file ({len(files)}); expected one.")
+        raise RuntimeError(f"{maker} wrote more than one file ({len(files)}); expected one.")
     path = files[0]
     info = PROBE(path)
     if info.video < 1:
-        raise RuntimeError("The ripped file has no video.")
+        raise RuntimeError(f"The {noun} has no video.")
     if info.audio < 1 and expected_audio != 0:
-        raise RuntimeError("The ripped file has no audio.")
+        raise RuntimeError(f"The {noun} has no audio.")
     if expected_seconds and abs(info.seconds - expected_seconds) > max(0.02 * expected_seconds, 5):
         raise RuntimeError(
-            f"The ripped file's length is {info.seconds:.0f}s but the disc says {expected_seconds}s.")
+            f"The {noun}'s length is {info.seconds:.0f}s but {source} says {expected_seconds}s.")
     return path
 
 

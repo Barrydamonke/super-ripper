@@ -109,8 +109,9 @@ def test_encode_failure_keeps_raw_and_cleans_work(config, conn, monkeypatch):
     monkeypatch.setenv("FAKE_ENCODE_MODE", "fail")
     raw = make_raw(config)
     row = queue(conn, raw)
-    with pytest.raises(RuntimeError, match="Encode failed"):
+    with pytest.raises(RuntimeError, match="Encode failed") as err:
         go(config, conn, row)
+    assert str(err.value).endswith("See the log for the encoder's messages.")
     assert raw.exists()
     assert not (config.work_dir / f"encode-{row['id']}").exists()
     assert files_in_downloads(config) == ["Film.mkv"]
@@ -130,8 +131,11 @@ def test_encode_stall_message(config, conn, monkeypatch):
 def test_short_output_fails_check(config, conn, monkeypatch):
     monkeypatch.setenv("FAKE_ENCODE_MODE", "short")
     raw = make_raw(config)
-    with pytest.raises(RuntimeError, match="length"):
+    with pytest.raises(RuntimeError, match="length") as err:
         go(config, conn, queue(conn, raw))
+    message = str(err.value)
+    assert message.startswith("The encode failed its check: The encoded file's length is")
+    assert "MakeMKV" not in message and "ripped" not in message and "the source says" in message
     assert files_in_downloads(config) == ["Film.mkv"]
 
 
@@ -139,7 +143,7 @@ def test_squashed_aspect_fails_check(config, conn, monkeypatch):
     monkeypatch.setenv("FAKE_DAR", "1.333")
     raw = make_raw(config)
     row = queue(conn, raw)
-    with pytest.raises(RuntimeError, match=r"picture shape.*1\.33.*1\.78"):
+    with pytest.raises(RuntimeError, match=r"The encode failed its check: the picture shape.*1\.33.*1\.78"):
         go(config, conn, row)
     assert raw.exists() and not (config.work_dir / f"encode-{row['id']}").exists()
 
@@ -225,3 +229,10 @@ def test_finishing_an_encode_wakes_the_pool(config, conn, monkeypatch):
     pool._wakeups = [asyncio.Event()]
     asyncio.run(pool._run(row))
     assert pool._wakeups[0].is_set()
+
+
+def test_encode_check_wording_names_the_encoded_file(config, conn, monkeypatch):
+    monkeypatch.setenv("FAKE_ENCODE_MODE", "no_audio")
+    with pytest.raises(RuntimeError) as err:
+        go(config, conn, queue(conn, make_raw(config)))
+    assert str(err.value) == "The encode failed its check: The encoded file has no audio."

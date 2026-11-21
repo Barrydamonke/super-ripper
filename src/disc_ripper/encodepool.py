@@ -32,6 +32,8 @@ log = logging.getLogger(__name__)
 
 STALL_UNIT_SECONDS = 60  # the stall setting is in minutes; tests shrink this
 ASPECT_TOLERANCE = 0.02
+CHECK_FAILED = "The encode failed its check:"
+SEE_LOG = "See the log for the encoder's messages."
 
 
 def _read_settings(conn):
@@ -83,8 +85,8 @@ def _aspect_check(source_dar: float | None, out_dar: float | None) -> None:
     if not source_dar or not out_dar:
         return
     if abs(out_dar - source_dar) / source_dar > ASPECT_TOLERANCE:
-        raise RuntimeError(f"The encode's picture shape (DAR {out_dar:.2f}) doesn't match the rip's "
-                           f"({source_dar:.2f})")
+        raise RuntimeError(f"{CHECK_FAILED} the picture shape (DAR {out_dar:.2f}) doesn't match the rip's "
+                           f"({source_dar:.2f}).")
 
 
 def _move(config, rip_id, role, out, min_free, cancel, reserved) -> Path:
@@ -152,9 +154,14 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
     code = await _run_tool(ctx, argv, on_line, stall_minutes, work, log_filter=log_filter)
     elapsed = time.monotonic() - started
     if code != 0:
-        raise RuntimeError(" / ".join(tail) or f"The encoder exited with code {code}")
+        said = " / ".join(tail) or f"The encoder exited with code {code}"
+        raise RuntimeError(f"{said}{'' if said.endswith(('.', '!', '?')) else '.'} {SEE_LOG}")
 
-    out = await asyncio.to_thread(videofiles.check_output, work, round(seconds), row["source_audio"])
+    try:
+        out = await asyncio.to_thread(videofiles.check_output, work, round(seconds), row["source_audio"],
+                                      encoded=True)
+    except RuntimeError as exc:
+        raise RuntimeError(f"{CHECK_FAILED} {exc}") from None
     out_info = await asyncio.to_thread(videofiles.PROBE, out)
     _aspect_check(info.dar, out_info.dar)
 
