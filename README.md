@@ -22,6 +22,7 @@ Data-disc ripping comes in a later step.
 2. **Create the work share.** Shares → Add Share → name `disc-ripper-work`, Primary storage **Cache**, Secondary storage **None**. With no secondary storage, Unraid 7 makes it an exclusive share (no FUSE layer), and the mover never touches it.
 3. **Add the container.** Copy `unraid/disc-ripper.xml` to `/boot/config/plugins/dockerMan/templates-user/my-disc-ripper.xml` on the flash drive, then Docker → Add Container → pick `disc-ripper` from the template list. Check the paths and `TZ`, then Apply.
 4. **First start.** Open `http://<server>:8580`, set the admin password, log in, and open Drives. Both drives should show their model, an ID starting with `serial:` (or a `wwid:`/`port:` fallback), and node status `ok`.
+5. **Check the GPU.** The template passes `/dev/dri` through (`--device=/dev/dri`) for the Fast (hardware) encoding preset. On the server, `docker exec disc-ripper vainfo` must list `VAProfileHEVCMain : VAEntrypointEncSlice`. If it doesn't, Fast won't work.
 
 ### How the drives get into the container
 
