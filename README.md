@@ -2,7 +2,7 @@
 
 A single Docker container for Unraid that rips, encodes and burns discs from its own web UI. The design is in [Disc Ripper – Design Plan.md](Disc%20Ripper%20%E2%80%93%20Design%20Plan.md).
 
-Current state: **step 4 (DVD and Blu-ray ripping)**, on top of step 3 (audio CD ripping) and step 2 (detection, queues and the shutdown guard).
+Current state: **steps 4 and 6 are built** (DVD and Blu-ray ripping, and encoding), on top of step 3 (audio CD ripping) and step 2 (detection, queues and the shutdown guard). **Step 5 (identification and import into the library) is next.**
 - **Dashboard** (the home page): shows each enabled drive live, as empty, tray open or disc in, with the disc type and label. It has Eject and Close tray buttons, and lets you queue a *test job*: a pretend job with a chosen length and size that exercises the queue, progress and cache-space check.
 - **Drives page:** labels and enables drives.
 - **Audio CDs:**
@@ -10,7 +10,7 @@ Current state: **step 4 (DVD and Blu-ray ripping)**, on top of step 3 (audio CD 
   - A clean rip files itself into `/data/MEDIA/Music/<Album Artist>/<Album> (<Year>)/`.
   - Anything that needs a decision waits on the **Music** page: no match, several possible releases, unverified tracks, or an album you already have.
 - **Shutdown guard:** reads the Pi's power schedule and tells unraid-backend, through `/api/busy`, to wait while a job runs, for at most the grace period after the scheduled end.
-- **DVDs and Blu-rays:** insert a disc and it is scanned with MakeMKV, then the main title is ripped to MKV into the downloads folder and the disc ejects. Identification, encoding and filing come in later steps.
+- **DVDs and Blu-rays:** insert a disc and it is scanned with MakeMKV, then the main title is ripped to MKV into the downloads folder and the disc ejects. Encoding is described below; identification and filing come in a later step.
 
 Data-disc ripping comes in a later step.
 
@@ -113,6 +113,48 @@ Every job (scans, rips, test jobs) keeps a log in `/config/logs/job-<id>.log`: w
 6. Re-insert a ripped disc: "Already ripped". Rip again works.
 7. Insert a disc too big for the remaining budget: "Waiting for cache space".
 8. Capture real `makemkvcon -r` output (info and mkv) from a DVD and a Blu-ray into `tests/fixtures/makemkv/`, and check the parser against it. The current fixtures are written from MakeMKV's documented format, not captured.
+
+### Encoding
+
+After a rip, the main title is encoded to HEVC, and the encode lands **beside the raw file** as `<name> - <Preset>.mkv` (for example `The Lego Movie_t01 - Standard.mkv`) in the rip's downloads folder. There are three presets (fixed in code, chosen per encode):
+
+- **Standard:** HandBrake, x265 10-bit, preset `slow`, quality RF 20 for Blu-ray and RF 18 for DVD. Slow but small and clean; DVDs are also deinterlaced when combing is detected.
+- **Fast:** ffmpeg on the Intel GPU (`hevc_vaapi`, constant quality `fast_quality`, default 24). Much faster, larger files. DVDs are checked for interlacing first.
+- **Copy only:** a lossless remux into a new MKV, with no re-encoding.
+
+Standard and Fast give one audio track, converted to E-AC-3: 5.1 at 640 kb/s when the source has 3 or more channels, otherwise stereo or mono at 224 kb/s. Every subtitle track, the chapters and the metadata are kept. Encodes run at the lowest CPU and disk priority.
+
+Settings has an **Encoding** group:
+- **encode_after_rip:** Standard, Fast, Copy only or Off (default Standard). A finished rip queues its encode on its own.
+- **encode_slots:** encodes run at once, 1 or 2 (default 1).
+- **fast_quality:** the Fast preset's quality number, 1 to 51, lower is better (default 24; tune it after a test encode).
+- **raw_keep_hours:** how long the raw file is kept after a good encode (default 24).
+- **encode_stall_minutes:** stop an encoder that prints nothing for this long (default 10).
+
+Encodes queue behind the shutdown guard (a running encode holds shutdown like a rip, and an encode that would run past the grace period waits for the next session) and behind the work-area space check. Stopping the container mid-encode marks the encode interrupted and it restarts at the next boot.
+
+**Raw deletion.** The raw rip is deleted `raw_keep_hours` after a good encode (any preset, including Copy only), as long as the encode's output still exists and no other encode of that file is queued or running. To keep the raw for another encode, queue it within that window. The **Delete raw now** button on the Films page does the same at once, after a confirmation, and is refused unless a good encode exists. The disc is the backup. The Films page then shows "raw deleted".
+
+**Films page** (`/films`, in the nav): the running and queued encodes at the top (the dashboard's **Encoding** panel shows the same lines), then each rip, newest first, with its files. Each file has an **Encode** menu (and **Encode all** per rip), a failed encode shows its reason with **Retry** and **log**, and every encode has its own log (`/config/logs/`). It updates live.
+
+**GPU setup.** The template passes `--device=/dev/dri`. The entrypoint keeps the render group itself, clears the other groups, and warns in the container log if the render node is root-only (then Fast cannot run as the app user). Check with `docker exec disc-ripper vainfo`: it must list `VAProfileHEVCMain : VAEntrypointEncSlice`. Without it, use Standard or Copy only.
+
+### Testing step 6 on the server
+
+1. Encode The Lego Movie with Standard and Madagascar with Fast. Play both in Jellyfin.
+2. Check Fast's quality and size, and tune `fast_quality`.
+3. Check Madagascar's Standard encode for combing (deinterlacing).
+4. Press **Delete raw now** on one film. Let another raw expire after `raw_keep_hours` (or set it to 0 temporarily).
+5. Stop the container mid-encode. The encode restarts at the next boot.
+6. Start an encode that would run past the grace period. It waits for the next session.
+7. Capture real encoder output for the parser fixtures (the current ones are synthetic). Use a short title and keep the files on the share:
+   ```
+   mkdir -p /mnt/user/Barry-server/fixtures
+   docker exec disc-ripper sh -c 'HandBrakeCLI --json --stop-at seconds:60 --encoder x265_10bit --encoder-preset slow --quality 20 -i "/data/downloads/disc-ripper/<rip_id>/<file>.mkv" -o /tmp/hb-test.mkv' > /mnt/user/Barry-server/fixtures/handbrake.json.txt 2>&1
+   docker exec disc-ripper sh -c 'ffmpeg -nostdin -y -vaapi_device /dev/dri/renderD128 -i "/data/downloads/disc-ripper/<rip_id>/<file>.mkv" -t 60 -vf format=nv12,hwupload -c:v hevc_vaapi -rc_mode CQP -qp 24 -c:a eac3 -b:a 640k -progress pipe:1 /tmp/ff-test.mkv' > /mnt/user/Barry-server/fixtures/ffmpeg-progress.txt 2>/mnt/user/Barry-server/fixtures/ffmpeg-stderr.txt
+   docker exec disc-ripper rm -f /tmp/hb-test.mkv /tmp/ff-test.mkv
+   ```
+   Then copy them into `tests/fixtures/encode/` and check the parsers against them. Do this once for a DVD and once for a Blu-ray.
 
 ## Update
 
