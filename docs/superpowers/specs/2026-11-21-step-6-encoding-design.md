@@ -70,13 +70,17 @@ The main plan's step 6 is split in two (decided with the owner):
 - **Hardware:** i5-8500 (6 cores) with UHD 630. Software x265 slow is roughly
   3–4 hours per 1080p film. VAAPI is the hardware path (Jellyfin moved off QSV
   after kernel crashes).
-- **Image:** add Debian's `handbrake-cli`, Intel's VAAPI media driver (iHD; the
-  `intel-media-va-driver-non-free` package if the free one lacks HEVC encode on
-  this generation, which needs the non-free component in apt sources) and
-  `vainfo` for the smoke test. `ffmpeg` is already there.
-- **Unraid template:** pass `/dev/dri` into the container and add the host's
-  `render` group (`--group-add <gid>`), so uid 99 can open `/dev/dri/renderD128`.
-  The README says how to find the gid.
+- **Image:** add Debian's `handbrake-cli`, Intel's VAAPI media driver and
+  `vainfo` for the smoke test; `ffmpeg` is already there.
+  - The driver is `intel-media-va-driver-non-free`, which needs Debian's
+    `non-free` component. The free build is "limited", and HEVC encoding on this
+    chip generation needs Intel's closed shader kernels.
+  - The build must confirm that Debian's HandBrakeCLI offers `x265_10bit` and
+    `eac3`, since distro builds have lacked them.
+- **GPU access:** the Unraid template passes `/dev/dri` into the container. The
+  entrypoint drops to uid 99 with `setpriv --clear-groups`, which would also drop
+  any `--group-add`. So it reads the render node's group itself and keeps it
+  (`setpriv --groups <gid>`), and the template needs no group setting.
 - **Encodes don't belong to a drive,** but the `jobs` table requires a `drive_id`
   and its workers are per drive. Encodes therefore get their own table and pool
   (see Design).
@@ -108,7 +112,9 @@ The main plan's step 6 is split in two (decided with the owner):
   `--json` progress.
 - **Fast:** `ffmpeg -vaapi_device /dev/dri/renderD128`, video
   `-vf format=nv12,hwupload` (plus `deinterlace_vaapi` first when the source is
-  interlaced) and `-c:v hevc_vaapi -rc_mode CQP -qp <n>`. `<n>` is the setting
+  interlaced) and `-c:v hevc_vaapi -rc_mode CQP -qp <n>` (anamorphic DVDs also get their
+  sample aspect ratio written back with `-bsf:v hevc_metadata=sample_aspect_ratio=…`,
+  because `hevc_vaapi` is known to lose it, which would squash 16:9 DVDs). `<n>` is the setting
   `fast_quality` (default 24 *(my call, a starting point)*), tuned after the
   owner's first test encode. Interlacing: for DVDs, run ffmpeg's `idet` filter on
   three 20-second stretches (at 20%, 50% and 80% of the film) before encoding;
@@ -189,7 +195,8 @@ The raw file's deletion is recorded on the rip: `video_rips.files[title]` gains
    over `source_seconds`. The message reads "Standard — 42% · finishes ~16:40".
 3. **Check:** ffprobe reads it; it has one video stream; it has audio if the source
    had audio; duration within max(2%, 5 s) of the source's (reuse
-   `videofiles.check_output`'s logic).
+   `videofiles.check_output`'s logic); display aspect within 2% of the source's
+   (catches a squashed DVD).
 4. **Move** beside the raw file in `downloads/<rip_id>/` (or `extras/`), with the
    step 4 move: `.part`, fsync, never overwrite, space check, cancel-safe.
 5. Record `output`, `output_bytes`, `speed`; state `done`.

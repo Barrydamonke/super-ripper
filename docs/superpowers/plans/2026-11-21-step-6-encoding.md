@@ -74,15 +74,28 @@
 
 ### Task 1: Image and Unraid template
 
-**Files:** Modify `Dockerfile`, `.github/workflows/build.yml`, `unraid/disc-ripper.xml`, `README.md`.
+**Files:** Modify `Dockerfile`, `docker/entrypoint.sh`, `.github/workflows/build.yml`, `unraid/disc-ripper.xml`, `README.md`.
 
 **Interfaces:** Produces an image with `HandBrakeCLI`, `ffmpeg` with `hevc_vaapi`, the iHD driver and `vainfo`, all runnable as uid 99.
 
-- [ ] **Step 1: Install the packages.** In the final stage's `apt-get install`, add `handbrake-cli intel-media-va-driver vainfo`. If `vainfo` on the server later shows no HEVC encode entrypoint for the UHD 630, switch to `intel-media-va-driver-non-free` (enable the `non-free` component in `/etc/apt/sources.list.d/debian.sources`) and note it in the README. Set `ENV LIBVA_DRIVER_NAME=iHD`.
-- [ ] **Step 2: Extend the CI smoke checks.** As uid 99: `HandBrakeCLI --version 2>&1 | grep -q HandBrake` and `ffmpeg -hide_banner -encoders | grep -q hevc_vaapi`. `vainfo` is not run in CI (there's no GPU).
-- [ ] **Step 3: Update the template.** In `unraid/disc-ripper.xml` `ExtraParams`, append `--device=/dev/dri`. Add a variable-free note to the description: the `render` group. In the README "Install on Unraid" section, add: find the gid with `stat -c %g /dev/dri/renderD128` on the host, and add `--group-add=<gid>` to Extra Parameters. On the server, `docker exec disc-ripper vainfo` should list `VAProfileHEVCMain : VAEntrypointEncSlice` (or `EncSliceLP`).
-- [ ] **Step 4: Build.** Run `docker build -t disc-ripper:dev .`, then the smoke checks. Expected: both exit 0. Record the image size before and after.
-- [ ] **Step 5: Commit.** `git commit -m "build: HandBrakeCLI, Intel VAAPI driver; GPU in the Unraid template"`
+- [ ] **Step 1: Install the packages.**
+  - In the final stage, enable Debian's `non-free` component: add `non-free` to `Components:` in `/etc/apt/sources.list.d/debian.sources`.
+  - In the `apt-get install`, add `handbrake-cli intel-media-va-driver-non-free vainfo`.
+  - Set `ENV LIBVA_DRIVER_NAME=iHD`.
+  - Why non-free from the start: Intel's free driver build is documented as "features would be limited". On Gen9-family chips like the UHD 630, HEVC encoding runs through Intel's closed shader kernels, which only the non-free build ships, and HEVC has no low-power encode path on this generation.
+- [ ] **Step 2: Let the app user open the GPU.**
+  - The entrypoint drops to uid 99 with `setpriv --clear-groups`, which also strips any `--group-add` given to the container. So a `render` group added in the template would never reach the app.
+  - Change `docker/entrypoint.sh`: when `/dev/dri/renderD128` exists, read its gid (`stat -c %g`) and pass `--groups <gid>` to `setpriv` instead of `--clear-groups`. Otherwise keep `--clear-groups`. No `--group-add` is needed in the template.
+  - Test it in the image check: create a char device with a non-100 gid in a test container, if feasible; otherwise cover the gid-reading shell logic in `tests/test_entrypoint.py` by running the script's helper with `sh` against a temp file.
+- [ ] **Step 3: Extend the CI smoke checks.** As uid 99:
+  - `ffmpeg -hide_banner -encoders | grep -q hevc_vaapi`;
+  - `HandBrakeCLI --help 2>&1 | grep -q x265_10bit`;
+  - `HandBrakeCLI --help 2>&1 | grep -qw eac3`.
+
+  Debian's HandBrake links the system x265 and ffmpeg, and missing 10-bit x265 or E-AC-3 encoders have happened in distro builds. If either check fails, stop and report: the Standard preset needs a change (8-bit `x265`, or a different audio encoder). `vainfo` is not run in CI (there's no GPU).
+- [ ] **Step 4: Update the template.** In `unraid/disc-ripper.xml` `ExtraParams`, append `--device=/dev/dri`. In the README "Install on Unraid", add that on the server `docker exec disc-ripper vainfo` must list `VAProfileHEVCMain : VAEntrypointEncSlice`. If it doesn't, Fast won't work.
+- [ ] **Step 5: Build.** Run `docker build -t disc-ripper:dev .`, then the smoke checks. Expected: all exit 0. Record the image size before and after.
+- [ ] **Step 6: Commit.** `git commit -m "build: HandBrakeCLI, Intel VAAPI driver; GPU group for the app user"`
 
 ### Task 2: Schema, settings and the encodes table
 
@@ -127,7 +140,7 @@
 
 **Files:**
 - Create: `src/disc_ripper/encoding.py`
-- Modify: `src/disc_ripper/videofiles.py` (`MkvInfo` gains `audio_channels: tuple[int, ...] = ()`, filled by `parse_ffprobe`)
+- Modify: `src/disc_ripper/videofiles.py`. `MkvInfo` gains `audio_channels: tuple[int, ...] = ()`, `sar: tuple[int, int] = (1, 1)` and `dar: float | None = None` (the first video stream's `sample_aspect_ratio` and `display_aspect_ratio`), all filled by `parse_ffprobe`.
 - Test: `tests/test_encoding.py`
 
 **Interfaces:**
@@ -136,15 +149,16 @@
 - `audio_plan(channels: int) -> tuple[int, int]`: returns (output channels, kb/s). `8 → (6, 640)`, `6 → (6, 640)`, `2 → (2, 224)`, `1 → (1, 224)`.
 - `handbrake_prefix()` and `ffmpeg_prefix()`: the `HANDBRAKE_BIN` and `FFMPEG_BIN` env overrides (path or JSON list), like `cyanrip.command_prefix`.
 - `priority_prefix() -> list[str]`: `["nice", "-n", "19", "ionice", "-c", "3"]` on POSIX, `[]` otherwise.
-- `encode_argv(preset, source: Path, output: Path, *, disc_type, audio_channels: int | None, interlaced: bool, fast_quality: int) -> list[str]`, without the priority prefix. `audio_channels=None` means the source has no audio. Exact lists:
+- `encode_argv(preset, source: Path, output: Path, *, disc_type, audio_channels: int | None, interlaced: bool, fast_quality: int, sar: tuple[int, int] = (1, 1)) -> list[str]`, without the priority prefix. `audio_channels=None` means the source has no audio. Exact lists:
   - Standard, Blu-ray, 6-channel audio:
-    `[*handbrake_prefix(), "-i", src, "-o", out, "--format", "av_mkv", "--markers", "--encoder", "x265_10bit", "--encoder-preset", "slow", "--quality", "20", "--crop-mode", "none", "--audio", "1", "--aencoder", "eac3", "--ab", "640", "--mixdown", "5point1", "--all-subtitles", "--subtitle-burned=none", "--json"]`
+    `[*handbrake_prefix(), "-i", src, "-o", out, "--format", "av_mkv", "--markers", "--encoder", "x265_10bit", "--encoder-preset", "slow", "--quality", "20", "--crop-mode", "none", "--auto-anamorphic", "--audio", "1", "--aencoder", "eac3", "--ab", "640", "--mixdown", "5point1", "--all-subtitles", "--subtitle-burned=none", "--json"]`
   - Standard, DVD: the same with `"--quality", "18"`, and `"--comb-detect", "--decomb", "--detelecine"` inserted before `"--audio"`.
   - Standard with stereo audio: `"--ab", "224", "--mixdown", "stereo"`. With mono: `"--mixdown", "mono"`.
   - Standard with no audio: the `--audio … --mixdown …` group is replaced by `"--audio", "none"`.
   - Fast:
     `[*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-y", "-vaapi_device", "/dev/dri/renderD128", "-i", src, "-map", "0:v:0", "-map", "0:a:0?", "-map", "0:s?", "-map_chapters", "0", "-vf", "format=nv12,hwupload", "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", "24", "-c:a", "eac3", "-b:a", "640k", "-ac", "6", "-c:s", "copy", "-progress", "pipe:1", "-nostats", out]`
-    With `interlaced=True`, the filter is `"format=nv12,hwupload,deinterlace_vaapi"`. With stereo: `"-b:a", "224k", "-ac", "2"`. With no audio: drop `-map 0:a:0?` and the audio options and add `"-an"`.
+    With `interlaced=True`, the filter is `"format=nv12,hwupload,deinterlace_vaapi"`.
+    When `sar != (1, 1)` (anamorphic DVDs), insert `"-bsf:v", f"hevc_metadata=sample_aspect_ratio={n}/{d}"` before `"-progress"`. `hevc_vaapi` is known to drop the aspect ratio when the driver won't write the stream's header fields (FFmpeg tickets #8376 and #6276), which turns 16:9 DVDs into squashed 720×576 pictures. With stereo: `"-b:a", "224k", "-ac", "2"`. With no audio: drop `-map 0:a:0?` and the audio options and add `"-an"`.
   - Copy:
     `[*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-y", "-i", src, "-map", "0", "-c", "copy", "-progress", "pipe:1", "-nostats", out]`
 - `idet_argv(source: Path, start_seconds: float, seconds: float = 20) -> list[str]`: `[*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-ss", f"{start:.0f}", "-t", "20", "-i", src, "-map", "0:v:0", "-vf", "idet", "-f", "null", "-"]`.
@@ -157,7 +171,8 @@
   - `test_copy_argv_exact`;
   - `test_idet_argv`;
   - `test_priority_prefix_posix_only` (monkeypatch `os.name`);
-  - `test_parse_ffprobe_audio_channels`: a stream with `"channels": 6`, then `(6,)`.
+  - `test_parse_ffprobe_audio_channels_and_aspect`: an audio stream with `"channels": 6` gives `(6,)`; a video stream with `"sample_aspect_ratio": "64:45", "display_aspect_ratio": "16:9"` gives `sar == (64, 45)` and `dar == pytest.approx(1.778, abs=0.001)`; `"0:1"` or a missing SAR gives `(1, 1)`;
+  - `test_fast_anamorphic_sets_sar`: `sar=(64, 45)` puts `-bsf:v hevc_metadata=sample_aspect_ratio=64/45` in the argv; `(1, 1)` doesn't.
   
   Paths in the expected lists are `str(Path(...))`.
 - [ ] **Step 2: Run them.** `pytest tests/test_encoding.py tests/test_videorip_rip.py -q`. Expected: the new tests FAIL.
@@ -171,7 +186,11 @@
 
 **Interfaces:**
 - `class HandBrakeProgress`: `feed(line) -> float | None`. HandBrake `--json` prints blocks like `Progress: {` … `"Progress": 0.4123,` … `"State": "WORKING"`, spread over lines. Track the latest `"Progress": <float>` inside a `WORKING` block, and return it when the value changes. `"State": "WORKDONE"` gives `1.0`.
-- `class FfmpegProgress(source_seconds: float)`: `feed(line) -> float | None`. `out_time_us=<n>` gives `n / 1e6 / source_seconds` (clamped 0–1); `progress=end` gives `1.0`.
+- `class FfmpegProgress(source_seconds: float)`: `feed(line) -> float | None`. `out_time_us=<n>` gives `n / 1e6 / source_seconds` (clamped 0–1); `progress=end` gives `1.0`. It must:
+  - ignore `out_time_us=N/A` and negative values;
+  - never go backwards (keep the maximum so far);
+  - cap a jump of more than 10% in one update at the previous value plus 1%. With copied subtitle streams, ffmpeg's reported time is known to be erratic and can snap to subtitle timestamps.
+- `is_progress_noise(line: str) -> bool`: True for the lines that would flood a log over a multi-hour encode, namely ffmpeg's `-progress` keys (`frame=`, `fps=`, `stream_`, `bitrate=`, `total_size=`, `out_time`, `dup_frames=`, `drop_frames=`, `speed=`, `progress=continue`) and HandBrake's JSON progress blocks (lines inside a `Progress: {` … `}` block, tracked with state, so it's a small class `ProgressNoise` with `__call__`). `progress=end`, errors and everything else are kept.
 - `parse_idet(text: str) -> bool`: reads the last `Multi frame detection: TFF: a BFF: b Progressive: c Undetermined: d` line. Interlaced when `a + b > c`.
 - `estimate_seconds(source_seconds, preset, disc_type, recent: list[float]) -> tuple[float, bool]`: returns (seconds, rough). It uses the mean of `recent` when it's non-empty, else the default speed table. `rough = not recent`.
 - `estimate_size(source_bytes, preset) -> int`, using the factors in Global Constraints.
@@ -180,6 +199,8 @@
 - [ ] **Step 1: Write the failing tests.**
   - `test_handbrake_progress_fixture` (monotonic, ends at 1.0);
   - `test_ffmpeg_progress_fixture`;
+  - `test_ffmpeg_progress_ignores_na_jumps_and_going_back`;
+  - `test_progress_noise_filter`: ffmpeg keys and a HandBrake progress block are noise; `progress=end`, `x265 [info]: ...` and an error line are not;
   - `test_parse_idet` (interlaced and progressive samples);
   - `test_estimate_defaults_and_history`: Standard Blu-ray 6035 s with no history gives `(15087.5, True)`; with history `[0.5, 0.5]` it gives `(12070.0, False)`;
   - `test_estimate_size`;
@@ -199,7 +220,7 @@
 
 **Files:**
 - Create: `src/disc_ripper/encodepool.py`, `tests/fixtures/encode/fake_encoder.py` (one script used for both `HANDBRAKE_BIN` and `FFMPEG_BIN`; mode from `FAKE_ENCODE_MODE` = ok | fail | hang | short | no_audio; it replays the progress fixtures and writes the output file named by `-o` or the last argv item, as a JSON stub `{"seconds":…, "video":1, "audio":n, "audio_channels":[6]}`; for idet runs, which have `-f null`, it prints an idet summary chosen by `FAKE_IDET` = progressive | interlaced)
-- Modify: `src/disc_ripper/runner.py` (`JobContext.__init__` gains `log: joblog.JobLog | None = None`, defaulting to the job log), `src/disc_ripper/busy.py`, and the `SpaceChecker` call site in `runner.py` (running bytes = `jobs.running_bytes + encodes.reserved_bytes`)
+- Modify: `src/disc_ripper/runner.py` (`JobContext.__init__` gains `log: joblog.JobLog | None = None`, defaulting to the job log; `run_process` gains `log_filter: Callable[[str], bool] | None = None`, and lines it returns True for are not written to the log; `on_line` still sees every line), `src/disc_ripper/busy.py`, and the `SpaceChecker` call site in `runner.py` (running bytes = `jobs.running_bytes + encodes.reserved_bytes`)
 - Test: `tests/test_encodepool.py`, `tests/test_busy.py`
 
 **Interfaces:**
@@ -243,8 +264,8 @@
   2. Read `fast_quality` and `encode_stall_minutes`. Make `/work/encode-<id>/`.
   3. For `fast` and DVD, run idet at 20%, 50% and 80% of `source_seconds` (`idet_argv`). Interlaced if most of the three say so. Log the result.
   4. Read the source's first audio channel count with `videofiles.PROBE(source).audio_channels` (None when there's no audio).
-  5. Build `priority_prefix() + encode_argv(...)` and run it with `ctx.run_process(..., idle_timeout=minutes*STALL_UNIT_SECONDS)`. Feed lines to the preset's progress parser and report "Standard — 42%" with an estimated finish from the rate so far. `runner.ProcessStalled` becomes `RuntimeError("The encoder stopped responding: no output for N minutes, so it was stopped. Press Retry; the log has the encoder's last messages.")`. A non-zero exit becomes an error with the last 3 output lines.
-  6. Run `videofiles.check_output(work, round(source_seconds), row.source_audio)`.
+  5. Build `priority_prefix() + encode_argv(...)`, passing `sar=PROBE(source).sar` for Fast, and run it with `ctx.run_process(..., idle_timeout=minutes*STALL_UNIT_SECONDS, log_filter=encoding.ProgressNoise())`. Feed lines to the preset's progress parser and report "Standard — 42%" with an estimated finish from the rate so far. `runner.ProcessStalled` becomes `RuntimeError("The encoder stopped responding: no output for N minutes, so it was stopped. Press Retry; the log has the encoder's last messages.")`. A non-zero exit becomes an error with the last 3 output lines.
+  6. Run `videofiles.check_output(work, round(source_seconds), row.source_audio)`. Then compare the output's `dar` with the source's: more than 2% apart fails with "The encode's picture shape (DAR 1.33) doesn't match the rip's (1.78)". This catches a squashed anamorphic DVD.
   7. Run `videofiles.move_to_downloads(config, rip_id, role, out, min_free_gb=…, cancel=event, reserved_bytes=…)`, cancel-safe exactly like `videorip._rip_title`'s shielded move.
   8. Remove the work folder. `finish(done, output, output_bytes, speed=source_seconds / elapsed)`.
   9. On any failure, remove the work folder and re-raise. The raw file is never touched.
@@ -257,6 +278,8 @@
   - `test_encode_failure_keeps_raw_and_cleans_work`;
   - `test_encode_stall_message`;
   - `test_short_output_fails_check`;
+  - `test_squashed_aspect_fails_check`: the fake writes `dar` 1.333 for a 1.778 source, so the encode fails with "picture shape";
+  - `test_encode_log_stays_small`: a fake encode emitting 10,000 progress blocks leaves a log under 50 KB that still holds the command and `exit code 0`;
   - `test_missing_source_fails_cleanly`;
   - `test_cancel_leaves_nothing_in_downloads`;
   - `test_speed_recorded`.
