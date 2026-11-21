@@ -12,9 +12,12 @@ _SOURCE_FIELDS = ("rip_id", "title", "role", "source", "disc_type", "source_seco
                   "source_audio", "preset")
 
 
-def _insert_unless_active(conn: sqlite3.Connection, fields: dict, now: str) -> int | None:
+def _insert_unless_active(conn: sqlite3.Connection, fields: dict, now: str, check=None) -> int | None:
     conn.execute("BEGIN IMMEDIATE")
     try:
+        if check is not None and not check(conn):  # evaluated inside the write transaction
+            conn.rollback()
+            return None
         busy = conn.execute(
             f"SELECT 1 FROM encodes WHERE rip_id = ? AND title = ? AND state IN {_ACTIVE}",  # noqa: S608
             (fields["rip_id"], fields["title"])).fetchone()
@@ -40,12 +43,14 @@ def _insert_unless_active(conn: sqlite3.Connection, fields: dict, now: str) -> i
 
 
 def create(conn: sqlite3.Connection, *, rip_id: int, title: int, role: str, source: Path, disc_type: str,
-           source_seconds: float, source_bytes: int, source_audio: int, preset: str, now: str) -> int | None:
-    """Queue an encode; None when that (rip_id, title) already has one queued or running."""
+           source_seconds: float, source_bytes: int, source_audio: int, preset: str, now: str,
+           check=None) -> int | None:
+    """Queue an encode; None when that (rip_id, title) already has one queued or running,
+    or when check(conn) (run inside the same transaction) is false."""
     return _insert_unless_active(conn, {
         "rip_id": rip_id, "title": title, "role": role, "source": str(source), "disc_type": disc_type,
         "source_seconds": source_seconds, "source_bytes": source_bytes, "source_audio": source_audio,
-        "preset": preset}, now)
+        "preset": preset}, now, check)
 
 
 def get(conn: sqlite3.Connection, encode_id: int) -> sqlite3.Row | None:

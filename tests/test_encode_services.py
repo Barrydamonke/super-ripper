@@ -194,3 +194,71 @@ def test_start_requeues_interrupted(config, setup, monkeypatch):
     asyncio.run(main())
     assert seen == ["queued"]
     assert encodes_of(setup)[0]["state"] == "queued"
+
+
+# -- review fixes ----------------------------------------------------------------
+
+
+def test_queue_refused_without_scan_length(config, setup, filed):
+    services, rip, raw, out, enc = filed
+    with setup:
+        setup.execute("UPDATE encodes SET state = 'failed' WHERE id = ?", (enc,))
+    # the fixture's disc has an empty scan: no length to check the encode against
+    result = asyncio.run(services.queue_encode_result(rip, 0, "standard"))
+    assert result == (None, "The rip's scan is missing, so its length can't be checked; can't encode.")
+    scan = {"titles": [{"number": 0, "seconds": 0, "audio": 1}]}
+    with setup:
+        setup.execute("UPDATE video_discs SET scan = ?", (json.dumps(scan),))
+    assert asyncio.run(services.queue_encode(rip, 0, "standard")) is None  # zero seconds
+    with setup:
+        setup.execute("DELETE FROM video_discs")
+    assert asyncio.run(services.queue_encode(rip, 0, "standard")) is None  # no disc row
+    assert [r["state"] for r in encodes_of(setup)] == ["failed"]
+
+
+def test_queue_between_flag_and_unlink_is_refused(filed, setup, monkeypatch):
+    services, rip, raw, out, enc = filed
+    scan = {"titles": [{"number": 0, "seconds": 60, "audio": 1}]}
+    with setup:
+        setup.execute("UPDATE video_discs SET scan = ?", (json.dumps(scan),))
+    seen = []
+    real = Services._unlink_raw
+
+    def racing_unlink(path):
+        seen.append(services._db(services._queue_encode, rip, 0, "fast"))  # a queue lands mid-delete
+        real(path)
+
+    monkeypatch.setattr(Services, "_unlink_raw", staticmethod(racing_unlink))
+    assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0) is None
+    assert seen[0][0] is None
+    assert [r["state"] for r in encodes_of(setup)] == ["done"]
+    assert not raw.exists()
+
+
+def test_unlink_failure_rolls_the_flag_back(filed, setup, monkeypatch):
+    services, rip, raw, out, enc = filed
+
+    def broken(path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Services, "_unlink_raw", staticmethod(broken))
+    error = services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0)
+    assert "Couldn't delete" in error and raw.exists()
+    assert "raw_deleted_at" not in files_of(setup, rip)["0"]
+
+
+def test_truncated_output_never_lets_raw_go(filed, setup):
+    services, rip, raw, out, enc = filed
+    out.write_bytes(b"")  # emptied
+    assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0) is not None
+    out.write_bytes(b"ab")  # replaced by something of another size
+    assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0) is not None
+    assert raw.exists()
+
+
+def test_no_finish_time_refuses_instead_of_raising(filed, setup):
+    services, rip, raw, out, enc = filed
+    with setup:
+        setup.execute("UPDATE encodes SET finished_at = NULL WHERE id = ?", (enc,))
+    assert "isn't recorded" in services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=24)
+    assert raw.exists()

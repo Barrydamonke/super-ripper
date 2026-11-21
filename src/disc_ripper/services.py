@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 
 SCHEDULE_REFRESH_SECONDS = 300
 RAW_SWEEP_SECONDS = 600
+SCAN_MISSING = "The rip's scan is missing, so its length can't be checked; can't encode."
 GUARD_TICK_SECONDS = 60
 CD_BYTES_PER_SECOND = 176_400  # 44.1 kHz, 16-bit stereo
 FLAC_RATIO = 0.75  # generous: FLAC is usually 50-70% of the raw audio
@@ -52,6 +53,17 @@ def _same_file(a: Path, b: Path) -> bool:
         return a.samefile(b)
     except OSError:  # one of them doesn't exist
         return a == b
+
+
+def _output_intact(row) -> bool:
+    """The encode's output is still a file of the size it was recorded with (and not empty)."""
+    if not row["output"]:
+        return False
+    try:
+        path = Path(row["output"])
+        return path.is_file() and path.stat().st_size > 0 and path.stat().st_size == row["output_bytes"]
+    except OSError:
+        return False
 
 
 def _configure_logging() -> None:
@@ -401,42 +413,56 @@ class Services:
 
     # -- encodes ---------------------------------------------------------------
 
-    def _queue_encode(self, conn, rip_id: int, title: int, preset: str) -> int | None:
+    def _queue_encode(self, conn, rip_id: int, title: int, preset: str) -> tuple[int | None, str | None]:
+        """(encode id, None) or (None, why it was refused)."""
         rip = conn.execute("SELECT * FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
-        if rip is None:
-            return None
-        entry = json.loads(rip["files"] or "{}").get(str(title))
-        if entry is None or entry.get("raw_deleted_at"):
-            return None
+        entry = json.loads(rip["files"] or "{}").get(str(title)) if rip else None
+        if entry is None:
+            return None, "That file isn't part of this rip."
+        if entry.get("raw_deleted_at"):
+            return None, "The raw rip has been deleted, so it can't be encoded."
         source = Path(entry["path"])
         try:
             size = source.stat().st_size
         except OSError:  # the raw file is gone
-            return None
+            return None, "The raw rip is no longer on disk."
         disc = conn.execute("SELECT disc_type, scan FROM video_discs WHERE fingerprint = ?",
                             (rip["fingerprint"],)).fetchone()
         scanned = {}
         if disc is not None:
-            scanned = {t["number"]: t for t in json.loads(disc["scan"] or "{}").get("titles", [])}.get(title, {})
-        return encodes.create(
+            try:
+                scanned = {t["number"]: t for t in json.loads(disc["scan"] or "{}").get("titles", [])}.get(title, {})
+            except (ValueError, KeyError, TypeError, AttributeError):
+                scanned = {}
+        seconds = scanned.get("seconds") if isinstance(scanned, dict) else None
+        if disc is None or not isinstance(seconds, (int, float)) or seconds <= 0:
+            return None, SCAN_MISSING
+        encode_id = encodes.create(
             conn, rip_id=rip_id, title=title, role=entry.get("role", "title"), source=source,
-            disc_type=disc["disc_type"] if disc is not None else "dvd",
-            source_seconds=float(scanned.get("seconds", 0)), source_bytes=size,
-            source_audio=int(scanned.get("audio", -1)), preset=preset, now=utc_now())
+            disc_type=disc["disc_type"], source_seconds=float(seconds), source_bytes=size,
+            source_audio=int(scanned.get("audio", -1)), preset=preset, now=utc_now(),
+            check=lambda c: not video_rips.raw_deleted(c, rip_id, title))  # same transaction as the insert
+        if encode_id is None:
+            return None, "This file already has an encode waiting or running, or its raw rip was just deleted."
+        return encode_id, None
 
-    async def queue_encode(self, rip_id: int, title: int, preset: str) -> int | None:
-        """Queue an encode of one ripped file. None when refused: the raw is deleted or unknown,
-        or this file already has an encode queued or running."""
-        encode_id = await asyncio.to_thread(self._db, self._queue_encode, rip_id, title, preset)
+    async def queue_encode_result(self, rip_id: int, title: int, preset: str) -> tuple[int | None, str | None]:
+        """Like queue_encode, but also says why it was refused (for the page)."""
+        encode_id, error = await asyncio.to_thread(self._db, self._queue_encode, rip_id, title, preset)
         if encode_id is not None:
             self.encoder.wake()
             await self.encodes_changed()
-        return encode_id
+        return encode_id, error
+
+    async def queue_encode(self, rip_id: int, title: int, preset: str) -> int | None:
+        """Queue an encode of one ripped file. None when refused (queue_encode_result says why):
+        the raw is deleted or unknown, the scan is missing, or the file already has an encode active."""
+        return (await self.queue_encode_result(rip_id, title, preset))[0]
 
     def _queue_all(self, conn, rip_id: int, preset: str) -> list[int]:
         row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
         numbers = sorted(int(t) for t in json.loads(row["files"] or "{}")) if row else []
-        ids = [self._queue_encode(conn, rip_id, t, preset) for t in numbers]
+        ids = [self._queue_encode(conn, rip_id, t, preset)[0] for t in numbers]
         return [i for i in ids if i is not None]
 
     async def encode_all(self, rip_id: int, preset: str) -> list[int]:
@@ -482,35 +508,58 @@ class Services:
         Returns why it was refused, or None when the raw is deleted. keep_hours None means "now";
         otherwise the first good encode must have finished that long ago. Only the raw file goes:
         never an encode's output, never a folder."""
-        rip = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
-        entry = json.loads(rip["files"] or "{}").get(str(title)) if rip else None
-        if entry is None:
-            return "That file isn't part of this rip."
-        if entry.get("raw_deleted_at"):
-            return "The raw rip has already been deleted."
-        rows = conn.execute("SELECT * FROM encodes WHERE rip_id = ? AND title = ? ORDER BY id",
-                            (rip_id, title)).fetchall()
-        if any(r["state"] in ("queued", "running") for r in rows):
-            return "Another encode of this file is waiting or running, so the raw rip is kept."
-        good = [r for r in rows if r["state"] == "done" and r["output"] and Path(r["output"]).is_file()]
-        if not good:
-            return "The raw rip is kept until an encode has finished and its file is still there."
-        raw = Path(entry["path"])
-        for (output,) in conn.execute("SELECT output FROM encodes WHERE output IS NOT NULL").fetchall():
-            if _same_file(raw, Path(output)):
-                return "The raw file is also an encode's output, so it is kept."
-        if keep_hours is not None:
-            finished = min(_parse_utc(r["finished_at"]) for r in good if r["finished_at"])
-            if now < finished + timedelta(hours=keep_hours):
-                return "The raw rip is kept for a while after its encode."
+        conn.execute("BEGIN IMMEDIATE")  # the checks and the flag are one step: a queue can't slip between
         try:
-            raw.unlink(missing_ok=True)
+            error, good, raw = self._raw_checks(conn, rip_id, title, now, keep_hours)
+            if error is not None:
+                conn.rollback()
+                return error
+            video_rips.mark_raw_deleted(conn, rip_id, title, now.isoformat(timespec="seconds"))  # commits
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        try:
+            self._unlink_raw(raw)
         except OSError as exc:
+            video_rips.clear_raw_deleted(conn, rip_id, title)
             return f"Couldn't delete the raw rip: {exc.strerror or exc}."
-        video_rips.mark_raw_deleted(conn, rip_id, title, now.isoformat(timespec="seconds"))
         joblog.JobLog(self.config.config_dir / "logs" / f"encode-{good[-1]['id']}.log").write(
             f"raw rip deleted: {raw}")
         return None
+
+    @staticmethod
+    def _unlink_raw(raw: Path) -> None:
+        raw.unlink(missing_ok=True)
+
+    @staticmethod
+    def _raw_checks(conn, rip_id: int, title: int, now: datetime, keep_hours: float | None):
+        """(error, good encodes, raw path)."""
+        rip = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+        entry = json.loads(rip["files"] or "{}").get(str(title)) if rip else None
+        if entry is None:
+            return "That file isn't part of this rip.", [], None
+        if entry.get("raw_deleted_at"):
+            return "The raw rip has already been deleted.", [], None
+        rows = conn.execute("SELECT * FROM encodes WHERE rip_id = ? AND title = ? ORDER BY id",
+                            (rip_id, title)).fetchall()
+        if any(r["state"] in ("queued", "running") for r in rows):
+            return "Another encode of this file is waiting or running, so the raw rip is kept.", [], None
+        good = [r for r in rows if r["state"] == "done" and _output_intact(r)]
+        if not good:
+            return ("The raw rip is kept until an encode has finished and its file is still there "
+                    "and complete."), [], None
+        raw = Path(entry["path"])
+        for (output,) in conn.execute("SELECT output FROM encodes WHERE output IS NOT NULL").fetchall():
+            if _same_file(raw, Path(output)):
+                return "The raw file is also an encode's output, so it is kept.", [], None
+        if keep_hours is not None:
+            stamps = [_parse_utc(r["finished_at"]) for r in good if r["finished_at"]]
+            if not stamps:
+                return "The raw rip is kept: it isn't recorded when its encode finished.", [], None
+            if now < min(stamps) + timedelta(hours=keep_hours):
+                return "The raw rip is kept for a while after its encode.", [], None
+        return None, good, raw
 
     async def delete_raw_now(self, rip_id: int, title: int) -> str | None:
         """"Delete raw now". Returns why it was refused, or None."""
