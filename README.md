@@ -180,6 +180,10 @@ Also turn on Radarr's recycle bin (Settings → Media Management → Recycling B
 
 Import steps run in the background and never hold the shutdown guard. The file is *moved* into the library by Radarr, which names it and picks its quality (DVD, Bluray-1080p, or Remux-1080p for a Blu-ray Copy only), and the app checks that Radarr's file really is the new one. Extras go into the film's `extras` folder. Only one rip of a film is imported at a time; a second waits ("Another rip of this film is being imported"). If Radarr is down or the key is wrong, the rip shows "Import failed" with the reason and **Retry**, which carries on from where it stopped. After a restart, an interrupted import shows "Interrupted by a restart; press Retry." Each import has a log (`/config/logs/import-<rip_id>.log`, linked from the Films page) with every Radarr call; the key is never written to it.
 
+When a second rip of the same film waits and then carries on, it goes through the replace rule. With Ask before replacing off and all checks passing, it replaces automatically.
+
+Encodes that finished before Radarr was set up aren't imported automatically. Use Identify on the Films page, or re-encode.
+
 **Undo, Skip and the folder tidy.**
 - **Recently imported** at the top of the Films page lists the last imports, each with **Undo**.
 - Undoing a new film moves its file back to the rip's downloads folder, removes the film from Radarr only if the ripper added it, and removes the folder if it is empty.

@@ -77,11 +77,11 @@ def active_rip_ids(conn: sqlite3.Connection) -> set[int]:
 
 
 def fail_interrupted(conn: sqlite3.Connection, now: str) -> int:
-    """After a restart: imports that were running can't be (their flow died); they fail, and Retry resumes."""
+    """After a restart: imports (or identifications) that were running can't be (their flow died); they fail, and Retry resumes."""
     with conn:
         return conn.execute(
             "UPDATE film_imports SET state = 'failed', error = 'Interrupted by a restart; press Retry.', "
-            "updated_at = ? WHERE state = 'importing'", (now,)).rowcount
+            "updated_at = ? WHERE state IN ('importing', 'identifying')", (now,)).rowcount
 
 
 def resumable_waiting(conn: sqlite3.Connection) -> list[sqlite3.Row]:

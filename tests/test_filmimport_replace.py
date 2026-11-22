@@ -419,3 +419,19 @@ def test_undo_move_timeout_stops_with_row_unchanged(config, setup, tmp_path, mon
     message = asyncio.run(filmundo.undo(services, rip))
     assert message.startswith("Undo stopped: Radarr didn't finish moving the film's folder.")
     assert row_of(setup, rip)["state"] == "imported"
+
+
+def test_skip_refuses_while_an_encode_is_active(config, setup, tmp_path, monkeypatch):
+    rip, eid = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    other = encodes.create(setup, rip_id=rip, title=1, role="extra", source=Path("x.mkv"), disc_type="dvd",
+                           source_seconds=300, source_bytes=1, source_audio=2, preset="standard", now=NOW)
+    assert other is not None  # queued
+    folder = config.downloads_dir / str(rip)
+    message = "An encode of this rip is still running; cancel it first."
+    assert asyncio.run(filmundo.skip(services, rip)) == message
+    assert folder.is_dir()
+    encodes.start(setup, other, NOW)  # running
+    assert asyncio.run(filmundo.skip(services, rip)) == message
+    encodes.finish(setup, other, "done", NOW, output="o", output_bytes=1)
+    assert asyncio.run(filmundo.skip(services, rip)) is None and not folder.exists()

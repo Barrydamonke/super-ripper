@@ -349,3 +349,28 @@ def test_failed_message_equal_to_error_shown_once(radarr):
     rip = film_rip(conn, config)
     set_row(conn, rip, state="failed", error="same words here", message="same words here")
     assert client.get("/films").text.count("same words here") == 1
+
+
+def test_starting_flag_cleared_once_the_flow_holds_the_lock(radarr, monkeypatch):
+    import asyncio
+
+    from disc_ripper.web import films_routes
+    client, conn, config, fake = radarr
+    services = client.app.state.services
+    rip = film_rip(conn, config)
+    set_row(conn, rip, state="failed", step="add", tmdb_id=137106, error="x")
+
+    async def slow_retry(services, rip_id):
+        async with services.import_lock(rip_id):
+            await asyncio.sleep(1.5)
+
+    monkeypatch.setattr(filmimport, "retry_import", slow_retry)
+    assert client.post("/films/import/retry", data={"rip_id": rip}).status_code == 200
+    end = time.time() + 5
+    while time.time() < end and services.import_lock(rip).locked() is False:
+        time.sleep(0.01)
+    assert services.import_lock(rip).locked()
+    time.sleep(0.3)
+    assert rip not in films_routes._STARTING  # the page shows the real step, not "Working on it..."
+    while services.import_lock(rip).locked() and time.time() < end:
+        time.sleep(0.05)

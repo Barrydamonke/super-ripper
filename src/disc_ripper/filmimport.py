@@ -26,6 +26,7 @@ BUSY = "Busy, try again in a moment."
 CONFIRM_HOURS = 24
 NOT_SEEN = "Jellyfin hasn't shown this film after 24 hours; the rip is kept. Check the library."
 MISPLACED = "The imported file isn't where Radarr put it, so the rip is kept. Check the library."
+OTHER_IMPORTING = "Another rip of this film is being imported"
 NO_RADARR = "Set up Radarr in Settings to import films."
 DEFAULT_ROOT = "Movies"
 STEPS = ("identify", "claim", "add", "replace", "encode", "import", "unmonitor", "extras", "done")
@@ -494,10 +495,19 @@ async def retry_import(services, rip_id: int) -> str | None:
         if row is None or row["state"] not in ("failed", "waiting_other"):
             return "Nothing to retry."
         start = row["step"] if row["step"] in STEPS else "identify"
-        state = "importing" if STEPS.index(start) > STEPS.index("claim") else "identifying"
+        if STEPS.index(start) > STEPS.index("claim") and not row["tmdb_id"]:
+            start = "identify"
+        after_claim = STEPS.index(start) > STEPS.index("claim")
 
         async def before(flow: Flow):
-            flow.set(state=state, error=None)
+            if after_claim:  # the one-import-per-film claim was released when this rip failed
+                if not film_imports.claim(flow.conn, rip_id, row["tmdb_id"], utc_now()):
+                    flow.set(state="waiting_other", message=OTHER_IMPORTING)
+                    flow.log.write("another rip of this film is being imported: waiting")
+                    return OTHER_IMPORTING
+                flow.set(error=None)
+            else:
+                flow.set(state="identifying", error=None)
 
         return await _run(services, rip_id, start, before)
 

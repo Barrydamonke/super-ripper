@@ -353,8 +353,14 @@ def _start(request: Request, rip_id: int, work) -> None:
     services = _services(request)  # the rip is already in _STARTING (see _claim)
 
     async def run() -> None:
+        task = asyncio.ensure_future(work(services))
         try:
-            refusal = await work(services)
+            # The rip counts as "starting" only until the flow holds its lock (then the row shows the real step).
+            while not task.done() and not services.import_lock(rip_id).locked():
+                await asyncio.sleep(0.01)
+            _STARTING.discard(rip_id)
+            services.films_changed()
+            refusal = await task
             if refusal and refusal != filmimport.BUSY:
                 await asyncio.to_thread(services._db, _record_refusal, rip_id, refusal)
         except Exception:

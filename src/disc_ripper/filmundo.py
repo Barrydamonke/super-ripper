@@ -144,6 +144,9 @@ async def skip(services, rip_id: int) -> str | None:
                 return "This rip is being imported; wait for it to finish."
             if row["state"] in _UNDOABLE:
                 return "Use Undo first."
+            if conn.execute("SELECT 1 FROM encodes WHERE rip_id = ? AND state IN ('queued', 'running')",
+                            (rip_id,)).fetchone():
+                return "An encode of this rip is still running; cancel it first."
             folder = services.config.downloads_dir / str(rip_id)
             try:
                 if folder.exists():

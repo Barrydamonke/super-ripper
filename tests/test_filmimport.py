@@ -378,3 +378,17 @@ def test_choose_film_bad_ref_creates_no_row(config, setup, tmp_path):
     assert asyncio.run(filmimport.choose_film(services, rip, "999999")) is not None  # Radarr does not know it
     assert asyncio.run(filmimport.choose_film(services, tv, "137106")) is not None
     assert row_of(setup, rip) is None and row_of(setup, tv) is None
+
+
+def test_retry_waits_while_other_rip_imports_same_film(config, setup, tmp_path):
+    first, _ = make_rip(setup, config)
+    second, _ = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    _stub_importing(setup, first)
+    film_imports.ensure(setup, second, NOW)
+    film_imports.update(setup, second, NOW, state="failed", step="add", tmdb_id=137106, error="x")
+    message = "Another rip of this film is being imported"
+    assert asyncio.run(filmimport.retry_import(services, second)) == message
+    row = row_of(setup, second)
+    assert row["state"] == "waiting_other" and row["message"] == message
+    assert "add_movie" not in fake.calls and fake.movies == {}

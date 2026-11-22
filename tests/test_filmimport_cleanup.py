@@ -195,3 +195,21 @@ def test_no_cleanup_when_imported_file_is_inside_rip_folder(config, setup, tmp_p
     film_imports.update(setup, rip, "t", new_path=str(inside))
     confirm(services, at(row, 24))
     assert row_of(setup, rip)["state"] == "imported" and inside.is_file()
+
+
+def test_restart_marks_identifying_failed_and_retry_works(config, setup, tmp_path):
+    rip, _ = make_rip(setup, config)
+    film_imports.ensure(setup, rip, "t")
+    film_imports.update(setup, rip, "t", state="identifying", step="identify")
+    services, _ = services_with(config, tmp_path)
+    asyncio.run(filmimport.resume_after_restart(services))
+    row = row_of(setup, rip)
+    assert row["state"] == "failed" and row["error"] == "Interrupted by a restart; press Retry."
+    assert asyncio.run(filmimport.retry_import(services, rip)) is None
+    assert row_of(setup, rip)["state"] == "imported"
+    other, _ = make_rip(setup, config)
+    film_imports.ensure(setup, other, "t")  # identifying with no step recorded yet
+    asyncio.run(filmimport.resume_after_restart(services))
+    assert row_of(setup, other)["state"] == "failed"
+    assert asyncio.run(filmimport.retry_import(services, other)) is None
+    assert row_of(setup, other)["state"] == "needs_replace_ok"  # it identified; the film now has the first rip's file
