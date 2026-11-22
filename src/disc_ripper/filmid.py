@@ -32,8 +32,7 @@ class Scored:
 def clean_label(label: str) -> str:
     text = re.sub(r"[_\s]+disc[_\s]*\d+\b", " ", label, flags=re.IGNORECASE)
     tokens = [t for t in re.split(r"[_\s]+", text) if t]
-    tokens = [t for t in tokens if t.lower() not in _DROP_TOKENS]
-    if len(tokens) > 1 and _DISC_TOKEN.match(tokens[-1]):
+    while len(tokens) > 1 and (tokens[-1].lower() in _DROP_TOKENS or _DISC_TOKEN.match(tokens[-1])):
         tokens.pop()
     return " ".join(t.capitalize() for t in tokens)
 
@@ -52,12 +51,20 @@ def _runtime_ok(c: Candidate, main_seconds: int) -> bool:
     return abs(c.runtime_min * 60 - main_seconds) <= max(300, 0.06 * main_seconds)
 
 
+def _similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    if re.findall(r"\d+", a) != re.findall(r"\d+", b):
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
 def score(candidates: list[Candidate], names: list[str], main_seconds: int) -> list[Scored]:
     wanted = [normalise(n) for n in names if n]
     out = []
     for c in candidates:
         norm = normalise(c.title)
-        best = max((SequenceMatcher(None, w, norm).ratio() for w in wanted), default=0.0)
+        best = max((_similarity(w, norm) for w in wanted), default=0.0)
         out.append(Scored(c, best, _runtime_ok(c, main_seconds)))
 
     def key(s: Scored):

@@ -72,3 +72,23 @@ def test_quality_name():
 def test_folder_name():
     assert folder_name(cand("X", 1, folder="Elf (2003)")) == "Elf (2003)"
     assert folder_name(cand('Who: What/Why?', 1, year=2001)) == "Who WhatWhy (2001)"
+
+
+def test_sequel_number_must_match():
+    assert confident(score([cand("Toy Story 3", 103)], ["Toy Story 2"], 6180)) is None
+    assert confident(score([cand("Shrek 2", 93)], ["Shrek2"], 5580)) is not None
+
+
+@pytest.mark.parametrize("label,expected", [
+    ("US", "Us"),
+    ("US_MARSHALS", "Us Marshals"),
+    ("ELF_D1", "Elf"),
+    ("SHREK_2_WS_PAL", "Shrek 2"),
+])
+def test_clean_label_trailing_only(label, expected):
+    assert clean_label(label) == expected
+
+
+def test_empty_names_score_zero():
+    assert score([cand("The", 100)], ["A"], 6000)[0].title_score == 0.0
+    assert score([cand("Elf", 100)], [""], 6000)[0].title_score == 0.0
