@@ -271,12 +271,10 @@ def test_import_text_escaped(radarr):
     assert "<script>alert" not in r.text and "&lt;script&gt;" in r.text
 
 
-def test_import_state_change_publishes_films_list(config):
+def test_import_state_change_publishes_films_list(films):  # noqa: F811
     import asyncio
 
-    from .test_videorip_rip import make_services
-
-    services = make_services(config)
+    services = films[0].app.state.services
 
     async def main():
         with services.broker.subscribe() as sub:
