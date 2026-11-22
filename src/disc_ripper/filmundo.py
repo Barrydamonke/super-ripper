@@ -1,0 +1,122 @@
+"""Undo an import (put the library back as it was) and skip a rip (give up on importing it)."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import shutil
+from pathlib import Path
+
+from . import db, encodes, film_imports
+from .clock import utc_now
+from .filmimport import NO_RADARR, Flow, _locked
+from .radarr import RadarrError
+
+BIN_GONE = "The old file is no longer in Radarr's recycle bin, so only the new file was taken back."
+_UNDOABLE = ("imported", "in_jellyfin")
+
+
+def _move(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest))
+
+
+def _remove_empty(folder: Path) -> None:
+    try:
+        folder.rmdir()
+    except OSError:  # not empty (or already gone): leave it
+        pass
+
+
+async def undo(services, rip_id: int) -> str | None:
+    """Take an imported film back out of the library. Returns the message ("Undone." ...) or why it can't."""
+    client = services.radarr()
+    if client is None:
+        return NO_RADARR
+
+    async def work():
+        flow = Flow(services, client, rip_id)
+        try:
+            row = flow.row()
+            if row is None or row["state"] not in _UNDOABLE:
+                return "Only an imported film can be undone."
+            flow.log.write("undo started")
+            try:
+                message = await _undo(flow, row)
+            except (RadarrError, OSError) as exc:
+                flow.log.write(f"UNDO FAILED: {exc}")
+                return f"Undo stopped: {exc} Press Undo again to continue."
+            flow.log.write(f"undone: {message}")
+            return message
+        finally:
+            flow.close()
+
+    return await _locked(services, rip_id, work)
+
+
+async def _undo(flow: Flow, row) -> str:
+    enc = encodes.get(flow.conn, row["encode_id"])
+    new_path = Path(row["new_path"]) if row["new_path"] else None
+    old_folder = Path(row["old_folder"]) if row["old_folder"] else None
+    replacing = bool(row["old_path"])
+    message = "Undone."
+
+    for extra in json.loads(row["extras"] or "[]"):
+        await asyncio.to_thread(Path(extra).unlink, missing_ok=True)
+    folder = new_path.parent if new_path else None
+    if folder is not None:
+        await asyncio.to_thread(_remove_empty, folder / "extras")
+
+    if replacing and old_folder is not None:
+        movie = await flow.call("movie", row["movie_id"])
+        if Path(movie["path"]) != old_folder:  # the folder was tidied: put its old name back
+            await flow.call("update_movie", {**movie, "path": str(old_folder)}, move_files=True)
+            flow.log.write(f"folder restored: {old_folder}")
+            if new_path is not None:
+                new_path = old_folder / new_path.name
+                folder = old_folder
+
+    if new_path is not None and enc is not None:
+        if await asyncio.to_thread(new_path.exists):
+            await asyncio.to_thread(_move, new_path, Path(enc["output"]))
+            flow.log.write(f"new file moved back to {enc['output']}")
+    if not replacing and folder is not None:
+        await asyncio.to_thread(_remove_empty, folder)
+
+    if replacing:
+        recycled = Path(row["recycled_path"]) if row["recycled_path"] else None
+        if recycled is not None and await asyncio.to_thread(recycled.exists):
+            await asyncio.to_thread(_move, recycled, Path(row["old_path"]))
+            flow.log.write(f"old file restored to {row['old_path']}")
+        else:
+            message += " " + BIN_GONE
+        await flow.call("command", "RescanMovie", movieId=row["movie_id"])
+    elif row["movie_id"]:
+        await flow.call("delete_movie", row["movie_id"], delete_files=False)
+
+    with flow.conn:
+        flow.conn.execute("UPDATE encodes SET imported_path = NULL, imported_at = NULL WHERE rip_id = ?",
+                          (flow.rip_id,))
+    flow.set(state="undone", message=message)
+    flow.set(state="needs_identify", step="", message=message, error=None, movie_id=None, encode_id=None,
+             new_path=None, old_path=None, old_folder=None, recycled_path=None, extras=[], replace={},
+             imported_at=None)
+    return message
+
+
+async def skip(services, rip_id: int) -> str | None:
+    """Give up importing this rip: delete its downloads folder. Returns why it can't, or None."""
+    async def work():
+        conn = db.connect(services.config.db_path)
+        try:
+            row = film_imports.ensure(conn, rip_id, utc_now())
+            if row["state"] == "importing":
+                return "This rip is being imported; wait for it to finish."
+            folder = services.config.downloads_dir / str(rip_id)
+            await asyncio.to_thread(shutil.rmtree, folder, True)
+            film_imports.update(conn, rip_id, utc_now(), state="skipped", message="Skipped.", error=None)
+            return None
+        finally:
+            conn.close()
+
+    return await _locked(services, rip_id, work)

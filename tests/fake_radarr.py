@@ -29,6 +29,7 @@ class FakeRadarr:
         self.root = base / "library" / "Movies"
         self.other_root = base / "library" / "Other movies"
         self.recycle = base / "library" / "recycle"
+        self.bin_set = True  # False: Radarr has no recycle bin, so a replaced file is deleted
         for folder in (self.root, self.other_root, self.recycle):
             folder.mkdir(parents=True)
         self.catalog = list(catalog if catalog is not None else [LEGO])
@@ -111,6 +112,13 @@ class FakeRadarr:
 
     def update_movie(self, movie: dict, move_files: bool = False) -> dict:
         self._enter("update_movie", "PUT", f"/api/v3/movie/{movie['id']}?moveFiles={str(move_files).lower()}")
+        old = self.movies.get(movie["id"])
+        if move_files and old and old["path"] != movie["path"] and Path(old["path"]).exists():
+            Path(movie["path"]).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(old["path"], movie["path"])
+            if movie.get("movieFile"):
+                name = Path(movie["movieFile"]["path"]).name
+                movie = {**movie, "movieFile": {**movie["movieFile"], "path": str(Path(movie["path"]) / name)}}
         self.movies[movie["id"]] = json.loads(json.dumps(movie))
         return movie
 
@@ -134,7 +142,7 @@ class FakeRadarr:
 
     def recycle_bin(self) -> tuple[str, int]:
         self._enter("recycle_bin", "GET", "/api/v3/config/mediamanagement")
-        return str(self.recycle), 7
+        return (str(self.recycle) if self.bin_set else ""), 7
 
     # -- importing -----------------------------------------------------------------
 
@@ -155,9 +163,23 @@ class FakeRadarr:
                 folder = Path(movie["path"])
                 folder.mkdir(parents=True, exist_ok=True)
                 target = folder / source.name
+                old = (movie.get("movieFile") or {}).get("path")
+                if old and Path(old).exists():  # Radarr recycles (or deletes) the file being replaced
+                    if self.bin_set:
+                        shutil.move(old, str(self.recycle / Path(old).name))
+                    else:
+                        Path(old).unlink()
                 shutil.move(str(source), str(target))
                 movie["hasFile"] = True
                 movie["movieFile"] = {"path": str(target), "size": target.stat().st_size,
+                                      "mediaInfo": {"resolution": "1920x1080", "runTime": "1:40:00"}}
+        elif name == "RescanMovie":
+            movie = self.movies[body["movieId"]]
+            found = sorted(Path(movie["path"]).glob("*.mkv")) if Path(movie["path"]).is_dir() else []
+            movie["hasFile"] = bool(found)
+            movie.pop("movieFile", None)
+            if found:
+                movie["movieFile"] = {"path": str(found[0]), "size": found[0].stat().st_size,
                                       "mediaInfo": {"resolution": "1920x1080", "runTime": "1:40:00"}}
         return command_id
 

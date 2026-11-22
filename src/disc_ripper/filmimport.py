@@ -9,9 +9,9 @@ import logging
 import shutil
 from pathlib import Path, PurePosixPath
 
-from . import db, encodes, film_imports, filmid, joblog, video_rips
+from . import db, encodes, film_imports, filmid, joblog, settings, videofiles
 from .clock import utc_now
-from .radarr import RadarrError, to_candidate
+from .radarr import RadarrError, parse_resolution, parse_runtime, to_candidate
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +135,8 @@ class Flow:
             self.movie = await self.call("movie", self.row()["movie_id"])
         await _replace_check(self)
 
-    async def _step_encode(self) -> None:
+    def pick_encode(self):
+        """The encode to import: the one already imported, else the newest finished main-title encode."""
         row = self.row()
         chosen = encodes.get(self.conn, row["encode_id"]) if row["encode_id"] else None
         if chosen is None or not chosen["imported_at"]:
@@ -144,6 +145,10 @@ class Flow:
                            if e["title"] == main and e["state"] == "done" and encodes.output_intact(e)), None)
         if chosen is None:
             raise FlowError("No finished encode of the film.")
+        return chosen
+
+    async def _step_encode(self) -> None:
+        chosen = self.pick_encode()
         self.log.write(f"importing encode #{chosen['id']} ({chosen['preset']}): {chosen['output']}")
         self.set(encode_id=chosen["id"])
 
@@ -173,12 +178,23 @@ class Flow:
         quality = {"quality": definition["quality"], "revision": {"version": 1, "real": 0, "isRepack": False}}
         entry = {"path": str(output), "movieId": row["movie_id"], "quality": quality,
                  "languages": seen.get("languages") or []}
+        bin_dir, before = None, set()
+        if row["old_path"]:  # replacing: note what is in the recycle bin so the old file can be found after
+            bin_path = (await self.call("recycle_bin"))[0]
+            if bin_path:
+                bin_dir = Path(bin_path)
+                before = await asyncio.to_thread(_listing, bin_dir)
         command_id = await self.call("command", "ManualImport", files=[entry], importMode="move")
         await self._wait_for(command_id)
         movie = await self.call("movie", row["movie_id"])
         have = movie.get("movieFile") or {}
         if not have.get("path") or (have.get("size") is not None and have["size"] != enc["output_bytes"]):
             raise RadarrError("Radarr finished, but the film's file in Radarr is not the new one.")
+        if bin_dir is not None:
+            arrived = sorted((await asyncio.to_thread(_listing, bin_dir)) - before, key=lambda p: p.stat().st_mtime)
+            recycled = next((p for p in reversed(arrived) if p.name == Path(row["old_path"]).name), None)
+            self.set(recycled_path=str(recycled) if recycled else None)
+            self.log.write(f"recycle bin: {recycled or 'the old file was not found there'}")
         self._imported(enc, have["path"])
 
     def _imported(self, enc, path: str) -> None:
@@ -207,6 +223,32 @@ class Flow:
         if movie.get("monitored"):
             movie["monitored"] = False
             await self.call("update_movie", movie, move_files=False)
+        await self._tidy_folder()
+
+    async def _tidy_folder(self) -> None:
+        """When replacing: rename the film's folder to Radarr's own name for it, and follow the file there."""
+        row = self.row()
+        if not row["old_path"]:
+            return
+        movie = await self.call("movie", row["movie_id"])
+        if settings.get(self.conn, "tidy_folders_on_replace"):
+            lookup = await self.call("lookup_tmdb", row["tmdb_id"])
+            wanted = filmid.folder_name(to_candidate(lookup))
+            if PurePosixPath(movie["path"].replace("\\", "/")).name != wanted:
+                root = movie.get("rootFolderPath") or str(Path(movie["path"]).parent)
+                target = str(Path(root) / wanted)
+                await self.call("update_movie", {**movie, "path": target}, move_files=True)
+                after = await self.call("movie", row["movie_id"])
+                moved = (after.get("movieFile") or {}).get("path")
+                if after["path"] == movie["path"] or not moved or not await asyncio.to_thread(Path(moved).exists):
+                    raise RadarrError("Radarr didn't move the film's folder.")
+                self.log.write(f"folder tidied: {movie['path']} -> {after['path']}")
+                movie = after
+        have = (movie.get("movieFile") or {}).get("path")
+        if have and have != row["new_path"] and await asyncio.to_thread(Path(have).exists):
+            with self.conn:
+                self.conn.execute("UPDATE encodes SET imported_path = ? WHERE id = ?", (have, row["encode_id"]))
+            self.set(new_path=have)
 
     async def _step_extras(self) -> None:
         row = self.row()
@@ -253,12 +295,84 @@ class Flow:
             self.services.refresher.trigger()
 
 
+def _listing(folder: Path) -> set[Path]:
+    return {p for p in folder.rglob("*") if p.is_file()} if folder.is_dir() else set()
+
+
+def _height(resolution: str | None) -> int | None:
+    parsed = parse_resolution(resolution)
+    return parsed[1] if parsed and parsed[1] > 0 else None
+
+
 async def _replace_check(flow: Flow) -> None:
-    """Step 4. Placeholder until the replace flow exists: a film that already has a file waits."""
-    if flow.movie and (flow.movie.get("hasFile") or flow.movie.get("movieFile")):
-        flow.set(state="needs_replace_ok", message="This film is already in Radarr; replacing comes in a later step.")
-        flow.log.write("the movie already has a file: waiting (replace not built yet)")
+    """Step 4. A film that already has a file is compared with the new encode; it waits unless all is well."""
+    movie = flow.movie
+    if not movie or not (movie.get("hasFile") or movie.get("movieFile")):
+        return
+    have = movie.get("movieFile") or {}
+    media = have.get("mediaInfo") or {}
+    enc = flow.pick_encode()
+    problem = ""
+    try:
+        info = await asyncio.to_thread(videofiles.PROBE, Path(enc["output"]))
+    except Exception as exc:  # ffprobe missing or the file unreadable: the checks can't pass
+        info, problem = None, f"The new file couldn't be examined ({exc})."
+    new_height = info.height if info and info.height > 0 else None
+    new_seconds = info.seconds if info and info.seconds > 0 else None
+    old_seconds = parse_runtime(media.get("runTime")) or (int(movie.get("runtime") or 0) * 60) or None
+    old_height = _height(media.get("resolution"))
+    old = {"path": have.get("path"), "size": have.get("size"), "resolution": media.get("resolution"),
+           "video_codec": media.get("videoCodec"), "audio_codec": media.get("audioCodec"),
+           "audio_channels": media.get("audioChannels"), "seconds": old_seconds}
+    new = {"path": enc["output"], "size": enc["output_bytes"],
+           "resolution": f"{info.width}x{info.height}" if new_height else None,
+           "video_codec": info.video_codec if info else None, "audio_codec": info.audio_codec if info else None,
+           "audio_channels": info.audio_channels[0] if info and info.audio_channels else None,
+           "seconds": new_seconds}
+    reasons: dict[str, str] = {}
+    if new_seconds is None or old_seconds is None:
+        reasons["length"] = problem or "Radarr doesn't know the old file's length, so it can't be compared."
+    elif abs(new_seconds - old_seconds) > max(0.02 * old_seconds, 300):
+        reasons["length"] = (f"The new file is {new_seconds / 60:.0f} min long but the old one is "
+                             f"{old_seconds / 60:.0f} min.")
+    if not (await flow.call("recycle_bin"))[0]:
+        reasons["recycle_bin"] = "Radarr's recycle bin isn't set, so the old file could not be recovered."
+    if new_height is None or old_height is None:
+        reasons["resolution"] = problem or "Radarr doesn't know the old file's resolution, so it can't be compared."
+    elif new_height < old_height:
+        reasons["resolution"] = f"The new file is {new_height}p but the old one is {old_height}p (a downgrade)."
+    checks = {name: name not in reasons for name in ("length", "recycle_bin", "resolution")}
+    flow.set(replace={"old": old, "new": new, "checks": checks, "reasons": reasons},
+             old_path=have.get("path"), old_folder=movie.get("path"))
+    ask = settings.get(flow.conn, "ask_before_replace")
+    flow.log.write(f"replace check: {checks}; ask before replacing: {ask}")
+    if ask or reasons:
+        message = " ".join(["This film is already in Radarr.", *reasons.values()]) if reasons else (
+            "This film is already in Radarr; replace its file?")
+        flow.set(state="needs_replace_ok", message=message)
         raise _Stop
+
+
+async def approve_replace(services, rip_id: int, typed: str = "") -> str | None:
+    """The owner agrees to replace the film's file. Without a recycle bin the word REPLACE must be typed."""
+    async def work():
+        async def before(flow: Flow):
+            row = flow.row()
+            if row is None or row["state"] != "needs_replace_ok":
+                return "This rip isn't waiting to replace a film."
+            if not (await flow.call("recycle_bin"))[0] and typed != "REPLACE":
+                return ("Radarr's recycle bin isn't set, so the old file can't be recovered. "
+                        "Type REPLACE to replace it anyway.")
+            if not film_imports.claim(flow.conn, rip_id, row["tmdb_id"], utc_now()):
+                flow.set(state="waiting_other", message="Another rip of this film is being imported.")
+                return "Another rip of this film is being imported."
+            flow.set(error=None, message="")
+            flow.log.write("replace approved")
+            return None
+
+        return await _run(services, rip_id, "encode", before)
+
+    return await _locked(services, rip_id, work)
 
 
 # -- entry points -------------------------------------------------------------------------
