@@ -239,3 +239,11 @@ def test_films_page_shows_each_rips_encode_choice(films):
     conn.execute("UPDATE video_rips SET encode_preset = 'fast' WHERE rip_id = ?", (rip,))
     conn.commit()
     assert "Encode with: Fast" in client.get("/films").text
+
+
+def test_old_rip_without_a_choice_shows_none(films):
+    client, conn, config = films
+    rip = make_rip(conn, config)
+    conn.execute("UPDATE video_rips SET state = 'ripped', encode_preset = NULL WHERE rip_id = ?", (rip,))
+    conn.commit()
+    assert "Encode with:" not in client.get("/films").text

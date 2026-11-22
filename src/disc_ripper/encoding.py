@@ -64,8 +64,9 @@ def _standard(src: str, out: str, disc_type: str, audio_channels: int | None) ->
         channels, kbps = audio_plan(audio_channels)
         mixdown = {6: "5point1", 2: "stereo", 1: "mono"}[channels]
         argv += ["--audio", "1", "--aencoder", "eac3", "--ab", str(kbps), "--mixdown", mixdown]
-    # No subtitle track is flagged default, so players don't switch one on (and burn it in) by themselves.
-    return argv + ["--all-subtitles", "--subtitle-burned=none", "--subtitle-default=none", "--json"]
+    # Not --subtitle-default=none: in HandBrake 1.9 it also drops "forced". clear_default_subtitles_argv
+    # runs afterwards instead.
+    return argv + ["--all-subtitles", "--subtitle-burned=none", "--json"]
 
 
 def _fast(src: str, out: str, audio_channels: int | None, interlaced: bool, quality: int,
@@ -100,6 +101,13 @@ def encode_argv(preset: str, source: Path, output: Path, *, disc_type: str, audi
         return [*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-y", "-i", src, "-map", "0", "-c", "copy",
                 "-disposition:s", "-default", "-progress", "pipe:1", "-nostats", out]
     raise ValueError(f"unknown preset {preset!r}")
+
+
+def clear_default_subtitles_argv(source: Path, output: Path) -> list[str]:
+    """A quick copy of a HandBrake encode that clears the subtitle "default" flag and keeps "forced",
+    so players don't switch a subtitle track on (and burn it in) by themselves."""
+    return [*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-y", "-i", str(source), "-map", "0", "-c", "copy",
+            "-disposition:s", "-default", "-f", "matroska", str(output)]
 
 
 def idet_argv(source: Path, start_seconds: float, seconds: float = 20) -> list[str]:

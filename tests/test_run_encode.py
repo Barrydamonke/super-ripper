@@ -236,3 +236,23 @@ def test_encode_check_wording_names_the_encoded_file(config, conn, monkeypatch):
     with pytest.raises(RuntimeError) as err:
         go(config, conn, queue(conn, make_raw(config)))
     assert str(err.value) == "The encode failed its check: The encoded file has no audio."
+
+
+def test_standard_clears_the_default_subtitle_flag_afterwards(config, conn, tmp_path):
+    # HandBrake's own --subtitle-default=none also drops "forced", so a quick ffmpeg copy clears "default" only.
+    raw = make_raw(config)
+    go(config, conn, queue(conn, raw))
+    runs = recorded(tmp_path)
+    assert len(runs) == 2  # HandBrake, then the flag fix-up
+    assert "--subtitle-default=none" not in runs[0]
+    fix = runs[1]
+    assert fix[fix.index("-map") + 1] == "0" and fix[fix.index("-c") + 1] == "copy"
+    assert fix[fix.index("-disposition:s") + 1] == "-default"
+    assert (config.downloads_dir / "1" / "Film - Standard.mkv").exists()
+    assert not list((config.downloads_dir / "1").glob("*.tmp"))
+
+
+def test_fast_and_copy_need_no_fix_up(config, conn, tmp_path):
+    raw = make_raw(config)
+    go(config, conn, queue(conn, raw, preset="copy"))
+    assert len(recorded(tmp_path)) == 1

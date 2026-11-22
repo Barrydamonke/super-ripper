@@ -135,7 +135,9 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
             "disc_type": DISC_NAMES.get(disc["disc_type"], "") if disc else "",
             "created_at": rip["created_at"], "files": views, "logs": logs,
             "can_encode_all": any(not f["deleted"] for f in views),
-            "encode_with": CHOICE_NAMES.get(rip["encode_preset"] or default_choice, ""),
+            # A rip with no choice of its own follows the setting only while it's still ripping.
+            "encode_with": CHOICE_NAMES.get(
+                rip["encode_preset"] or (default_choice if rip["state"] == "ripping" else ""), ""),
         })
     return {"active": _active_rows(conn), "rips": rips, "presets": encoding.PRESET_LABEL,
             "error": error, "notice": notice, "oob": oob}

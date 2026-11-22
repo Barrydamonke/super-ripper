@@ -646,3 +646,20 @@ def test_encode_choice_on_the_video_card(dash):
     assert conn.execute("SELECT encode_choice FROM drives WHERE id = 'serial:A'").fetchone()[0] == "fast"
     bad = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "turbo"})
     assert bad.status_code == 400 and "Unknown preset." in bad.text
+
+
+def test_encode_choice_survives_live_card_updates(dash):
+    client, conn = dash
+    _video_disc(conn, DECOY, held=["x"])
+    text = _page(client)
+    key = services.drive_key("serial:A")
+    # Kept in place across SSE re-renders, so an open dropdown isn't closed by a progress update.
+    assert f'id="encode-choice-{key}" hx-preserve' in text
+
+
+def test_encode_choice_needs_a_disc(dash):
+    client, conn = dash
+    drives.set_media(conn, "serial:A", "empty", None, "", "t")
+    r = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "fast"})
+    assert r.status_code == 400 and "No DVD or Blu-ray in the drive." in r.text
+    assert conn.execute("SELECT encode_choice FROM drives WHERE id = 'serial:A'").fetchone()[0] is None

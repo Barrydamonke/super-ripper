@@ -503,13 +503,19 @@ class Services:
     def _set_encode_choice(self, conn, drive_id: str, preset: str) -> str | None:
         if preset not in ENCODE_CHOICES:
             return "Unknown preset."
+        drive = conn.execute("SELECT media_state, disc_type FROM drives WHERE id = ?", (drive_id,)).fetchone()
+        if drive is None:
+            return "Unknown drive."
+        if drive["media_state"] != "disc" or drive["disc_type"] not in ("dvd", "bluray"):
+            return "No DVD or Blu-ray in the drive."
         with conn:
-            if conn.execute("UPDATE drives SET encode_choice = ? WHERE id = ?", (preset, drive_id)).rowcount == 0:
-                return "Unknown drive."
-            # The rip of the disc in this drive, if one is under way: files not yet recorded follow the new choice.
+            conn.execute("UPDATE drives SET encode_choice = ? WHERE id = ?", (preset, drive_id))
+            # The latest rip of the disc in this drive, if it's under way: files not yet recorded follow it.
             conn.execute(
-                "UPDATE video_rips SET encode_preset = ? WHERE state = 'ripping' AND fingerprint IN "
-                "(SELECT fingerprint FROM video_discs WHERE drive_id = ?)", (preset, drive_id))
+                "UPDATE video_rips SET encode_preset = ? WHERE rip_id = ("
+                "SELECT MAX(rip_id) FROM video_rips WHERE fingerprint IN "
+                "(SELECT fingerprint FROM video_discs WHERE drive_id = ?)) AND state = 'ripping'",
+                (preset, drive_id))
         return None
 
     async def set_encode_choice(self, drive_id: str, preset: str) -> str | None:

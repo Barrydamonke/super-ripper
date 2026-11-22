@@ -71,7 +71,7 @@ def test_standard_bluray_argv_exact():
         "HandBrakeCLI", "-i", S, "-o", O, "--format", "av_mkv", "--markers", "--encoder", "x265_10bit",
         "--encoder-preset", "slow", "--quality", "20", "--crop-mode", "none", "--auto-anamorphic",
         "--audio", "1", "--aencoder", "eac3", "--ab", "640", "--mixdown", "5point1",
-        "--all-subtitles", "--subtitle-burned=none", "--subtitle-default=none", "--json"]
+        "--all-subtitles", "--subtitle-burned=none", "--json"]
 
 
 def test_standard_dvd_argv_exact():
@@ -81,7 +81,7 @@ def test_standard_dvd_argv_exact():
         "--encoder-preset", "slow", "--quality", "18", "--crop-mode", "none", "--auto-anamorphic",
         "--comb-detect", "--decomb", "--detelecine",
         "--audio", "1", "--aencoder", "eac3", "--ab", "640", "--mixdown", "5point1",
-        "--all-subtitles", "--subtitle-burned=none", "--subtitle-default=none", "--json"]
+        "--all-subtitles", "--subtitle-burned=none", "--json"]
 
 
 def test_standard_stereo_and_mono():
@@ -272,3 +272,9 @@ def test_guard_decision_wait_message():
     now = datetime(2026, 11, 22, 0, 0, tzinfo=utc)
     assert encoding.guard_decision(inw, now, 12000, False) == (
         "wait", "Waiting for the next session: needs about 3 h 20 min, the grace period ends at 01:00")
+
+
+def test_clear_default_subtitles_argv():
+    assert encoding.clear_default_subtitles_argv(Path("a.mkv"), Path("b.tmp")) == [
+        "ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(Path("a.mkv")), "-map", "0", "-c", "copy",
+        "-disposition:s", "-default", "-f", "matroska", str(Path("b.tmp"))]

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import shutil
 import sqlite3
 import threading
@@ -107,6 +108,21 @@ async def run_encode(ctx: JobContext, row) -> None:
         raise
 
 
+async def _clear_default_subtitles(ctx: JobContext, output: Path, stall_minutes: int, work: Path) -> None:
+    """Rewrite a HandBrake encode with no default subtitle track (a copy: seconds, no re-encode)."""
+    fixed = output.with_suffix(".tmp")  # not .mkv: the check wants exactly one .mkv in the folder
+    ctx.log.write("clearing the default flag on subtitle tracks (forced flags kept)")
+
+    async def ignore(_line: str) -> None:
+        return None
+
+    argv = encoding.priority_prefix() + encoding.clear_default_subtitles_argv(output, fixed)
+    code = await _run_tool(ctx, argv, ignore, stall_minutes, work, log_filter=encoding.ProgressNoise())
+    if code != 0 or not fixed.is_file():
+        raise RuntimeError(f"Clearing the default subtitle flag on the encode failed. {SEE_LOG}")
+    os.replace(fixed, output)
+
+
 async def _encode(ctx: JobContext, row, work: Path) -> None:
     source = Path(row["source"])
     if not source.is_file():
@@ -156,6 +172,9 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
     if code != 0:
         said = " / ".join(tail) or f"The encoder exited with code {code}"
         raise RuntimeError(f"{said}{'' if said.endswith(('.', '!', '?')) else '.'} {SEE_LOG}")
+
+    if preset == "standard":
+        await _clear_default_subtitles(ctx, output, stall_minutes, work)
 
     try:
         out = await asyncio.to_thread(videofiles.check_output, work, round(seconds), row["source_audio"],
