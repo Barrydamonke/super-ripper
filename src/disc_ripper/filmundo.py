@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import db, encodes, film_imports
 from .clock import utc_now
-from .filmimport import NO_RADARR, Flow, _locked
+from .filmimport import NO_RADARR, Flow, FlowError, _locked, wait_for_folder_move
 from .radarr import RadarrError
 
 BIN_GONE = "The old file is no longer in Radarr's recycle bin, so only the new file was taken back."
@@ -46,7 +46,7 @@ async def undo(services, rip_id: int) -> str | None:
             except _Refused as exc:
                 flow.log.write(str(exc))
                 return str(exc)
-            except (RadarrError, OSError) as exc:
+            except (RadarrError, FlowError, OSError) as exc:
                 flow.log.write(f"UNDO FAILED: {exc}")
                 return f"Undo stopped: {exc} Press Undo again to continue."
             flow.log.write(f"undone: {message}")
@@ -92,6 +92,7 @@ async def _undo(flow: Flow, row) -> str:
         movie = await flow.call("movie", row["movie_id"])
         if Path(movie["path"]) != old_folder:  # the folder was tidied: put its old name back
             await flow.call("update_movie", {**movie, "path": str(old_folder)}, move_files=True)
+            await wait_for_folder_move(flow, row["movie_id"], str(old_folder))
             flow.log.write(f"folder restored: {old_folder}")
             if new_path is not None:
                 new_path = old_folder / new_path.name

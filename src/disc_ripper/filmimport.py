@@ -19,6 +19,9 @@ log = logging.getLogger(__name__)
 
 POLL_SECONDS = 5.0
 IMPORT_TIMEOUT_SECONDS = 600.0
+FOLDER_MOVE_POLL_SECONDS = 2.0
+FOLDER_MOVE_TIMEOUT_SECONDS = 120.0
+FOLDER_MOVE_FAILED = "Radarr didn't finish moving the film's folder."
 BUSY = "Busy, try again in a moment."
 CONFIRM_HOURS = 24
 NOT_SEEN = "Jellyfin hasn't shown this film after 24 hours; the rip is kept. Check the library."
@@ -254,10 +257,7 @@ class Flow:
                 root = movie.get("rootFolderPath") or str(Path(movie["path"]).parent)
                 target = str(Path(root) / wanted)
                 await self.call("update_movie", {**movie, "path": target}, move_files=True)
-                after = await self.call("movie", row["movie_id"])
-                moved = (after.get("movieFile") or {}).get("path")
-                if after["path"] == movie["path"] or not moved or not await asyncio.to_thread(Path(moved).exists):
-                    raise RadarrError("Radarr didn't move the film's folder.")
+                after = await wait_for_folder_move(self, row["movie_id"], target)
                 self.log.write(f"folder tidied: {movie['path']} -> {after['path']}")
                 movie = after
         have = (movie.get("movieFile") or {}).get("path")
@@ -309,6 +309,26 @@ class Flow:
         self.log.write("done")
         if self.services.jellyfin() is not None:
             self.services.refresher.trigger()
+
+
+async def wait_for_folder_move(flow: Flow, movie_id: int, target: str) -> dict:
+    """Radarr saves a new path at once but moves the files in a queued command: wait until the film's file
+    is under the new folder and on disk. Returns the movie as Radarr then shows it."""
+    folder = Path(target)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + FOLDER_MOVE_TIMEOUT_SECONDS
+    while True:
+        movie = await flow.call("movie", movie_id)
+        moved = (movie.get("movieFile") or {}).get("path")
+        if moved:
+            done = Path(moved).is_relative_to(folder) and await asyncio.to_thread(Path(moved).exists)
+        else:  # no file to follow: the saved path is all there is
+            done = Path(movie["path"]) == folder
+        if done:
+            return movie
+        if loop.time() > deadline:
+            raise FlowError(FOLDER_MOVE_FAILED)
+        await asyncio.sleep(FOLDER_MOVE_POLL_SECONDS)
 
 
 def _listing(folder: Path) -> set[Path]:
@@ -498,6 +518,9 @@ async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROO
         row = flow.row()
         if row is not None and row["state"] not in _CHOOSABLE:
             return "This rip can't be changed now."
+        if row is not None and (row["new_path"] or flow.conn.execute(
+                "SELECT 1 FROM encodes WHERE rip_id = ? AND imported_at IS NOT NULL", (rip_id,)).fetchone()):
+            return "This rip's file is already in the library; press Undo first."
         try:
             kind, value = parsed
             lookup = await flow.call("lookup_imdb" if kind == "imdb" else "lookup_tmdb",
@@ -509,7 +532,8 @@ async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROO
             return "Radarr doesn't know that film."
         film_imports.ensure(flow.conn, rip_id, utc_now())
         flow.set(tmdb_id=cand.tmdb_id, title=cand.title, year=cand.year, root_folder=root_folder,
-                 state="identifying", movie_id=None, error=None, message="")
+                 state="identifying", movie_id=None, error=None, message="", old_path=None, old_folder=None,
+                 recycled_path=None, replace={}, new_path=None, extras=[], encode_id=None, added_by_us=0, step="")
         flow.log.write(f"chosen: {cand.title} ({cand.year}) tmdb {cand.tmdb_id}")
         return None
 

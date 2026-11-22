@@ -29,6 +29,8 @@ class FakeRadarr:
         self.root = base / "library" / "Movies"
         self.other_root = base / "library" / "Other movies"
         self.recycle = base / "library" / "recycle"
+        self.move_delay = 0  # >0: a folder move (moveFiles=true) finishes only after this many later movie() calls
+        self._pending_moves: list[dict] = []
         self.bin_set = True  # False: Radarr has no recycle bin, so a replaced file is deleted
         for folder in (self.root, self.other_root, self.recycle):
             folder.mkdir(parents=True)
@@ -99,6 +101,11 @@ class FakeRadarr:
 
     def movie(self, movie_id: int) -> dict:
         self._enter("movie", "GET", f"/api/v3/movie/{movie_id}")
+        for pending in [p for p in self._pending_moves if p["id"] == int(movie_id)]:
+            pending["left"] -= 1
+            if pending["left"] <= 0:
+                self._pending_moves.remove(pending)
+                self._finish_move(pending["id"], pending["old"], pending["new"])
         return json.loads(json.dumps(self.movies[int(movie_id)]))
 
     def add_movie(self, lookup: dict, root_folder: str, profile_id: int) -> dict:
@@ -113,7 +120,14 @@ class FakeRadarr:
     def update_movie(self, movie: dict, move_files: bool = False) -> dict:
         self._enter("update_movie", "PUT", f"/api/v3/movie/{movie['id']}?moveFiles={str(move_files).lower()}")
         old = self.movies.get(movie["id"])
-        if move_files and old and old["path"] != movie["path"] and Path(old["path"]).exists():
+        moving = move_files and old and old["path"] != movie["path"] and Path(old["path"]).exists()
+        if moving and self.move_delay > 0:  # like Radarr: the path is saved now, the files follow later
+            movie = {**movie, "movieFile": old.get("movieFile")} if old.get("movieFile") else movie
+            self.movies[movie["id"]] = json.loads(json.dumps(movie))
+            self._pending_moves.append({"id": movie["id"], "old": old["path"], "new": movie["path"],
+                                        "left": self.move_delay})
+            return movie
+        if moving:
             Path(movie["path"]).parent.mkdir(parents=True, exist_ok=True)
             shutil.move(old["path"], movie["path"])
             if movie.get("movieFile"):
@@ -121,6 +135,14 @@ class FakeRadarr:
                 movie = {**movie, "movieFile": {**movie["movieFile"], "path": str(Path(movie["path"]) / name)}}
         self.movies[movie["id"]] = json.loads(json.dumps(movie))
         return movie
+
+    def _finish_move(self, movie_id: int, old: str, new: str) -> None:
+        Path(new).parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(old, new)
+        stored = self.movies[movie_id]
+        if stored.get("movieFile"):
+            name = Path(stored["movieFile"]["path"]).name
+            stored["movieFile"]["path"] = str(Path(new) / name)
 
     def delete_movie(self, movie_id: int, delete_files: bool = False) -> None:
         self._enter("delete_movie", "DELETE", f"/api/v3/movie/{movie_id}")

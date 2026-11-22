@@ -333,3 +333,89 @@ def test_undo_retry_removes_empty_folder_of_added_movie(config, setup, tmp_path,
     assert folder.is_dir() and row_of(setup, rip)["new_path"] is None
     assert asyncio.run(filmundo.undo(services, rip)) == "Undone."
     assert not folder.exists()
+
+
+def test_choose_different_film_after_replace_wait_clears_old_fields(config, setup, tmp_path, monkeypatch):
+    from .fake_radarr import LION_1994
+    rip, eid, services, fake, movie, old = start(config, setup, tmp_path, monkeypatch)
+    fake.catalog.append(LION_1994)
+    run(services, rip)
+    row = row_of(setup, rip)
+    assert row["state"] == "needs_replace_ok" and row["old_path"] == str(old)
+    assert asyncio.run(filmimport.choose_film(services, rip, "8587")) is None
+    row = row_of(setup, rip)
+    assert row["state"] == "imported", row["error"]
+    assert row["old_path"] is None and row["old_folder"] is None and json.loads(row["replace"]) == {}
+    assert row["tmdb_id"] == 8587 and row["added_by_us"] == 1
+    assert asyncio.run(filmundo.undo(services, rip)) == "Undone."
+    assert [m["tmdbId"] for m in fake.movies.values()] == [137106]
+    assert old.read_bytes() == b"o" * 90 and fake.movies[movie["id"]]["movieFile"]["path"] == str(old)
+
+
+def test_choose_refused_after_file_imported(config, setup, tmp_path, monkeypatch):
+    probe(monkeypatch)
+    rip, eid = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    run(services, rip)
+    row = row_of(setup, rip)
+    assert row["state"] == "imported"
+    film_imports.update(setup, rip, NOW, state="failed", step="extras")  # failed after the file went in
+    message = "This rip's file is already in the library; press Undo first."
+    assert asyncio.run(filmimport.choose_film(services, rip, "137106")) == message
+    row = row_of(setup, rip)
+    assert row["state"] == "failed" and row["new_path"]
+    film_imports.update(setup, rip, NOW, new_path=None)  # only the encode records the import
+    assert asyncio.run(filmimport.choose_film(services, rip, "137106")) == message
+
+
+def _tidy_setup(config, setup, tmp_path, monkeypatch):
+    monkeypatch.setattr(filmimport, "FOLDER_MOVE_POLL_SECONDS", 0.0)
+    rip, eid, services, fake, movie, old = start(
+        config, setup, tmp_path, monkeypatch, lookup=ELF, label="Elf", seconds=5820, folder="Elf")
+    ask_off(setup)
+    return rip, eid, services, fake, movie, old
+
+
+def test_tidy_waits_for_radarr_async_move(config, setup, tmp_path, monkeypatch):
+    rip, eid, services, fake, movie, old = _tidy_setup(config, setup, tmp_path, monkeypatch)
+    fake.move_delay = 3
+    run(services, rip)
+    row = row_of(setup, rip)
+    assert row["state"] == "imported", row["error"]
+    target = fake.root / "Elf (2003)"
+    assert row["new_path"] == str(target / "Elf.mkv") and Path(row["new_path"]).is_file()
+    assert not fake._pending_moves and not (fake.root / "Elf").exists()
+
+
+def test_undo_waits_for_radarr_async_folder_restore(config, setup, tmp_path, monkeypatch):
+    rip, eid, services, fake, movie, old = _tidy_setup(config, setup, tmp_path, monkeypatch)
+    run(services, rip)
+    assert row_of(setup, rip)["state"] == "imported"
+    output = Path(encodes.get(setup, eid)["output"])
+    fake.move_delay = 3
+    assert asyncio.run(filmundo.undo(services, rip)) == "Undone."
+    assert output.is_file() and old.read_bytes() == b"o" * 90
+    assert not (fake.root / "Elf (2003)").exists()
+    assert fake.movies[movie["id"]]["path"] == str(fake.root / "Elf")
+
+
+def test_tidy_move_timeout_fails_readably(config, setup, tmp_path, monkeypatch):
+    rip, eid, services, fake, movie, old = _tidy_setup(config, setup, tmp_path, monkeypatch)
+    monkeypatch.setattr(filmimport, "FOLDER_MOVE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(filmimport, "FOLDER_MOVE_POLL_SECONDS", 0.01)
+    fake.move_delay = 10**6
+    run(services, rip)
+    row = row_of(setup, rip)
+    assert row["state"] == "failed" and row["error"] == "Radarr didn't finish moving the film's folder."
+    assert row["step"] == "unmonitor"
+
+
+def test_undo_move_timeout_stops_with_row_unchanged(config, setup, tmp_path, monkeypatch):
+    rip, eid, services, fake, movie, old = _tidy_setup(config, setup, tmp_path, monkeypatch)
+    run(services, rip)
+    monkeypatch.setattr(filmimport, "FOLDER_MOVE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(filmimport, "FOLDER_MOVE_POLL_SECONDS", 0.01)
+    fake.move_delay = 10**6
+    message = asyncio.run(filmundo.undo(services, rip))
+    assert message.startswith("Undo stopped: Radarr didn't finish moving the film's folder.")
+    assert row_of(setup, rip)["state"] == "imported"
