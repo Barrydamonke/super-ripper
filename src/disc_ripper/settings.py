@@ -145,6 +145,26 @@ SETTINGS: tuple[SettingDef, ...] = (
         "If an encoder prints nothing for this long it is stopped and the encode fails, so it can be retried.",
         group="Encoding",
     ),
+    SettingDef(
+        "radarr_url", "Radarr address", "url", "",
+        help="Where Radarr runs, e.g. http://192.168.1.10:7878. Blank: films are not identified or imported.",
+        group="Radarr",
+    ),
+    SettingDef(
+        "radarr_api_key", "Radarr API key", "secret", "",
+        help="Radarr Settings → General → API Key. Never shown again once saved.",
+        group="Radarr",
+    ),
+    SettingDef(
+        "ask_before_replace", "Ask before replacing", "bool", True,
+        help="When a film is already in Radarr, wait for your OK before replacing its file.",
+        group="Radarr",
+    ),
+    SettingDef(
+        "tidy_folders_on_replace", "Tidy folders on replace", "bool", True,
+        help="When replacing, rename the film's folder to Radarr's own name for it.",
+        group="Radarr",
+    ),
 )
 
 _BY_KEY = {s.key: s for s in SETTINGS}

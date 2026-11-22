@@ -27,6 +27,10 @@ class MkvInfo:
     audio_channels: tuple[int, ...] = ()
     sar: tuple[int, int] = (1, 1)
     dar: float | None = None
+    width: int = 0
+    height: int = 0
+    video_codec: str = ""
+    audio_codec: str = ""
 
 
 def _ratio(text) -> tuple[int, int] | None:
@@ -50,6 +54,10 @@ def parse_ffprobe(text: str) -> MkvInfo:
         audio_channels=tuple(int(s.get("channels") or 0) for s in audio),
         sar=(_ratio(video[0].get("sample_aspect_ratio")) if video else None) or (1, 1),
         dar=dar[0] / dar[1] if dar else None,
+        width=int(video[0].get("width") or 0) if video else 0,
+        height=int(video[0].get("height") or 0) if video else 0,
+        video_codec=str(video[0].get("codec_name") or "") if video else "",
+        audio_codec=str(audio[0].get("codec_name") or "") if audio else "",
     )
 
 

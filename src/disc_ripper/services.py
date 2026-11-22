@@ -15,9 +15,10 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import cd_rips, cdrip, coverart, db, drives, encodes, joblog, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
+from . import cd_rips, cdrip, coverart, db, drives, encodes, film_imports, filmimport, joblog, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
 from .jellyfin import Jellyfin, RefreshDebouncer
 from .musicbrainz import MusicBrainz
+from .radarr import Radarr
 from .cdrom import CdDrive
 from .cdtoc import Toc, musicbrainz_disc_id
 from .clock import utc_now
@@ -32,6 +33,7 @@ log = logging.getLogger(__name__)
 
 SCHEDULE_REFRESH_SECONDS = 300
 RAW_SWEEP_SECONDS = 600
+FILM_CONFIRM_SECONDS = 300
 SCAN_MISSING = "The rip's scan is missing, so its length can't be checked; can't encode."
 GUARD_TICK_SECONDS = 60
 CD_BYTES_PER_SECOND = 176_400  # 44.1 kHz, 16-bit stereo
@@ -94,6 +96,10 @@ class Services:
         self._tasks: list[asyncio.Task] = []
         self._loop: asyncio.AbstractEventLoop | None = None
         self._schedule_error: str | None = None
+        self._import_locks: dict[int, asyncio.Lock] = {}
+        self._import_tasks: set[asyncio.Task] = set()
+        self._films_push: asyncio.Task | None = None
+        self._films_dirty = False
 
     def jellyfin(self) -> Jellyfin | None:
         """A Jellyfin client from the current settings, or None if not configured."""
@@ -103,6 +109,23 @@ class Services:
         finally:
             conn.close()
         return Jellyfin(url, key) if url and key else None
+
+    def radarr(self) -> Radarr | None:
+        """A Radarr client from the current settings, or None if not configured."""
+        conn = db.connect(self.config.db_path)
+        try:
+            url, key = settings.get(conn, "radarr_url"), settings.get(conn, "radarr_api_key")
+        finally:
+            conn.close()
+        return Radarr(url, key) if url and key else None
+
+    def import_lock(self, rip_id: int) -> asyncio.Lock:
+        """The lock that lets one film-import flow at a time run for a rip."""
+        return self._import_locks.setdefault(rip_id, asyncio.Lock())
+
+    async def encode_done(self, encode_id: int) -> None:
+        """An encode finished: start the film import when it is the main title's."""
+        await filmimport.encode_done(self, encode_id)
 
     # -- audio CDs -------------------------------------------------------------
 
@@ -569,6 +592,8 @@ class Services:
     @staticmethod
     def _raw_checks(conn, rip_id: int, title: int, now: datetime, keep_hours: float | None):
         """(error, good encodes, raw path)."""
+        if rip_id in film_imports.active_rip_ids(conn):
+            return ("This rip is being imported or was imported; it's cleaned up once Jellyfin has the film."), [], None
         rip = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
         entry = json.loads(rip["files"] or "{}").get(str(title)) if rip else None
         if entry is None:
@@ -620,6 +645,14 @@ class Services:
                 log.exception("encode: deleting old raw rips failed")
             await asyncio.sleep(RAW_SWEEP_SECONDS)
 
+    async def _film_confirm_loop(self) -> None:
+        while True:
+            try:
+                await filmimport.confirm_and_clean(self, datetime.now(timezone.utc))
+            except Exception:  # never let the loop die
+                log.exception("film import: confirming imports failed")
+            await asyncio.sleep(FILM_CONFIRM_SECONDS)
+
     def _render_films(self) -> str | None:
         from .web.films_routes import render_films
 
@@ -629,6 +662,31 @@ class Services:
         from .web.films_routes import render_encodes
 
         return self._db(render_encodes)
+
+    def films_changed(self) -> None:
+        """A film import changed: publish the Films list soon (changes close together are sent once)."""
+        self._films_dirty = True
+        if self._films_push is not None and not self._films_push.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._films_push = loop.create_task(self._push_films())
+
+    async def _push_films(self) -> None:
+        while self._films_dirty:
+            self._films_dirty = False
+            await asyncio.sleep(0.1)
+            if not self.broker.subscriber_count:
+                continue
+            try:
+                html = await asyncio.to_thread(self._render_films)
+            except Exception:  # a failed render must not stop later pushes
+                log.exception("films: publishing the Films list failed")
+                continue
+            if html is not None:
+                self.broker.publish("films", html)
 
     async def encodes_changed(self, progress_only: bool = False) -> None:
         """Publish the Films list and the Encoding panel. A progress tick refreshes the panel only:
@@ -872,8 +930,13 @@ class Services:
             log.info("jobs: %d job(s) were running at the last stop; marked interrupted", count)
         await self._refresh_drives()
         self.encoder.start()
+        try:
+            await filmimport.resume_after_restart(self)
+        except Exception:  # the loops must still start
+            log.exception("film import: resuming after the restart failed")
         for coro, name in (
             (self._raw_sweep_loop(), "raw sweep"),
+            (self._film_confirm_loop(), "film import confirm"),
             (self.monitor.run(), "media monitor"),
             (self._schedule_loop(), "schedule refresh"),
             (self._guard_loop(), "guard tick"),

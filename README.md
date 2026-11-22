@@ -2,7 +2,7 @@
 
 A single Docker container for Unraid that rips, encodes and burns discs from its own web UI. The design is in [Disc Ripper – Design Plan.md](Disc%20Ripper%20%E2%80%93%20Design%20Plan.md).
 
-Current state: **steps 4 and 6 are built** (DVD and Blu-ray ripping, and encoding), on top of step 3 (audio CD ripping) and step 2 (detection, queues and the shutdown guard). **Step 5 (identification and import into the library) is next.**
+Current state: **steps 4 and 6 are built** (DVD and Blu-ray ripping, and encoding), on top of step 3 (audio CD ripping) and step 2 (detection, queues and the shutdown guard). **Step 5 (identification and import into the library) is built, and awaits testing on the server.**
 - **Dashboard** (the home page): shows each enabled drive live, as empty, tray open or disc in, with the disc type and label. It has Eject and Close tray buttons, and lets you queue a *test job*: a pretend job with a chosen length and size that exercises the queue, progress and cache-space check.
 - **Drives page:** labels and enables drives.
 - **Audio CDs:**
@@ -10,7 +10,7 @@ Current state: **steps 4 and 6 are built** (DVD and Blu-ray ripping, and encodin
   - A clean rip files itself into `/data/MEDIA/Music/<Album Artist>/<Album> (<Year>)/`.
   - Anything that needs a decision waits on the **Music** page: no match, several possible releases, unverified tracks, or an album you already have.
 - **Shutdown guard:** reads the Pi's power schedule and tells unraid-backend, through `/api/busy`, to wait while a job runs, for at most the grace period after the scheduled end.
-- **DVDs and Blu-rays:** insert a disc and it is scanned with MakeMKV, then the main title is ripped to MKV into the downloads folder and the disc ejects. Encoding is described below; identification and filing come in a later step.
+- **DVDs and Blu-rays:** insert a disc and it is scanned with MakeMKV, then the main title is ripped to MKV into the downloads folder and the disc ejects. Encoding and importing the film into the library are described below.
 
 Data-disc ripping comes in a later step.
 
@@ -93,7 +93,7 @@ What happens on insert: the disc is scanned and the **longest title** is taken a
 
 A held card lists the titles; pick one and press **Rip**. While a rip runs you can tick **extras** on the card; they are ripped after the main title, and the eject waits for them. Cancelling an unwanted extra still lets the disc eject; a failed title keeps the disc in for Retry. **Eject** also cancels anything still queued for that disc, as does taking the disc out.
 
-Where rips land: `/data/downloads/disc-ripper/<rip_id>/`, with extras in `extras/`. Files keep MakeMKV's own names and are never overwritten. Nothing tidies the downloads folder yet (that is step 5), so delete a rip's folder to discard it. If the move out of the work area fails (for example the cache is short of space), the rip still counts as done and the disc ejects; the file stays in `/work/<job>/`, and the drive's card keeps the message and a **Move again** button, with or without a disc in. If the file is gone from the work area by then, Move again says there is nothing left to move.
+Where rips land: `/data/downloads/disc-ripper/<rip_id>/`, with extras in `extras/`. Files keep MakeMKV's own names and are never overwritten. Once a film is imported and Jellyfin shows it, its rip folder is cleaned up (see Importing films); otherwise delete a rip's folder to discard it. If the move out of the work area fails (for example the cache is short of space), the rip still counts as done and the disc ejects; the file stays in `/work/<job>/`, and the drive's card keeps the message and a **Move again** button, with or without a disc in. If the file is gone from the work area by then, Move again says there is nothing left to move.
 
 When the beta key or version expires, rips fail with an "Update MakeMKV" message. Paste the new beta key in Settings, or rebuild the image with a newer version (below).
 
@@ -155,6 +155,58 @@ Encodes queue behind the shutdown guard (a running encode holds shutdown like a 
    docker exec disc-ripper rm -f /tmp/hb-test.mkv /tmp/ff-test.mkv
    ```
    Then copy them into `tests/fixtures/encode/` and check the parsers against them. Do this once for a DVD and once for a Blu-ray.
+
+### Importing films
+
+After a film's main title has a good encode, the app looks the film up in Radarr and files the encode into your library. TV-like discs (no single main title) are left alone: the Films page says "TV: not imported yet" and the rip stays in downloads.
+
+**Setup.** Settings has a **Radarr** group. Without an address and key nothing is identified, and the Films page says "Set up Radarr in Settings to import films."
+- **Radarr address:** for example `http://<server>:7878`.
+- **Radarr API key:** Radarr → Settings → General → Security → API Key. It is never shown again once saved.
+- **Ask before replacing** (default on): when the film is already in Radarr with a file, wait for your OK before replacing it.
+- **Tidy folders on replace** (default on): after a replace, rename the film's folder to Radarr's own name for it, e.g. `Elf` to `Elf (2003)`.
+
+Also turn on Radarr's recycle bin (Settings → Media Management → Recycling Bin) and point it at a folder under `/data`. Radarr and the ripper must both see that folder at the same path, which they do when both mount the share as `/data`. Without it, Replace asks you to type `REPLACE`, and Undo cannot bring the old file back.
+
+**Finding the film.** The search uses MakeMKV's disc name, or the cleaned-up volume label if there is none. A match is imported automatically only when it is confident: the title is at least 90% similar, the runtime is within 5 minutes (or 6%) of the ripped title, and no other candidate also fits. Anything else waits on the Films page with the best five candidates and an **Identify** form: type a name (and year), or paste an IMDb or TMDb ID or link, press **Search**, then **Use this film**. A remake with the same title but a different length is told apart by its runtime; if two fit, it waits for you. A film that is not in Radarr yet is added under **Movies**, unmonitored, with Radarr's first quality profile (you can pick **Other movies** in the form), and Radarr's own naming files it. The film is always left unmonitored, so Radarr never goes looking for a "better" copy.
+
+**Auto-import or wait.** A film that is new to Radarr, or in Radarr without a file, imports straight away once the match is confident. A film that is already in Radarr with a file is a **Replace**:
+- With **Ask before replacing** on, the rip waits with the old file and the new one side by side (resolution, codecs, audio, size, length) and three choices: **Replace**, **Skip**, or **Choose a different film**.
+- With it off, the replace happens on its own, but only if every safety check passes. Otherwise it waits anyway and the failed check is named. The checks are:
+  - the new length is within 2% (or 5 minutes) of the old file's;
+  - Radarr's recycle bin is set, and the ripper can see it;
+  - the new resolution is not lower than the old one (a DVD over a 1080p file always waits).
+- With no visible recycle bin, **Replace** needs the word `REPLACE` typed first.
+
+Import steps run in the background and never hold the shutdown guard. The file is *moved* into the library by Radarr, which names it and picks its quality (DVD, Bluray-1080p, or Remux-1080p for a Blu-ray Copy only), and the app checks that Radarr's file really is the new one. Extras go into the film's `extras` folder. Only one rip of a film is imported at a time; a second waits ("Another rip of this film is being imported"). If Radarr is down or the key is wrong, the rip shows "Import failed" with the reason and **Retry**, which carries on from where it stopped. After a restart, an interrupted import shows "Interrupted by a restart; press Retry." Each import has a log (`/config/logs/import-<rip_id>.log`, linked from the Films page) with every Radarr call; the key is never written to it.
+
+When a second rip of the same film waits and then carries on, it goes through the replace rule. With Ask before replacing off and all checks passing, it replaces automatically.
+
+Encodes that finished before Radarr was set up aren't imported automatically. Use Identify on the Films page, or re-encode.
+
+**Undo, Skip and the folder tidy.**
+- **Recently imported** at the top of the Films page lists the last imports, each with **Undo**.
+- Undoing a new film moves its file back to the rip's downloads folder, removes the film from Radarr only if the ripper added it, and removes the folder if it is empty.
+- Undoing a replace moves the new file back, restores the old file from Radarr's recycle bin, and moves the folder back to its old name if it was tidied. Radarr empties its recycle bin after `recycleBinCleanupDays` (default 7), and after that only the new file comes back. The page shows "Undo available until <date>" for replaces.
+- Undo leaves the rip waiting for a film again, so "Choose a different film" is Undo and then Identify.
+- **Skip** gives up on a rip: after a confirmation it deletes the rip's downloads folder.
+- The folder tidy runs only on a replace. The target is the name Radarr itself gives the film; the film's current folder is the last part of its Radarr path.
+
+**Clean-up.** After an import, the ripper asks Jellyfin to refresh and checks every 5 minutes, for up to 24 hours, for the film. It counts as seen when Jellyfin has an item with the film's TMDb ID whose file name and size match the imported file (the name, not the whole path, because Jellyfin may mount the library elsewhere). Then the rip's downloads folder (raw, encodes and extras) is deleted and the Films page says "In Jellyfin; the rip's files were cleaned up." Without Jellyfin set up, the folder is deleted 24 hours after the import. Clean-up waits, and keeps the rip, if the library file is missing or still inside the rip folder: the page says "Check the library." The raw-file sweep leaves any rip that is being imported or was imported alone.
+
+### Testing step 5 on the server
+
+1. Open Radarr's Swagger page (`<radarr>/api/v3/…` docs) and check the endpoints in the design's Constraints.
+2. Check Radarr → Settings → Media Management → Recycling Bin is set to a folder under `/data`. Turn it on before replacing.
+3. Import one new film (one not in Radarr). It lands under Movies, unmonitored, and Jellyfin shows it.
+4. Replace one film with **Ask before replacing** on. Check the side-by-side comparison, then press Replace. Check the old file is in the recycle bin and the folder tidy.
+5. **Undo** that replace. The old file comes back, and Radarr shows it. Check the page says "Undo available until <date>" first.
+6. Turn **Ask before replacing** off and replace another film. Also try a DVD over a 1080p file: it must still wait.
+7. With the recycle bin off, check that Replace needs the typed word `REPLACE`.
+8. Rip a remake with the same title as an older film. It must not import the wrong one.
+9. Stop Radarr, start an import, and check the rip fails with a readable reason. Start Radarr and press Retry.
+10. In a browser, type in the Identify search box and wait for an encode to progress; the text and results must stay.
+11. Check Jellyfin's watch history on a replaced film, and that the rip's downloads folder is deleted once Jellyfin shows the film.
 
 ## Update
 

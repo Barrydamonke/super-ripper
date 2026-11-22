@@ -425,3 +425,17 @@ class EncodePool:
         log.info("encodes: #%s %s%s", encode_id, state, f": {error}" if error else "")
         joblog.JobLog(self._log_path(encode_id)).write(f"finished: {state}" + (f" — {error}" if error else ""))
         await self.notify()
+        if state == "done":
+            await self._tell_done(encode_id)
+
+    async def _tell_done(self, encode_id: int) -> None:
+        """Let the services start the film import. Must never stop an encode."""
+        hook = getattr(self.services, "encode_done", None)
+        if hook is None:
+            return
+        try:
+            result = hook(encode_id)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            log.exception("encodes: starting the film import failed")

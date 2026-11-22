@@ -30,3 +30,14 @@ table.titles th, table.titles td { padding: .25rem .4rem; }
 .film-file { margin: .5rem 0; }
 .encode-row { margin: .2rem 0 .2rem 1rem; }
 .encode-line progress { width: 10rem; vertical-align: middle; }
+.recently-imported { border: 1px solid #ccc; border-radius: 6px; padding: .5rem 1rem; margin: 1rem 0; }
+.recently-imported h2 { font-size: 1.1rem; margin: .25rem 0; }
+.recent-row { margin: .4rem 0; }
+.import-state { margin: .5rem 0; }
+table.compare { border-collapse: collapse; margin: .5rem 0; }
+table.compare th, table.compare td { padding: .25rem .6rem; text-align: left; border-bottom: 1px solid #ddd; }
+table.compare tr.bad th, table.compare tr.bad td { color: #b00020; font-weight: bold; }
+.film-candidate { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .4rem 0; }
+.film-candidate .poster { width: 46px; height: 69px; background: #eee; object-fit: cover; flex: none; }
+.film-candidate-text { flex: 1 1 12rem; }
+.different-film { margin: .5rem 0; }

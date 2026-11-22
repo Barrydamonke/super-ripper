@@ -1,0 +1,5 @@
+[
+ {"id": 1, "title": "DVD", "quality": {"id": 5, "name": "DVD", "source": "dvd", "resolution": 480, "modifier": "none"}},
+ {"id": 2, "title": "Bluray-1080p", "quality": {"id": 7, "name": "Bluray-1080p", "source": "bluray", "resolution": 1080, "modifier": "none"}},
+ {"id": 3, "title": "Remux-1080p", "quality": {"id": 30, "name": "Remux-1080p", "source": "bluray", "resolution": 1080, "modifier": "remux"}}
+]

@@ -1,0 +1,18 @@
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% for c in cands %}
+  <form class="film-candidate" hx-post="/films/identify/choose" hx-target="#films" hx-disabled-elt="find button">
+    <input type="hidden" name="rip_id" value="{{ rip_id }}">
+    <input type="hidden" name="tmdb_id" value="{{ c.tmdb_id }}">
+    {% if c.poster and (c.poster.startswith("http://") or c.poster.startswith("https://")) %}<img class="poster" src="{{ c.poster }}" alt="{{ c.title }}" loading="lazy" width="46" height="69">{% else %}<span class="poster"></span>{% endif %}
+    <span class="film-candidate-text"><strong>{{ c.title }}</strong>{% if c.year %} ({{ c.year }}){% endif %}
+      {% if c.runtime_min %} · {{ c.runtime_min }} min{% endif %}
+      {% if c.in_library %} · <span class="hint">in your library</span>{% endif %}</span>
+    <select name="root" aria-label="Where to add it">
+      <option value="Movies" selected>Movies</option>
+      <option value="Other movies">Other movies</option>
+    </select>
+    <button type="submit">Use this film</button>
+  </form>
+{% else %}
+  {% if searched and not error %}<p class="hint">No films found.</p>{% endif %}
+{% endfor %}
