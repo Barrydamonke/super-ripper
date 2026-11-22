@@ -64,11 +64,28 @@ class Radarr:
         self.base = url.rstrip("/")
         self._headers = {"X-Api-Key": api_key, "Accept": "application/json"}
         self._fetch = fetch
+        self.on_call: Callable[[str, str, str], None] | None = None  # (method, path, "ok" or the error), for logs
         parts = urllib.parse.urlsplit(self.base)
         # never echo user:pass@ from the address
         self._shown_url = self.base if "@" not in parts.netloc else self.base.replace(parts.netloc, parts.netloc.rpartition("@")[2], 1)
 
+    def _note(self, method: str, path: str, outcome: str) -> None:
+        if self.on_call is not None:
+            try:
+                self.on_call(method, path, outcome)
+            except Exception:  # a logging hook must never break a call
+                pass
+
     def _call(self, method: str, path: str, payload: object = None):
+        try:
+            result = self._request(method, path, payload)
+        except RadarrError as exc:
+            self._note(method, path, str(exc))
+            raise
+        self._note(method, path, "ok")
+        return result
+
+    def _request(self, method: str, path: str, payload: object = None):
         headers = dict(self._headers)
         body = None
         if payload is not None:

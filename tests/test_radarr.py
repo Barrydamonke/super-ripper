@@ -202,3 +202,14 @@ def test_credentials_in_url_are_not_echoed():
         c.root_folders()
     assert str(err.value) == "Radarr didn't answer at http://radarr.test:7878"
     assert "s3cret" not in str(err.value) and "bob" not in str(err.value)
+
+
+def test_on_call_hook_reports_outcomes_without_key():
+    c, fake = client({("GET", "/api/v3/rootfolder"): [], ("GET", "/api/v3/qualityprofile"): RadarrError("Radarr: 500")})
+    seen = []
+    c.on_call = lambda method, path, outcome: seen.append((method, path, outcome))
+    c.root_folders()
+    with pytest.raises(RadarrError):
+        c.quality_profiles()
+    assert seen == [("GET", "/api/v3/rootfolder", "ok"), ("GET", "/api/v3/qualityprofile", "Radarr: 500")]
+    assert KEY not in repr(seen)

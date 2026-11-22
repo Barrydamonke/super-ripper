@@ -15,9 +15,10 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import cd_rips, cdrip, coverart, db, drives, encodes, joblog, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
+from . import cd_rips, cdrip, coverart, db, drives, encodes, filmimport, joblog, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
 from .jellyfin import Jellyfin, RefreshDebouncer
 from .musicbrainz import MusicBrainz
+from .radarr import Radarr
 from .cdrom import CdDrive
 from .cdtoc import Toc, musicbrainz_disc_id
 from .clock import utc_now
@@ -94,6 +95,8 @@ class Services:
         self._tasks: list[asyncio.Task] = []
         self._loop: asyncio.AbstractEventLoop | None = None
         self._schedule_error: str | None = None
+        self._import_locks: dict[int, asyncio.Lock] = {}
+        self._import_tasks: set[asyncio.Task] = set()
 
     def jellyfin(self) -> Jellyfin | None:
         """A Jellyfin client from the current settings, or None if not configured."""
@@ -103,6 +106,23 @@ class Services:
         finally:
             conn.close()
         return Jellyfin(url, key) if url and key else None
+
+    def radarr(self) -> Radarr | None:
+        """A Radarr client from the current settings, or None if not configured."""
+        conn = db.connect(self.config.db_path)
+        try:
+            url, key = settings.get(conn, "radarr_url"), settings.get(conn, "radarr_api_key")
+        finally:
+            conn.close()
+        return Radarr(url, key) if url and key else None
+
+    def import_lock(self, rip_id: int) -> asyncio.Lock:
+        """The lock that lets one film-import flow at a time run for a rip."""
+        return self._import_locks.setdefault(rip_id, asyncio.Lock())
+
+    async def encode_done(self, encode_id: int) -> None:
+        """An encode finished: start the film import when it is the main title's."""
+        await filmimport.encode_done(self, encode_id)
 
     # -- audio CDs -------------------------------------------------------------
 
