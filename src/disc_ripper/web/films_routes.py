@@ -231,7 +231,7 @@ async def _refresh_bin_days(request: Request) -> None:
     try:
         _BIN_DAYS["days"] = (await asyncio.to_thread(client.recycle_bin))[1]
     except RadarrError:
-        pass
+        return  # not cached: the next render asks again
     _BIN_DAYS["at"] = time.monotonic()
 
 
@@ -350,8 +350,7 @@ def _record_refusal(conn: sqlite3.Connection, rip_id: int, text: str) -> None:
 def _start(request: Request, rip_id: int, work) -> None:
     """Run a film-import action (it can take minutes) in the background. A refusal from it is shown
     on the rip's row the next time the list is drawn."""
-    services = _services(request)
-    _STARTING.add(rip_id)
+    services = _services(request)  # the rip is already in _STARTING (see _claim)
 
     async def run() -> None:
         try:
@@ -367,12 +366,14 @@ def _start(request: Request, rip_id: int, work) -> None:
     filmimport._spawn(services, run(), f"film import {rip_id}")
 
 
-def _gate(services, rip_id: int) -> str | None:
-    """The quick refusals shared by every import action."""
+def _claim(services, rip_id: int) -> str | None:
+    """The quick refusals shared by every import action. On success the rip is in _STARTING (checked and
+    added with no await between, so two requests can't both pass); the caller must _start it or release it."""
     if services.radarr() is None:
         return filmimport.NO_RADARR
     if services.import_lock(rip_id).locked() or rip_id in _STARTING:
         return filmimport.BUSY
+    _STARTING.add(rip_id)
     return None
 
 
@@ -443,13 +444,19 @@ async def identify_choose(request: Request, rip_id: int = Form(...), tmdb_id: st
     services = _services(request)
     if filmid.parse_ref(tmdb_id) is None:
         return await _respond(request, error="Enter an IMDb ID, a TMDb ID or a TMDb/IMDb link.", status_code=400)
-    refusal = _gate(services, rip_id)
+    refusal = _claim(services, rip_id)
     if refusal is None:
-        is_film, state = await asyncio.to_thread(services._db, _import_state, rip_id)
-        if not is_film:
-            refusal = "Only films can be imported."
-        elif state is not None and state not in filmimport._CHOOSABLE:
-            refusal = "This rip can't be changed now."
+        try:
+            is_film, state = await asyncio.to_thread(services._db, _import_state, rip_id)
+            if not is_film:
+                refusal = "Only films can be imported."
+            elif state is not None and state not in filmimport._CHOOSABLE:
+                refusal = "This rip can't be changed now."
+        except BaseException:
+            _STARTING.discard(rip_id)
+            raise
+        if refusal:
+            _STARTING.discard(rip_id)
     if refusal:
         return await _respond(request, error=refusal, status_code=409)
     if root not in ("Movies", "Other movies"):
@@ -469,14 +476,20 @@ async def _bin_visible(services) -> bool:
 @router.post("/films/replace")
 async def replace(request: Request, rip_id: int = Form(...), typed: str = Form("")):
     services = _services(request)
-    refusal = _gate(services, rip_id)
+    refusal = _claim(services, rip_id)
     if refusal is None:
-        _, state = await asyncio.to_thread(services._db, _import_state, rip_id)
-        if state != "needs_replace_ok":
-            refusal = "This rip isn't waiting to replace a film."
-        elif typed != "REPLACE" and not await _bin_visible(services):
-            refusal = ("Radarr's recycle bin isn't set (or isn't visible to the ripper), so the old file can't "
-                       "be recovered. Type REPLACE to replace it anyway.")
+        try:
+            _, state = await asyncio.to_thread(services._db, _import_state, rip_id)
+            if state != "needs_replace_ok":
+                refusal = "This rip isn't waiting to replace a film."
+            elif typed != "REPLACE" and not await _bin_visible(services):
+                refusal = ("Radarr's recycle bin isn't set (or isn't visible to the ripper), so the old file can't "
+                           "be recovered. Type REPLACE to replace it anyway.")
+        except BaseException:
+            _STARTING.discard(rip_id)
+            raise
+        if refusal:
+            _STARTING.discard(rip_id)
     if refusal:
         return await _respond(request, error=refusal, status_code=409)
     _start(request, rip_id, lambda s: filmimport.approve_replace(s, rip_id, typed))
@@ -486,11 +499,17 @@ async def replace(request: Request, rip_id: int = Form(...), typed: str = Form("
 @router.post("/films/import/retry")
 async def import_retry(request: Request, rip_id: int = Form(...)):
     services = _services(request)
-    refusal = _gate(services, rip_id)
+    refusal = _claim(services, rip_id)
     if refusal is None:
-        _, state = await asyncio.to_thread(services._db, _import_state, rip_id)
-        if state not in ("failed", "waiting_other"):
-            refusal = "Nothing to retry."
+        try:
+            _, state = await asyncio.to_thread(services._db, _import_state, rip_id)
+            if state not in ("failed", "waiting_other"):
+                refusal = "Nothing to retry."
+        except BaseException:
+            _STARTING.discard(rip_id)
+            raise
+        if refusal:
+            _STARTING.discard(rip_id)
     if refusal:
         return await _respond(request, error=refusal, status_code=409)
     _start(request, rip_id, lambda s: filmimport.retry_import(s, rip_id))

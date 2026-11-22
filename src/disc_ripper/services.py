@@ -680,7 +680,11 @@ class Services:
             await asyncio.sleep(0.1)
             if not self.broker.subscriber_count:
                 continue
-            html = await asyncio.to_thread(self._render_films)
+            try:
+                html = await asyncio.to_thread(self._render_films)
+            except Exception:  # a failed render must not stop later pushes
+                log.exception("films: publishing the Films list failed")
+                continue
             if html is not None:
                 self.broker.publish("films", html)
 

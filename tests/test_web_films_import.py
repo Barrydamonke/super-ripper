@@ -284,3 +284,68 @@ def test_import_state_change_publishes_films_list(films):  # noqa: F811
 
     name, html = asyncio.run(main())
     assert name == "films" and "No DVD or Blu-ray rips yet." in html
+
+
+@pytest.fixture(autouse=True)
+def reset_import_page_state():
+    from disc_ripper.web import films_routes
+
+    films_routes._BIN_DAYS.update(days=None, at=-1e9)
+    films_routes._STARTING.clear()
+    yield
+    films_routes._STARTING.clear()
+
+
+def _nested_preserve(html):
+    from html.parser import HTMLParser
+
+    class P(HTMLParser):
+        void = {"input", "img", "br", "hr", "meta", "link"}
+
+        def __init__(self):
+            super().__init__()
+            self.stack, self.bad = [], 0
+
+        def handle_starttag(self, tag, attrs):
+            keep = any(k == "hx-preserve" for k, _ in attrs)
+            if keep and any(self.stack):
+                self.bad += 1
+            if tag not in self.void:
+                self.stack.append(keep)
+
+        def handle_endtag(self, tag):
+            if tag not in self.void and self.stack:
+                self.stack.pop()
+
+    p = P()
+    p.feed(html)
+    return p.bad
+
+
+def test_no_nested_hx_preserve(radarr):
+    client, conn, config, fake = radarr
+    bad = {**REPLACE, "checks": {"length": True, "recycle_bin": False, "resolution": True}}
+    states = {"failed": {"error": "boom"}, "waiting_other": {}, "needs_identify": {"candidates": CANDS},
+              "needs_replace_ok": {"replace": bad}}
+    for n, (state, extra) in enumerate(states.items()):
+        rip = film_rip(conn, config, fp=f"fp-n{n}")
+        set_row(conn, rip, state=state, tmdb_id=137106, title="The Lego Movie", **extra)
+    text = client.get("/films").text
+    assert text.count("hx-preserve") >= 4
+    assert _nested_preserve(text) == 0
+
+
+def test_refused_action_releases_the_rip(radarr):
+    from disc_ripper.web import films_routes
+    client, conn, config, fake = radarr
+    rip = film_rip(conn, config)
+    set_row(conn, rip, state="imported")
+    assert client.post("/films/import/retry", data={"rip_id": rip}).status_code == 409
+    assert rip not in films_routes._STARTING
+
+
+def test_failed_message_equal_to_error_shown_once(radarr):
+    client, conn, config, fake = radarr
+    rip = film_rip(conn, config)
+    set_row(conn, rip, state="failed", error="same words here", message="same words here")
+    assert client.get("/films").text.count("same words here") == 1

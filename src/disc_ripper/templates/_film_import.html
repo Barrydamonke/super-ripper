@@ -1,6 +1,6 @@
 {#- One rip's import state. Expects `rip` (with .imp, the film_imports row, and .starting). -#}
-{% macro identify_form(rip) %}
-  <div id="identify-{{ rip.rip_id }}" class="identify" hx-preserve>
+{% macro identify_form(rip, preserve=true) %}
+  <div id="identify-{{ rip.rip_id }}" class="identify"{% if preserve %} hx-preserve{% endif %}>
     <form class="inline" hx-post="/films/identify/search" hx-target="#identify-results-{{ rip.rip_id }}"
           hx-disabled-elt="find button">
       <input type="hidden" name="rip_id" value="{{ rip.rip_id }}">
@@ -17,7 +17,7 @@
 {% macro different_film(rip) %}
   <details class="different-film" id="different-{{ rip.rip_id }}" hx-preserve>
     <summary>Choose a different film</summary>
-    {{ identify_form(rip) }}
+    {{ identify_form(rip, false) }}{# the details element is preserved; never nest hx-preserve #}
   </details>
 {% endmacro %}
 
@@ -92,6 +92,6 @@
   {% else %}
     <p class="hint">{{ state }}{% if imp.message %}: {{ imp.message }}{% endif %}</p>
   {% endif %}
-  {% if imp.message and (state == "failed" or (state == "needs_replace_ok" and not imp.message.startswith("This film is already in Radarr"))) %}<p class="error">{{ imp.message }}</p>{% endif %}
+  {% if imp.message and ((state == "failed" and imp.message != imp.error) or (state == "needs_replace_ok" and not imp.message.startswith("This film is already in Radarr"))) %}<p class="error">{{ imp.message }}</p>{% endif %}
   </div>
 {% endif %}
