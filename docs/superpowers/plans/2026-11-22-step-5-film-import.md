@@ -30,7 +30,8 @@
   With `ask_before_replace` on, or any check failing, the rip waits. Without a recycle bin, Replace needs the typed word `REPLACE`.
 - **Quality names for ManualImport:** DVD → `DVD`; Blu-ray standard or fast → `Bluray-1080p`; Blu-ray copy → `Remux-1080p`. The `quality` object comes from `GET /api/v3/qualitydefinition`, matched by name.
 - **`importMode: "move"`.** Poll the command until done (timeout **10 min**), then confirm that `movieFile.path` is the new file.
-- **Folder tidy** (replace only, setting on): target folder `{title} ({year})`, using Radarr's lookup `folder` field when present.
+- **Folder tidy** (replace only, setting on): the target is the lookup's `folder` (Radarr's own name; `{title} ({year})` only if missing). The current folder is the last component of the movie's `path` — **not** `folderName`, which is a full path on Radarr 7.
+- **Radarr formats (owner's 7.0.3):** `mediaInfo.resolution` is `"WxH"` (compare heights for the downgrade check), `mediaInfo.runTime` is `"H:MM:SS"`, the movie and lookup `runtime` are minutes, and the recycle bin empties after `recycleBinCleanupDays` (7). Recently imported shows "Undo available until <date>" for replaces.
 - **The film is always left unmonitored.**
 - **Jellyfin "seen"** = an item with the film's TMDb provider ID whose media source path **and** size equal the imported file's. Poll every **5 min**, up to **24 h**. Without Jellyfin configured, clean up 24 h after the import.
 - **Clean-up** deletes the rip's downloads folder (raw, encodes, extras) and nothing else.
@@ -137,7 +138,7 @@
 
 ### Task 3: The Radarr client
 
-**Files:** Create `src/disc_ripper/radarr.py`, `tests/fixtures/radarr/` (synthetic JSON shaped like Radarr v3: `lookup_lego.json`, `movie_elf_with_file.json`, `rootfolder.json`, `qualityprofile.json`, `qualitydefinition.json`, `manualimport.json`, `command_started.json`, `command_completed.json`, `command_failed.json`, `mediamanagement.json`). Test: `tests/test_radarr.py`.
+**Files:** Create `src/disc_ripper/radarr.py`, `tests/fixtures/radarr/`. Build `lookup_lego.json`, `movie_elf_with_file.json`, `rootfolder.json`, `qualityprofile.json`, `qualitydefinition.json` and `mediamanagement.json` from the owner's real responses in the git-ignored `radarr-check/` folder (Radarr 7.0.3), trimmed to the fields the code reads, with `added`/dates and anything not needed removed. Do **not** commit `radarr-check/` itself or `status.json`. `manualimport.json` and the `command_*.json` files stay synthetic, shaped per Radarr's v3 docs, and marked as such. Test: `tests/test_radarr.py`.
 
 **Interfaces:**
 - `class RadarrError(Exception)`, with a readable message: "Radarr refused the API key", "Radarr didn't answer at <url>", or "Radarr: <status> <message from body>".
@@ -151,8 +152,10 @@
   - `root_folders() -> list[dict]`, `quality_profiles() -> list[dict]`, `quality_definitions() -> list[dict]`;
   - `manual_import_view(folder) -> list[dict]`;
   - `command(name, **body) -> int`, `command_status(id) -> str` ("queued"/"started"/"completed"/"failed");
-  - `recycle_bin() -> str` (empty string when unset).
+  - (the recycle bin, `parse_resolution` and `parse_runtime` are described below).
 - `to_candidate(lookup: dict) -> filmid.Candidate`, using `tmdbId`, `title`, `year`, `runtime`, `remotePoster` and `folder`; `in_library` = has an `id`.
+- `recycle_bin() -> tuple[str, int]`: the path and the cleanup days.
+- `parse_resolution("720x552") -> (720, 552)` and `parse_runtime("1:32:45") -> 5565`.
 - Never log or embed the key in error text.
 
 - [ ] **Step 1: Write the failing tests.** Use a fake fetcher that records calls and serves fixtures:

@@ -83,6 +83,28 @@ owner): they stay in downloads until the episode-mapping step.
 - Settings: `radarr_url` (url), `radarr_api_key` (secret), `ask_before_replace`
   (bool, true), `tidy_folders_on_replace` (bool, true), in a "Radarr" group.
 
+## Checked against the owner's Radarr (7.0.3, 2026-11-22)
+
+Read-only calls on the owner's server confirmed the `/api/v3` endpoints and these
+shapes (captured responses kept locally in `radarr-check/`, git-ignored):
+
+- Lookup results carry `title`, `year`, `runtime` (minutes), `tmdbId`,
+  `remotePoster`, `folder` (Radarr's folder name, e.g. "The Lego Movie 2 - The
+  Second Part (2019)" — colon already replaced) and `id` when the film is in
+  the library.
+- A movie record's `folderName` is the **full path** (e.g.
+  `/data/MEDIA/All Movies/Movies/Elf`), so the folder-tidy target comes from the
+  lookup's `folder`, and the current folder from `path`.
+- `movieFile.mediaInfo.resolution` is a "WxH" string (e.g. "720x552") and
+  `runTime` is "H:MM:SS"; the downgrade check compares heights.
+- Root folders: `/data/MEDIA/All Movies/Movies` (id 1) and
+  `/data/MEDIA/All Movies/Other movies` (id 2).
+- Recycle bin `/data/recycle bin/`, emptied after **7 days**
+  (`recycleBinCleanupDays`): Undo of a replace works only within that window,
+  and the Recently imported entry says until when.
+- Quality names `DVD`, `Bluray-1080p`, `Remux-1080p` exist; quality profiles
+  start with "Any" (id 1).
+
 ## Approaches considered
 
 - **Radarr's API with ManualImport (chosen; one sensible way).** The app knows
