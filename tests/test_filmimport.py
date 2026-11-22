@@ -250,7 +250,7 @@ def test_extras_copied_into_extras_folder(config, setup, tmp_path):
     assert (existing / "bonus.mkv").read_bytes() == b"e" * 200  # the extra's encode, not its raw
     assert not (existing / "title_t02.mkv").exists()
     assert (folder / "title_t01.mkv").exists()  # copied: the source stays
-    assert str(existing / "bonus.mkv") in json.loads(row["extras"])
+    assert json.loads(row["extras"]) == [str(existing / "bonus.mkv")]  # the skipped name is not ours
     assert "already exists" in import_log(config, rip)
 
 
@@ -320,3 +320,61 @@ async def test_encode_pool_survives_failing_hook(config, setup):
     pool = encodepool.EncodePool(config, Notifier(), FakeSpace(), services=hook)
     await pool._finish(5, "done", None)
     assert hook.seen == [5]
+
+
+def _stub_importing(setup, rip):
+    film_imports.ensure(setup, rip, NOW)
+    film_imports.update(setup, rip, NOW, state="importing", tmdb_id=137106)
+
+
+def test_waiting_rip_resumes_after_first_finishes(config, setup, tmp_path):
+    first, _ = make_rip(setup, config)
+    second, _ = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    _stub_importing(setup, first)
+
+    async def main():
+        await filmimport.run_import(services, second)
+        assert row_of(setup, second)["state"] == "waiting_other"
+        film_imports.update(setup, first, NOW, state="failed", step="identify", error="x")
+        assert await filmimport.retry_import(services, first) is None  # imports, then wakes the second
+        while services._import_tasks:
+            await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(main())
+    assert row_of(setup, first)["state"] == "imported"
+    row = row_of(setup, second)
+    assert row["state"] == "needs_replace_ok", row["error"]  # the step-4 placeholder: the film now has a file
+
+
+def test_retry_accepts_waiting_rip(config, setup, tmp_path):
+    first, _ = make_rip(setup, config)
+    second, _ = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    _stub_importing(setup, first)
+    asyncio.run(filmimport.run_import(services, second))
+    film_imports.update(setup, first, NOW, state="undone")
+    assert asyncio.run(filmimport.retry_import(services, second)) is None
+    assert row_of(setup, second)["state"] == "imported"
+
+
+def test_retry_resuming_at_replace_loads_movie(config, setup, tmp_path):
+    rip, _ = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    movie = fake.add_movie(fake.lookup_tmdb(137106), str(fake.root), 1)
+    fake.movies[movie["id"]]["hasFile"] = True
+    film_imports.ensure(setup, rip, NOW)
+    film_imports.update(setup, rip, NOW, state="failed", step="replace", tmdb_id=137106, movie_id=movie["id"],
+                        error="x")
+    asyncio.run(filmimport.retry_import(services, rip))
+    assert row_of(setup, rip)["state"] == "needs_replace_ok"
+
+
+def test_choose_film_bad_ref_creates_no_row(config, setup, tmp_path):
+    rip, _ = make_rip(setup, config)
+    tv, _ = make_rip(setup, config, main=None)
+    services, fake = services_with(config, tmp_path)
+    assert "IMDb" in asyncio.run(filmimport.choose_film(services, rip, "nonsense"))
+    assert asyncio.run(filmimport.choose_film(services, rip, "999999")) is not None  # Radarr does not know it
+    assert asyncio.run(filmimport.choose_film(services, tv, "137106")) is not None
+    assert row_of(setup, rip) is None and row_of(setup, tv) is None

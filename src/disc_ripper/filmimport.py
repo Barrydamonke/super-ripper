@@ -131,6 +131,8 @@ class Flow:
         self.set(movie_id=movie["id"])
 
     async def _step_replace(self) -> None:
+        if self.movie is None:
+            self.movie = await self.call("movie", self.row()["movie_id"])
         await _replace_check(self)
 
     async def _step_encode(self) -> None:
@@ -213,10 +215,10 @@ class Flow:
         for src in self._extra_sources():
             dest = folder / src.name
             if dest.exists():
-                self.log.write(f"extras: {dest.name} already exists, left alone")
-            else:
-                await asyncio.to_thread(self._copy, src, dest)
-                self.log.write(f"extras: copied {src} -> {dest}")
+                self.log.write(f"extras: {dest.name} already exists, skipped")
+                continue
+            await asyncio.to_thread(self._copy, src, dest)
+            self.log.write(f"extras: copied {src} -> {dest}")
             copied.append(str(dest))
         self.set(extras=copied)
 
@@ -275,16 +277,36 @@ async def _run(services, rip_id: int, start: str, before=None) -> str | None:
     if client is None:
         return NO_RADARR
     flow = Flow(services, client, rip_id)
+    woken: list[int] = []
     try:
-        film_imports.ensure(flow.conn, rip_id, utc_now())
-        if before is not None:
+        if before is None:
+            film_imports.ensure(flow.conn, rip_id, utc_now())
+        else:
             error = await before(flow)
             if error:
                 return error
         await flow.run(start)
+        row = flow.row()
+        if row["tmdb_id"] and row["state"] not in ("importing", "waiting_other"):
+            woken = [r["rip_id"] for r in film_imports.waiting_for(flow.conn, row["tmdb_id"])]
     finally:
         flow.close()
+    for waiting in woken:  # this rip no longer holds the film: the rips waiting for it go on from the claim
+        _spawn(services, _wake(services, waiting), f"film import {waiting}")
     return None
+
+
+async def _wake(services, rip_id: int) -> None:
+    try:
+        await _locked(services, rip_id, lambda: _run(services, rip_id, "claim"))
+    except Exception:
+        log.exception("film import: rip #%s crashed", rip_id)
+
+
+def _spawn(services, coro, name: str) -> None:
+    task = asyncio.create_task(coro, name=name)
+    services._import_tasks.add(task)
+    task.add_done_callback(services._import_tasks.discard)
 
 
 async def run_import(services, rip_id: int) -> None:
@@ -302,7 +324,7 @@ async def retry_import(services, rip_id: int) -> str | None:
             row = film_imports.get(conn, rip_id)
         finally:
             conn.close()
-        if row is None or row["state"] != "failed":
+        if row is None or row["state"] not in ("failed", "waiting_other"):
             return "Nothing to retry."
         start = row["step"] if row["step"] in STEPS else "identify"
         state = "importing" if STEPS.index(start) > STEPS.index("claim") else "identifying"
@@ -317,13 +339,18 @@ async def retry_import(services, rip_id: int) -> str | None:
 
 async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROOT) -> str | None:
     """The owner picked the film (a TMDb ID, an IMDb ID or a link): import from the claim step."""
+    parsed = filmid.parse_ref(str(ref))
+    if parsed is None:
+        return "Enter an IMDb ID, a TMDb ID or a TMDb/IMDb link."
+    main = await asyncio.to_thread(services._db, lambda conn: conn.execute(
+        "SELECT main_title FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone())
+    if main is None or main["main_title"] is None:
+        return "Only films can be imported."
+
     async def before(flow: Flow):
         row = flow.row()
-        if row["state"] not in _CHOOSABLE:
+        if row is not None and row["state"] not in _CHOOSABLE:
             return "This rip can't be changed now."
-        parsed = filmid.parse_ref(str(ref))
-        if parsed is None:
-            return "Enter an IMDb ID, a TMDb ID or a TMDb/IMDb link."
         try:
             kind, value = parsed
             lookup = await flow.call("lookup_imdb" if kind == "imdb" else "lookup_tmdb",
@@ -333,6 +360,7 @@ async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROO
             return str(exc)
         except (KeyError, TypeError, ValueError):
             return "Radarr doesn't know that film."
+        film_imports.ensure(flow.conn, rip_id, utc_now())
         flow.set(tmdb_id=cand.tmdb_id, title=cand.title, year=cand.year, root_folder=root_folder,
                  state="identifying", movie_id=None, error=None, message="")
         flow.log.write(f"chosen: {cand.title} ({cand.year}) tmdb {cand.tmdb_id}")
@@ -360,9 +388,7 @@ async def encode_done(services, encode_id: int) -> None:
     rip_id = await asyncio.to_thread(services._db, import_rip_for, encode_id)
     if rip_id is None or services.import_lock(rip_id).locked():
         return
-    task = asyncio.create_task(_background(services, rip_id), name=f"film import {rip_id}")
-    services._import_tasks.add(task)
-    task.add_done_callback(services._import_tasks.discard)
+    _spawn(services, _background(services, rip_id), f"film import {rip_id}")
 
 
 async def _background(services, rip_id: int) -> None:
