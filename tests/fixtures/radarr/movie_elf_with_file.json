@@ -1,7 +1,40 @@
-{"id": 12, "title": "Elf", "year": 2003, "tmdbId": 10719, "monitored": false,
- "path": "/library/Movies/Elf", "folderName": "/library/Movies/Elf", "rootFolderPath": "/library/Movies",
- "qualityProfileId": 4, "hasFile": true,
- "movieFile": {"id": 31, "path": "/library/Movies/Elf/Elf (2003).mkv", "relativePath": "Elf (2003).mkv", "size": 1234567890,
-  "quality": {"quality": {"id": 2, "name": "DVD", "source": "dvd", "resolution": 480, "modifier": "none"},
-              "revision": {"version": 1, "real": 0, "isRepack": false}},
-  "mediaInfo": {"resolution": "720x552", "runTime": "1:32:45", "videoCodec": "h264", "audioCodec": "AC3", "audioChannels": 5.1}}}
+{
+ "_comment": "SYNTHETIC: Radarr 7.0.3 shape with invented values.",
+ "id": 12,
+ "title": "Elf",
+ "year": 2003,
+ "tmdbId": 10719,
+ "monitored": false,
+ "path": "/library/Movies/Elf",
+ "folderName": "/library/Movies/Elf",
+ "rootFolderPath": "/library/Movies",
+ "qualityProfileId": 4,
+ "hasFile": true,
+ "movieFile": {
+  "id": 31,
+  "path": "/library/Movies/Elf/Elf (2003).mkv",
+  "relativePath": "Elf (2003).mkv",
+  "size": 1234567890,
+  "quality": {
+   "quality": {
+    "id": 2,
+    "name": "DVD",
+    "source": "dvd",
+    "resolution": 480,
+    "modifier": "none"
+   },
+   "revision": {
+    "version": 1,
+    "real": 0,
+    "isRepack": false
+   }
+  },
+  "mediaInfo": {
+   "resolution": "720x552",
+   "runTime": "1:32:45",
+   "videoCodec": "h264",
+   "audioCodec": "AC3",
+   "audioChannels": 5.1
+  }
+ }
+}

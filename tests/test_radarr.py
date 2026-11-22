@@ -175,3 +175,30 @@ def test_default_http_request_raises_status(monkeypatch):
     with pytest.raises(radarr.HttpStatusError) as err:
         radarr.http_request("GET", URL + "/x", {}, None, 1.0)
     assert err.value.status == 400 and err.value.body == b'{"message": "x"}'
+
+
+def test_scheme_less_url_is_readable():
+    c = Radarr("radarr:7878", KEY)  # default http_request path
+    with pytest.raises(RadarrError) as err:
+        c.root_folders()
+    assert str(err.value) == "Radarr didn't answer at radarr:7878"
+
+
+def test_http_exception_is_readable():
+    import http.client
+
+    c, _ = client({("GET", "/api/v3/rootfolder"): http.client.BadStatusLine("gone")})
+    with pytest.raises(RadarrError) as err:
+        c.root_folders()
+    assert str(err.value) == f"Radarr didn't answer at {URL}"
+
+
+def test_credentials_in_url_are_not_echoed():
+    def refuse(*args):
+        raise ConnectionRefusedError("x")
+
+    c = Radarr("http://bob:s3cret@radarr.test:7878/", KEY, fetch=refuse)
+    with pytest.raises(RadarrError) as err:
+        c.root_folders()
+    assert str(err.value) == "Radarr didn't answer at http://radarr.test:7878"
+    assert "s3cret" not in str(err.value) and "bob" not in str(err.value)

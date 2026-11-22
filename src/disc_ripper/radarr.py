@@ -6,6 +6,7 @@ never included in a message.
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -63,6 +64,9 @@ class Radarr:
         self.base = url.rstrip("/")
         self._headers = {"X-Api-Key": api_key, "Accept": "application/json"}
         self._fetch = fetch
+        parts = urllib.parse.urlsplit(self.base)
+        # never echo user:pass@ from the address
+        self._shown_url = self.base if "@" not in parts.netloc else self.base.replace(parts.netloc, parts.netloc.rpartition("@")[2], 1)
 
     def _call(self, method: str, path: str, payload: object = None):
         headers = dict(self._headers)
@@ -77,8 +81,8 @@ class Radarr:
                 raise RadarrError("Radarr refused the API key") from None
             detail = _body_message(exc.body)
             raise RadarrError(f"Radarr: {exc.status} {detail}".rstrip()) from None
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
-            raise RadarrError(f"Radarr didn't answer at {self.base}") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError, ValueError, http.client.HTTPException):
+            raise RadarrError(f"Radarr didn't answer at {self._shown_url}") from None
         if not raw:
             return None
         try:

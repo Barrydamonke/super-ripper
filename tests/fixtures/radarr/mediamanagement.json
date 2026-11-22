@@ -1,1 +1,6 @@
-{"recycleBin": "/library/recycle/", "recycleBinCleanupDays": 7, "autoUnmonitorPreviouslyDownloadedMovies": false}
+{
+ "_comment": "SYNTHETIC: Radarr 7.0.3 shape with invented values.",
+ "recycleBin": "/library/recycle/",
+ "recycleBinCleanupDays": 7,
+ "autoUnmonitorPreviouslyDownloadedMovies": false
+}
