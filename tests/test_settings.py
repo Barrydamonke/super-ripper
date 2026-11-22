@@ -28,6 +28,10 @@ VALID_FORM = {
     "fast_quality": "24",
     "raw_keep_hours": "24",
     "encode_stall_minutes": "10",
+    "radarr_url": "",
+    "radarr_api_key": "",
+    "ask_before_replace": "on",
+    "tidy_folders_on_replace": "on",
 }
 
 
