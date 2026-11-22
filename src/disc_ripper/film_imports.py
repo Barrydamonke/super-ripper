@@ -74,3 +74,19 @@ def waiting_for(conn: sqlite3.Connection, tmdb_id: int) -> list[sqlite3.Row]:
 def active_rip_ids(conn: sqlite3.Connection) -> set[int]:
     return {r[0] for r in conn.execute(
         "SELECT rip_id FROM film_imports WHERE state IN ('importing', 'imported')")}
+
+
+def fail_interrupted(conn: sqlite3.Connection, now: str) -> int:
+    """After a restart: imports that were running can't be (their flow died); they fail, and Retry resumes."""
+    with conn:
+        return conn.execute(
+            "UPDATE film_imports SET state = 'failed', error = 'Interrupted by a restart; press Retry.', "
+            "updated_at = ? WHERE state = 'importing'", (now,)).rowcount
+
+
+def resumable_waiting(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Rips waiting for another rip of their film, when no rip of that film is importing now."""
+    return conn.execute(
+        "SELECT * FROM film_imports w WHERE w.state = 'waiting_other' AND w.tmdb_id IS NOT NULL AND NOT EXISTS "
+        "(SELECT 1 FROM film_imports i WHERE i.tmdb_id = w.tmdb_id AND i.state = 'importing') "
+        "ORDER BY w.rip_id").fetchall()

@@ -7,10 +7,12 @@ import dataclasses
 import json
 import logging
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 from . import db, encodes, film_imports, filmid, joblog, settings, videofiles
 from .clock import utc_now
+from .jellyfin import JellyfinError
 from .radarr import RadarrError, parse_resolution, parse_runtime, to_candidate
 
 log = logging.getLogger(__name__)
@@ -18,6 +20,8 @@ log = logging.getLogger(__name__)
 POLL_SECONDS = 5.0
 IMPORT_TIMEOUT_SECONDS = 600.0
 BUSY = "Busy, try again in a moment."
+CONFIRM_HOURS = 24
+NOT_SEEN = "Jellyfin hasn't shown this film after 24 hours; the rip is kept. Check the library."
 NO_RADARR = "Set up Radarr in Settings to import films."
 DEFAULT_ROOT = "Movies"
 STEPS = ("identify", "claim", "add", "replace", "encode", "import", "unmonitor", "extras", "done")
@@ -537,3 +541,86 @@ async def _background(services, rip_id: int) -> None:
         await run_import(services, rip_id)
     except Exception:
         log.exception("film import: rip #%s crashed", rip_id)
+
+
+# -- Jellyfin confirmation and clean-up ----------------------------------------------------
+
+
+def _parse_utc(value: str) -> datetime:
+    moment = datetime.fromisoformat(value)
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _seen_in(sources, path: str, size: int) -> bool:
+    """Jellyfin may mount the library elsewhere, so compare the file's name and size, not its folder."""
+    name = PurePosixPath(path.replace("\\", "/")).name
+    return any(s == size and PurePosixPath(str(p).replace("\\", "/")).name == name for p, s in sources)
+
+
+async def confirm_and_clean(services, now: datetime) -> None:
+    """Move imported films on: once Jellyfin shows the file (or, without Jellyfin, 24 h on), delete the rip's folder."""
+    rows = await asyncio.to_thread(services._db, lambda conn: conn.execute(
+        "SELECT rip_id FROM film_imports WHERE state = 'imported' ORDER BY rip_id").fetchall())
+    for rip in rows:
+        lock = services.import_lock(rip["rip_id"])
+        if lock.locked():  # a flow (Undo, Retry...) is working on it
+            continue
+        async with lock:
+            try:
+                await _confirm_one(services, rip["rip_id"], now)
+            except Exception:
+                log.exception("film import: confirming rip #%s failed", rip["rip_id"])
+
+
+async def _confirm_one(services, rip_id: int, now: datetime) -> None:
+    conn = db.connect(services.config.db_path)
+    try:
+        row = film_imports.get(conn, rip_id)
+        if row is None or row["state"] != "imported" or not row["imported_at"] or not row["new_path"]:
+            return
+        jlog = joblog.JobLog(services.config.config_dir / joblog.LOG_DIRNAME / f"import-{rip_id}.log")
+        waited = now - _parse_utc(row["imported_at"]) >= timedelta(hours=CONFIRM_HOURS)
+        client = services.jellyfin()
+        if client is None:
+            ready = waited
+        else:
+            new = Path(row["new_path"])
+            try:
+                size = (await asyncio.to_thread(new.stat)).st_size
+                sources = await asyncio.to_thread(client.movie_sources, row["tmdb_id"], row["title"] or "")
+            except (JellyfinError, OSError) as exc:
+                jlog.write(f"Jellyfin check failed, will try again: {exc}")
+                return
+            ready = _seen_in(sources, str(new), size)
+            if not ready:
+                if waited and row["message"] != NOT_SEEN:
+                    film_imports.update(conn, rip_id, utc_now(), message=NOT_SEEN)
+                    jlog.write("Jellyfin has not shown the film after 24 hours; the rip is kept")
+                return
+        if not ready:
+            return
+        folder = services.config.downloads_dir / str(int(rip_id))
+        try:
+            await asyncio.to_thread(_remove, folder)
+        except OSError as exc:
+            jlog.write(f"clean-up failed, will try again: {exc}")
+            return
+        film_imports.update(conn, rip_id, utc_now(), state="in_jellyfin", message="")
+        jlog.write(f"{'Jellyfin has the film' if client else '24 hours passed'}; deleted {folder}")
+    finally:
+        conn.close()
+
+
+def _remove(folder: Path) -> None:
+    if folder.exists():
+        shutil.rmtree(folder)
+
+
+async def resume_after_restart(services) -> None:
+    """Start-up: interrupted imports fail (Retry resumes them); rips waiting for a free film go on."""
+    def prepare(conn):
+        film_imports.fail_interrupted(conn, utc_now())
+        return [r["rip_id"] for r in film_imports.resumable_waiting(conn)]
+
+    for rip_id in await asyncio.to_thread(services._db, prepare):
+        _spawn(services, _wake(services, rip_id), f"film import {rip_id}")

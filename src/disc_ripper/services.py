@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import cd_rips, cdrip, coverart, db, drives, encodes, filmimport, joblog, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
+from . import cd_rips, cdrip, coverart, db, drives, encodes, film_imports, filmimport, joblog, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
 from .jellyfin import Jellyfin, RefreshDebouncer
 from .musicbrainz import MusicBrainz
 from .radarr import Radarr
@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 
 SCHEDULE_REFRESH_SECONDS = 300
 RAW_SWEEP_SECONDS = 600
+FILM_CONFIRM_SECONDS = 300
 SCAN_MISSING = "The rip's scan is missing, so its length can't be checked; can't encode."
 GUARD_TICK_SECONDS = 60
 CD_BYTES_PER_SECOND = 176_400  # 44.1 kHz, 16-bit stereo
@@ -589,6 +590,8 @@ class Services:
     @staticmethod
     def _raw_checks(conn, rip_id: int, title: int, now: datetime, keep_hours: float | None):
         """(error, good encodes, raw path)."""
+        if rip_id in film_imports.active_rip_ids(conn):
+            return ("This rip is being imported or was imported; it's cleaned up once Jellyfin has the film."), [], None
         rip = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
         entry = json.loads(rip["files"] or "{}").get(str(title)) if rip else None
         if entry is None:
@@ -639,6 +642,14 @@ class Services:
             except Exception:  # never let the sweep die
                 log.exception("encode: deleting old raw rips failed")
             await asyncio.sleep(RAW_SWEEP_SECONDS)
+
+    async def _film_confirm_loop(self) -> None:
+        while True:
+            try:
+                await filmimport.confirm_and_clean(self, datetime.now(timezone.utc))
+            except Exception:  # never let the loop die
+                log.exception("film import: confirming imports failed")
+            await asyncio.sleep(FILM_CONFIRM_SECONDS)
 
     def _render_films(self) -> str | None:
         from .web.films_routes import render_films
@@ -892,8 +903,10 @@ class Services:
             log.info("jobs: %d job(s) were running at the last stop; marked interrupted", count)
         await self._refresh_drives()
         self.encoder.start()
+        await filmimport.resume_after_restart(self)
         for coro, name in (
             (self._raw_sweep_loop(), "raw sweep"),
+            (self._film_confirm_loop(), "film import confirm"),
             (self.monitor.run(), "media monitor"),
             (self._schedule_loop(), "schedule refresh"),
             (self._guard_loop(), "guard tick"),
