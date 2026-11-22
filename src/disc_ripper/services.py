@@ -98,6 +98,8 @@ class Services:
         self._schedule_error: str | None = None
         self._import_locks: dict[int, asyncio.Lock] = {}
         self._import_tasks: set[asyncio.Task] = set()
+        self._films_push: asyncio.Task | None = None
+        self._films_dirty = False
 
     def jellyfin(self) -> Jellyfin | None:
         """A Jellyfin client from the current settings, or None if not configured."""
@@ -660,6 +662,27 @@ class Services:
         from .web.films_routes import render_encodes
 
         return self._db(render_encodes)
+
+    def films_changed(self) -> None:
+        """A film import changed: publish the Films list soon (changes close together are sent once)."""
+        self._films_dirty = True
+        if self._films_push is not None and not self._films_push.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._films_push = loop.create_task(self._push_films())
+
+    async def _push_films(self) -> None:
+        while self._films_dirty:
+            self._films_dirty = False
+            await asyncio.sleep(0.1)
+            if not self.broker.subscriber_count:
+                continue
+            html = await asyncio.to_thread(self._render_films)
+            if html is not None:
+                self.broker.publish("films", html)
 
     async def encodes_changed(self, progress_only: bool = False) -> None:
         """Publish the Films list and the Encoding panel. A progress tick refreshes the panel only:

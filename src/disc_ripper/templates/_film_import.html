@@ -1,0 +1,97 @@
+{#- One rip's import state. Expects `rip` (with .imp, the film_imports row, and .starting). -#}
+{% macro identify_form(rip) %}
+  <div id="identify-{{ rip.rip_id }}" class="identify" hx-preserve>
+    <form class="inline" hx-post="/films/identify/search" hx-target="#identify-results-{{ rip.rip_id }}"
+          hx-disabled-elt="find button">
+      <input type="hidden" name="rip_id" value="{{ rip.rip_id }}">
+      <input type="text" name="q" size="32" placeholder="Film name, IMDb or TMDb ID, or link"
+             aria-label="Search for the film">
+      <button type="submit">Search</button>
+    </form>
+    <div id="identify-results-{{ rip.rip_id }}">
+      {% with rip_id=rip.rip_id, cands=(rip.imp.candidates if rip.imp else []), error=none, searched=false %}{% include "_film_results.html" %}{% endwith %}
+    </div>
+  </div>
+{% endmacro %}
+
+{% macro different_film(rip) %}
+  <details class="different-film" id="different-{{ rip.rip_id }}" hx-preserve>
+    <summary>Choose a different film</summary>
+    {{ identify_form(rip) }}
+  </details>
+{% endmacro %}
+
+{% macro log_link(rip) %}<a class="hint" href="/films/import/{{ rip.rip_id }}/log" target="_blank">import log</a>{% endmacro %}
+
+{% macro post_button(url, rip, label, confirm=none) %}
+  <button hx-post="{{ url }}" hx-vals='{"rip_id": {{ rip.rip_id }}}' hx-target="#films"{% if confirm %} hx-confirm="{{ confirm }}"{% endif %}>{{ label }}</button>
+{% endmacro %}
+
+{% macro cmp_row(label, bad, old, new) %}
+  <tr{% if bad %} class="bad"{% endif %}><th scope="row">{{ label }}</th><td>{{ old }}</td><td>{{ new }}</td></tr>
+{% endmacro %}
+{% macro audio(side) %}{{ side.audio_codec or "?" }}{% if side.audio_channels %} {{ side.audio_channels }}ch{% endif %}{% endmacro %}
+
+{% macro compare(imp) %}
+  {% set r = imp.replace %}
+  <table class="compare">
+    <thead><tr><th></th><th>In your library now</th><th>This rip</th></tr></thead>
+    <tbody>
+      {{ cmp_row("Resolution", r.checks.get("resolution") is sameas false, r.old.resolution or "?", r.new.resolution or "?") }}
+      {{ cmp_row("Video", false, r.old.video_codec or "?", r.new.video_codec or "?") }}
+      {{ cmp_row("Audio", false, audio(r.old), audio(r.new)) }}
+      {{ cmp_row("Size", false, (r.old.size|gb) if r.old.size else "?", (r.new.size|gb) if r.new.size else "?") }}
+      {{ cmp_row("Length", r.checks.get("length") is sameas false, (r.old.seconds|hms) if r.old.seconds else "?", (r.new.seconds|hms) if r.new.seconds else "?") }}
+    </tbody>
+  </table>
+  {% for name, reason in r.reasons.items() %}<p class="error">{{ reason }}</p>{% endfor %}
+{% endmacro %}
+
+{% set imp = rip.imp %}
+{% if rip.starting %}
+  <p class="hint import-state">Working on it...</p>
+{% elif imp %}
+  {% set state = imp.state %}
+  <div class="import-state import-{{ state }}">
+  {% if state == "identifying" %}
+    <p class="hint">Looking for the film in Radarr...</p>
+  {% elif state == "needs_identify" %}
+    <p><strong>Which film is this?</strong> {{ imp.message or "Pick the film." }}</p>
+    {{ identify_form(rip) }}
+    <p>{{ post_button("/films/skip", rip, "Skip", "Delete this rip? Its files in downloads will be removed.") }}</p>
+  {% elif state == "waiting_other" %}
+    <p>{{ imp.title }}{% if imp.year %} ({{ imp.year }}){% endif %}: {{ imp.message or "Another rip of this film is being imported." }}
+      {{ post_button("/films/import/retry", rip, "Retry") }}</p>
+    {{ different_film(rip) }}
+  {% elif state == "needs_replace_ok" %}
+    <p><strong>{{ imp.title }}{% if imp.year %} ({{ imp.year }}){% endif %} is already in Radarr.</strong> Replace its file with this rip?</p>
+    {{ compare(imp) }}
+    <form class="inline" hx-post="/films/replace" hx-target="#films" hx-disabled-elt="find button">
+      <input type="hidden" name="rip_id" value="{{ rip.rip_id }}">
+      {% if imp.replace.checks.get("recycle_bin") is sameas false %}
+        <label>No recycle bin, so the old file can't be recovered. Type REPLACE to replace it anyway:
+          <input type="text" name="typed" id="typed-{{ rip.rip_id }}" size="10" autocomplete="off" hx-preserve></label>
+      {% endif %}
+      <button type="submit">Replace</button>
+    </form>
+    {{ post_button("/films/skip", rip, "Skip", "Delete this rip? Its files in downloads will be removed.") }}
+    {{ different_film(rip) }}
+  {% elif state == "importing" %}
+    <p>Importing {{ imp.title }}{% if imp.year %} ({{ imp.year }}){% endif %}{% if imp.step %} <span class="hint">(step: {{ imp.step }})</span>{% endif %} {{ log_link(rip) }}</p>
+  {% elif state == "failed" %}
+    <div class="error job-failed"><strong>Import failed{% if imp.title %} ({{ imp.title }}){% endif %}:</strong> {{ imp.error or "no reason was recorded" }}
+      {{ post_button("/films/import/retry", rip, "Retry") }} {{ log_link(rip) }}</div>
+    {{ different_film(rip) }}
+  {% elif state in ("imported", "in_jellyfin") %}
+    <p class="ok">{{ imp.title }}{% if imp.year %} ({{ imp.year }}){% endif %}: {{ "In Jellyfin; the rip's files were cleaned up." if state == "in_jellyfin" else "Imported; waiting for Jellyfin to show it." }}
+      {% if imp.message %}<span class="error">{{ imp.message }}</span>{% endif %} {{ log_link(rip) }}</p>
+  {% elif state == "skipped" %}
+    <p class="hint">Skipped.</p>
+  {% elif state == "tv_skipped" %}
+    <p class="hint">{{ imp.message or "TV: not imported yet" }}</p>
+  {% else %}
+    <p class="hint">{{ state }}{% if imp.message %}: {{ imp.message }}{% endif %}</p>
+  {% endif %}
+  {% if imp.message and (state == "failed" or (state == "needs_replace_ok" and not imp.message.startswith("This film is already in Radarr"))) %}<p class="error">{{ imp.message }}</p>{% endif %}
+  </div>
+{% endif %}

@@ -59,6 +59,7 @@ class Flow:
 
     def set(self, **fields) -> None:
         film_imports.update(self.conn, self.rip_id, utc_now(), **fields)
+        self.services.films_changed()
 
     async def call(self, name: str, *args, **kwargs):
         return await asyncio.to_thread(getattr(self.client, name), *args, **kwargs)
@@ -586,6 +587,7 @@ async def _confirm_one(services, rip_id: int, now: datetime) -> None:
         if not await asyncio.to_thread(_library_file_safe, new, folder):
             if row["message"] != MISPLACED:
                 film_imports.update(conn, rip_id, utc_now(), message=MISPLACED)
+                services.films_changed()
                 jlog.write(MISPLACED)
             return
         client = services.jellyfin()
@@ -602,6 +604,7 @@ async def _confirm_one(services, rip_id: int, now: datetime) -> None:
             if not ready:
                 if waited and row["message"] != NOT_SEEN:
                     film_imports.update(conn, rip_id, utc_now(), message=NOT_SEEN)
+                    services.films_changed()
                     jlog.write("Jellyfin has not shown the film after 24 hours; the rip is kept")
                 return
         if not ready:
@@ -612,6 +615,7 @@ async def _confirm_one(services, rip_id: int, now: datetime) -> None:
             jlog.write(f"clean-up failed, will try again: {exc}")
             return
         film_imports.update(conn, rip_id, utc_now(), state="in_jellyfin", message="")
+        services.films_changed()
         jlog.write(f"{'Jellyfin has the film' if client else '24 hours passed'}; deleted {folder}")
     finally:
         conn.close()

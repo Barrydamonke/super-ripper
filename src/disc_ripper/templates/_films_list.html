@@ -1,4 +1,24 @@
 {% if oob %}<div id="films-notice" hx-swap-oob="true">{% if error %}<p class="error">{{ error }}</p>{% endif %}{% if notice %}<p class="ok">{{ notice }}</p>{% endif %}</div>{% endif %}
+{% if not radarr_set_up %}<p class="hint radarr-note">{{ no_radarr }}</p>{% endif %}
+{% if recent %}
+<section class="recently-imported">
+  <h2>Recently imported</h2>
+  {% for imp in recent %}
+    <div class="recent-row">
+      <strong>{{ imp.title }}</strong>{% if imp.year %} ({{ imp.year }}){% endif %} · rip {{ imp.rip_id }} · {{ imp.imported_at|day }}
+      {% if imp.replaced %}
+        · replaced {{ imp.replace.old.resolution or "?" }}{% if imp.replace.old.size %}, {{ imp.replace.old.size|gb }}{% endif %}
+        with {{ imp.replace.new.resolution or "?" }}{% if imp.replace.new.size %}, {{ imp.replace.new.size|gb }}{% endif %}
+        {% if imp.undo_until %}<span class="hint">· Undo available until {{ imp.undo_until|day }}</span>{% endif %}
+      {% endif %}
+      {% if imp.state == "in_jellyfin" %}<span class="hint">· in Jellyfin</span>{% endif %}
+      {% if imp.message %}<span class="error"> {{ imp.message }}</span>{% endif %}
+      <button hx-post="/films/undo" hx-vals='{"rip_id": {{ imp.rip_id }}}' hx-target="#films" hx-confirm="Undo this import?">Undo</button>
+      <a class="hint" href="/films/import/{{ imp.rip_id }}/log" target="_blank">import log</a>
+    </div>
+  {% endfor %}
+</section>
+{% endif %}
 <section class="encodes-top">
   <h2>Encoding</h2>
   {% set target = "films" %}{% include "_encodes_panel.html" %}
@@ -7,6 +27,7 @@
   <section class="film-rip">
     <h2>Rip {{ rip.rip_id }}{% if rip.label %} · {{ rip.label }}{% endif %}{% if rip.disc_type %} · {{ rip.disc_type }}{% endif %} · {{ rip.created_at|day }}
       {% for job_id in rip.logs %}<a class="hint" href="/jobs/{{ job_id }}/log" target="_blank">log</a> {% endfor %}</h2>
+    {% include "_film_import.html" %}
     {% if rip.encode_with %}<p class="hint">Encode with: {{ rip.encode_with }}</p>{% endif %}
     {% if rip.can_encode_all %}
     <form class="inline" hx-post="/films/encode-all" hx-target="#films" hx-disabled-elt="find button">
