@@ -8,6 +8,7 @@ import sqlite3
 _COLUMNS = {
     "state", "step", "candidates", "tmdb_id", "movie_id", "title", "year", "root_folder", "encode_id", "replace",
     "old_path", "old_folder", "recycled_path", "new_path", "extras", "message", "error", "imported_at",
+    "added_by_us",
 }
 _JSON_COLUMNS = {"candidates", "replace", "extras"}
 

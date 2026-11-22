@@ -115,6 +115,7 @@ class Flow:
         movie = await self.call("movie", row["movie_id"]) if row["movie_id"] else None
         if movie is None:
             movie = await self.call("movie_by_tmdb", row["tmdb_id"])
+        added = movie is None
         if movie is None:
             roots = await self.call("root_folders")
             wanted = (row["root_folder"] or DEFAULT_ROOT).lower()
@@ -128,7 +129,7 @@ class Flow:
             movie = await self.call("add_movie", lookup, root["path"], profiles[0]["id"])
             self.log.write(f"added movie #{movie['id']} to {root['path']}")
         self.movie = movie
-        self.set(movie_id=movie["id"])
+        self.set(movie_id=movie["id"], **({"added_by_us": 1} if added else {}))
 
     async def _step_replace(self) -> None:
         if self.movie is None:
@@ -180,10 +181,13 @@ class Flow:
                  "languages": seen.get("languages") or []}
         bin_dir, before = None, set()
         if row["old_path"]:  # replacing: note what is in the recycle bin so the old file can be found after
-            bin_path = (await self.call("recycle_bin"))[0]
-            if bin_path:
-                bin_dir = Path(bin_path)
-                before = await asyncio.to_thread(_listing, bin_dir)
+            try:
+                bin_path, visible = await _visible_bin(self)
+                if visible:
+                    bin_dir = Path(bin_path)
+                    before = await asyncio.to_thread(_listing, bin_dir)
+            except Exception as exc:  # best effort: the import itself goes on
+                self.log.write(f"recycle bin could not be listed: {exc}")
         command_id = await self.call("command", "ManualImport", files=[entry], importMode="move")
         await self._wait_for(command_id)
         movie = await self.call("movie", row["movie_id"])
@@ -191,10 +195,16 @@ class Flow:
         if not have.get("path") or (have.get("size") is not None and have["size"] != enc["output_bytes"]):
             raise RadarrError("Radarr finished, but the film's file in Radarr is not the new one.")
         if bin_dir is not None:
-            arrived = sorted((await asyncio.to_thread(_listing, bin_dir)) - before, key=lambda p: p.stat().st_mtime)
-            recycled = next((p for p in reversed(arrived) if p.name == Path(row["old_path"]).name), None)
-            self.set(recycled_path=str(recycled) if recycled else None)
-            self.log.write(f"recycle bin: {recycled or 'the old file was not found there'}")
+            try:
+                arrived = (await asyncio.to_thread(_listing, bin_dir)) - before
+                recycled = next((p for p in sorted(arrived, key=_mtime, reverse=True)
+                                 if p.name == Path(row["old_path"]).name), None)
+                self.set(recycled_path=str(recycled) if recycled else None)
+                if recycled is None:
+                    log.warning("film import: rip #%s: the old file is not in the recycle bin", self.rip_id)
+                self.log.write(f"recycle bin: {recycled or 'WARNING: the old file was not found there'}")
+            except Exception as exc:  # best effort: Radarr has already imported the file
+                self.log.write(f"recycle bin could not be searched: {exc}")
         self._imported(enc, have["path"])
 
     def _imported(self, enc, path: str) -> None:
@@ -299,6 +309,19 @@ def _listing(folder: Path) -> set[Path]:
     return {p for p in folder.rglob("*") if p.is_file()} if folder.is_dir() else set()
 
 
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+async def _visible_bin(flow: Flow) -> tuple[str, bool]:
+    """Radarr's recycle bin path, and whether this app can see it as a folder."""
+    path = (await flow.call("recycle_bin"))[0]
+    return path, bool(path) and await asyncio.to_thread(Path(path).is_dir)
+
+
 def _height(resolution: str | None) -> int | None:
     parsed = parse_resolution(resolution)
     return parsed[1] if parsed and parsed[1] > 0 else None
@@ -335,8 +358,12 @@ async def _replace_check(flow: Flow) -> None:
     elif abs(new_seconds - old_seconds) > max(0.02 * old_seconds, 300):
         reasons["length"] = (f"The new file is {new_seconds / 60:.0f} min long but the old one is "
                              f"{old_seconds / 60:.0f} min.")
-    if not (await flow.call("recycle_bin"))[0]:
+    bin_path, visible = await _visible_bin(flow)
+    if not bin_path:
         reasons["recycle_bin"] = "Radarr's recycle bin isn't set, so the old file could not be recovered."
+    elif not visible:
+        reasons["recycle_bin"] = (f"Radarr's recycle bin isn't visible to the ripper at {bin_path}, "
+                                  "so Undo couldn't bring the old file back.")
     if new_height is None or old_height is None:
         reasons["resolution"] = problem or "Radarr doesn't know the old file's resolution, so it can't be compared."
     elif new_height < old_height:
@@ -360,8 +387,8 @@ async def approve_replace(services, rip_id: int, typed: str = "") -> str | None:
             row = flow.row()
             if row is None or row["state"] != "needs_replace_ok":
                 return "This rip isn't waiting to replace a film."
-            if not (await flow.call("recycle_bin"))[0] and typed != "REPLACE":
-                return ("Radarr's recycle bin isn't set, so the old file can't be recovered. "
+            if not (await _visible_bin(flow))[1] and typed != "REPLACE":
+                return ("Radarr's recycle bin isn't set (or isn't visible to the ripper), so the old file can't be recovered. "
                         "Type REPLACE to replace it anyway.")
             if not film_imports.claim(flow.conn, rip_id, row["tmdb_id"], utc_now()):
                 flow.set(state="waiting_other", message="Another rip of this film is being imported.")

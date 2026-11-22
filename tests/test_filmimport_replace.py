@@ -232,3 +232,79 @@ def test_skip_deletes_rip_folder(config, setup, tmp_path, monkeypatch):
     assert not folder.exists() and row_of(setup, rip)["state"] == "skipped"
     film_imports.update(setup, rip, NOW, state="importing")
     assert asyncio.run(filmundo.skip(services, rip)) is not None
+
+
+def test_invisible_recycle_bin_needs_typed_replace(config, setup, tmp_path, monkeypatch):
+    rip, _, services, fake, movie, old = start(config, setup, tmp_path, monkeypatch)
+    fake.recycle.rmdir()  # Radarr reports a bin path this app can't see
+    ask_off(setup)
+    run(services, rip)
+    row = row_of(setup, rip)
+    replace = json.loads(row["replace"])
+    assert row["state"] == "needs_replace_ok" and replace["checks"]["recycle_bin"] is False
+    assert "isn't visible to the ripper" in replace["reasons"]["recycle_bin"] and str(fake.recycle) in replace["reasons"]["recycle_bin"]
+    assert asyncio.run(filmimport.approve_replace(services, rip)) is not None
+    assert asyncio.run(filmimport.approve_replace(services, rip, "REPLACE")) is None
+    row = row_of(setup, rip)
+    assert row["state"] == "imported" and row["recycled_path"] is None
+
+
+def test_undo_retry_after_midway_failure(config, setup, tmp_path, monkeypatch):
+    rip, eid, services, fake, movie, old = start(
+        config, setup, tmp_path, monkeypatch, lookup=ELF, label="Elf", seconds=5820, folder="Elf")
+    ask_off(setup)
+    run(services, rip)
+    assert row_of(setup, rip)["state"] == "imported"
+    output = Path(encodes.get(setup, eid)["output"])
+    fake.fail_once.add("command")  # RescanMovie fails after the files were moved
+    first = asyncio.run(filmundo.undo(services, rip))
+    assert first.startswith("Undo stopped") and row_of(setup, rip)["state"] == "imported"
+    assert asyncio.run(filmundo.undo(services, rip)) == "Undone."
+    assert output.is_file() and old.is_file()
+    assert sorted(p.name for p in (fake.root / "Elf").iterdir()) == ["Old.mkv"]
+    assert not (fake.root / "Elf (2003)").exists()
+    assert row_of(setup, rip)["state"] == "needs_identify"
+
+
+def test_undo_keeps_movie_owner_already_had(config, setup, tmp_path, monkeypatch):
+    probe(monkeypatch)
+    rip, eid = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    mine = fake.add_movie(fake.lookup_tmdb(137106), str(fake.root), 1)  # in Radarr, no file
+    run(services, rip)
+    assert row_of(setup, rip)["state"] == "imported"
+    assert asyncio.run(filmundo.undo(services, rip)) == "Undone."
+    assert mine["id"] in fake.movies and "delete_movie" not in fake.calls
+    assert Path(encodes.get(setup, eid)["output"]).is_file()
+    assert fake.movies[mine["id"]]["hasFile"] is False
+
+
+def test_undo_refuses_to_overwrite(config, setup, tmp_path, monkeypatch):
+    probe(monkeypatch)
+    rip, eid = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    run(services, rip)
+    output = Path(encodes.get(setup, eid)["output"])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"other")
+    message = asyncio.run(filmundo.undo(services, rip))
+    assert message == f"Undo stopped: {output} already exists"
+    assert row_of(setup, rip)["state"] == "imported" and output.read_bytes() == b"other"
+    assert fake.movies
+
+
+def test_skip_refuses_imported_and_reports_delete_failure(config, setup, tmp_path, monkeypatch):
+    rip, _ = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    film_imports.ensure(setup, rip, NOW)
+    film_imports.update(setup, rip, NOW, state="imported")
+    assert asyncio.run(filmundo.skip(services, rip)) == "Use Undo first."
+    film_imports.update(setup, rip, NOW, state="failed")
+
+    def boom(path, ignore_errors=False, onerror=None):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(filmundo.shutil, "rmtree", boom)
+    message = asyncio.run(filmundo.skip(services, rip))
+    assert message.startswith("Couldn't delete ") and "denied" in message
+    assert row_of(setup, rip)["state"] == "failed"

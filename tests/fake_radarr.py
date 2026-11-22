@@ -166,6 +166,7 @@ class FakeRadarr:
                 old = (movie.get("movieFile") or {}).get("path")
                 if old and Path(old).exists():  # Radarr recycles (or deletes) the file being replaced
                     if self.bin_set:
+                        self.recycle.mkdir(parents=True, exist_ok=True)
                         shutil.move(old, str(self.recycle / Path(old).name))
                     else:
                         Path(old).unlink()

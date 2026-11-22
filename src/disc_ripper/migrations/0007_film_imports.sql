@@ -22,7 +22,8 @@ CREATE TABLE film_imports (
     error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    imported_at TEXT
+    imported_at TEXT,
+    added_by_us INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX film_imports_tmdb ON film_imports (tmdb_id, state);
 
