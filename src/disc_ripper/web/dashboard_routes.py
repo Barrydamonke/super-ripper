@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
-from .. import busy, cd_rips, db, drives, joblog, jobs, makemkv, schedule_source, video_rips
+from .. import busy, cd_rips, db, drives, joblog, jobs, makemkv, schedule_source, settings, video_rips
 from .. import titles as titles_mod
 from ..cdtoc import musicbrainz_disc_id
 from ..clock import utc_now
@@ -52,7 +52,7 @@ def _gb(size: int) -> str:
 def _video_context(conn: sqlite3.Connection, drive_row: sqlite3.Row, grouped, config) -> dict:
     """Template context for a DVD/Blu-ray card: the scanned disc, any blocking rip, the current rip."""
     ctx = {"video": None, "video_blocking": None, "video_rip": None, "video_done": {}, "video_notes": {},
-           "video_moves": []}
+           "video_moves": [], "encode_choice": None}
     # Rips from this drive whose move to downloads failed: shown whether or not a disc is in,
     # since the disc ejects once the rip itself is done.
     for rip in conn.execute(
@@ -63,6 +63,8 @@ def _video_context(conn: sqlite3.Connection, drive_row: sqlite3.Row, grouped, co
             ctx["video_moves"].append({"rip_id": rip["rip_id"], "message": rip["message"]})
     disc_fp = None
     if drive_row["media_state"] == "disc" and drive_row["disc_type"] in ("dvd", "bluray"):
+        # How this disc will be encoded: its rip's choice, else the drive's pending choice, else the setting.
+        ctx["encode_choice"] = drive_row["encode_choice"] or settings.get(conn, "encode_after_rip")
         row = video_rips.disc_in_drive(conn, drive_row["id"])
         if row is not None:
             disc_fp = row["fingerprint"]
@@ -95,6 +97,8 @@ def _video_context(conn: sqlite3.Connection, drive_row: sqlite3.Row, grouped, co
                     "rip_id": rip["rip_id"], "state": rip["state"], "message": rip["message"],
                     "main_title": rip["main_title"], "titles": latest,
                 }
+                if rip["state"] == "ripping" and rip["encode_preset"]:
+                    ctx["encode_choice"] = rip["encode_preset"]
     # The recent line for each finished rip_title job: the file it made and the scanned length/size.
     for job in grouped.recent:
         if job["kind"] != "rip_title" or job["state"] != "done":
@@ -350,6 +354,17 @@ async def rip_video(request: Request, drive_id: str = Form(...), main: str = For
         else:  # a title that isn't on the scanned disc
             error = RIP_REFUSED
         return await _card(request, drive_id, error=error)
+    return await _card(request, drive_id)
+
+
+@router.post("/dashboard/video/encode-choice")
+async def encode_choice(request: Request, drive_id: str = Form(...), preset: str = Form(...)):
+    """How the disc in this drive is encoded once each of its titles is ripped."""
+    if await _known_drive(request, drive_id) is None:
+        return HTMLResponse(_UNKNOWN_DRIVE, status_code=404)
+    error = await _services(request).set_encode_choice(drive_id, preset)
+    if error:
+        return await _card(request, drive_id, error=error, status_code=400)
     return await _card(request, drive_id)
 
 

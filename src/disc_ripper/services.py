@@ -57,6 +57,17 @@ def _configure_logging() -> None:
         logger.setLevel(logging.INFO)
 
 
+ENCODE_CHOICES = ("standard", "fast", "copy", "off")
+
+
+def _encode_preset_for(conn, rip_id: int) -> str:
+    """The rip's own encode choice, else the encode_after_rip setting."""
+    row = conn.execute("SELECT encode_preset FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    if row is not None and row["encode_preset"] in ENCODE_CHOICES:
+        return row["encode_preset"]
+    return settings.get(conn, "encode_after_rip")
+
+
 class Services:
     def __init__(
         self,
@@ -265,7 +276,8 @@ class Services:
         conn.execute("BEGIN IMMEDIATE")
         try:
             disc = conn.execute("SELECT * FROM video_discs WHERE fingerprint = ?", (fingerprint,)).fetchone()
-            drive = conn.execute("SELECT sr_name, video_hold FROM drives WHERE id = ?", (drive_id,)).fetchone()
+            drive = conn.execute("SELECT sr_name, video_hold, encode_choice FROM drives WHERE id = ?",
+                                 (drive_id,)).fetchone()
             if disc is None or drive is None:
                 conn.rollback()
                 return None
@@ -299,8 +311,8 @@ class Services:
             conn.execute("UPDATE jobs SET params = json_set(params, '$.rip_id', ?) WHERE id IN (%s)"
                          % ",".join("?" * len(ids)), (rip_id, *ids))
             conn.execute(
-                "INSERT INTO video_rips (rip_id, fingerprint, state, main_title, created_at, updated_at) "
-                "VALUES (?, ?, 'ripping', ?, ?, ?)", (rip_id, fingerprint, main, now, now))
+                "INSERT INTO video_rips (rip_id, fingerprint, state, main_title, encode_preset, created_at, updated_at) "
+                "VALUES (?, ?, 'ripping', ?, ?, ?, ?)", (rip_id, fingerprint, main, drive["encode_choice"], now, now))
             if scan_job_id is None:  # a manual start lifts the hold
                 conn.execute("UPDATE drives SET video_hold = 0 WHERE id = ?", (drive_id,))
             conn.commit()
@@ -488,10 +500,30 @@ class Services:
     async def cancel_encode(self, encode_id: int) -> bool:
         return await self.encoder.cancel(encode_id)
 
+    def _set_encode_choice(self, conn, drive_id: str, preset: str) -> str | None:
+        if preset not in ENCODE_CHOICES:
+            return "Unknown preset."
+        with conn:
+            if conn.execute("UPDATE drives SET encode_choice = ? WHERE id = ?", (preset, drive_id)).rowcount == 0:
+                return "Unknown drive."
+            # The rip of the disc in this drive, if one is under way: files not yet recorded follow the new choice.
+            conn.execute(
+                "UPDATE video_rips SET encode_preset = ? WHERE state = 'ripping' AND fingerprint IN "
+                "(SELECT fingerprint FROM video_discs WHERE drive_id = ?)", (preset, drive_id))
+        return None
+
+    async def set_encode_choice(self, drive_id: str, preset: str) -> str | None:
+        """Choose how the disc in a drive is encoded (standard/fast/copy/off). Returns an error, or None."""
+        error = await asyncio.to_thread(self._db, self._set_encode_choice, drive_id, preset)
+        if error is None:
+            await self.drive_changed(drive_id)
+            await self.encodes_changed()
+        return error
+
     async def file_recorded(self, rip_id: int, title: int) -> None:
         """A ripped file reached downloads: queue the automatic encode, unless that is off."""
         try:
-            preset = await asyncio.to_thread(self._db, lambda conn: settings.get(conn, "encode_after_rip"))
+            preset = await asyncio.to_thread(self._db, _encode_preset_for, rip_id)
             if preset != "off":
                 await self.queue_encode(rip_id, title, preset)
         except Exception:  # a failed queueing must not fail the rip that just succeeded

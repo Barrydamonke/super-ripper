@@ -64,7 +64,8 @@ def _standard(src: str, out: str, disc_type: str, audio_channels: int | None) ->
         channels, kbps = audio_plan(audio_channels)
         mixdown = {6: "5point1", 2: "stereo", 1: "mono"}[channels]
         argv += ["--audio", "1", "--aencoder", "eac3", "--ab", str(kbps), "--mixdown", mixdown]
-    return argv + ["--all-subtitles", "--subtitle-burned=none", "--json"]
+    # No subtitle track is flagged default, so players don't switch one on (and burn it in) by themselves.
+    return argv + ["--all-subtitles", "--subtitle-burned=none", "--subtitle-default=none", "--json"]
 
 
 def _fast(src: str, out: str, audio_channels: int | None, interlaced: bool, quality: int,
@@ -81,7 +82,7 @@ def _fast(src: str, out: str, audio_channels: int | None, interlaced: bool, qual
     else:
         channels, kbps = audio_plan(audio_channels)
         argv += ["-c:a", "eac3", "-b:a", f"{kbps}k", "-ac", str(channels)]
-    argv += ["-c:s", "copy"]
+    argv += ["-c:s", "copy", "-disposition:s", "-default"]  # keep "forced", drop "default"
     if sar != (1, 1):  # hevc_vaapi can drop the aspect ratio (FFmpeg tickets #8376, #6276)
         argv += ["-bsf:v", f"hevc_metadata=sample_aspect_ratio={sar[0]}/{sar[1]}"]
     return argv + ["-progress", "pipe:1", "-nostats", out]
@@ -97,7 +98,7 @@ def encode_argv(preset: str, source: Path, output: Path, *, disc_type: str, audi
         return _fast(src, out, audio_channels, interlaced, fast_quality, sar)
     if preset == "copy":
         return [*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-y", "-i", src, "-map", "0", "-c", "copy",
-                "-progress", "pipe:1", "-nostats", out]
+                "-disposition:s", "-default", "-progress", "pipe:1", "-nostats", out]
     raise ValueError(f"unknown preset {preset!r}")
 
 

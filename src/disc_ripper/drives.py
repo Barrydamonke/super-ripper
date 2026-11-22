@@ -305,5 +305,5 @@ def set_media(
             # The disc left: the card must not keep showing it ("Already ripped").
             conn.execute("UPDATE discs SET drive_id = NULL WHERE drive_id = ?", (drive_id,))
             conn.execute("UPDATE video_discs SET drive_id = NULL WHERE drive_id = ?", (drive_id,))
-            conn.execute("UPDATE drives SET video_hold = 0 WHERE id = ?", (drive_id,))
+            conn.execute("UPDATE drives SET video_hold = 0, encode_choice = NULL WHERE id = ?", (drive_id,))
     return cur.rowcount == 1

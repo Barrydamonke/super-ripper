@@ -7,6 +7,7 @@
   <section class="film-rip">
     <h2>Rip {{ rip.rip_id }}{% if rip.label %} · {{ rip.label }}{% endif %}{% if rip.disc_type %} · {{ rip.disc_type }}{% endif %} · {{ rip.created_at|day }}
       {% for job_id in rip.logs %}<a class="hint" href="/jobs/{{ job_id }}/log" target="_blank">log</a> {% endfor %}</h2>
+    {% if rip.encode_with %}<p class="hint">Encode with: {{ rip.encode_with }}</p>{% endif %}
     {% if rip.can_encode_all %}
     <form class="inline" hx-post="/films/encode-all" hx-target="#films" hx-disabled-elt="find button">
       <input type="hidden" name="rip_id" value="{{ rip.rip_id }}">

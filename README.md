@@ -122,10 +122,10 @@ After a rip, the main title is encoded to HEVC, and the encode lands **beside th
 - **Fast:** ffmpeg on the Intel GPU (`hevc_vaapi`, constant quality `fast_quality`, default 24). Much faster, larger files. DVDs are checked for interlacing first.
 - **Copy only:** a lossless remux into a new MKV, with no re-encoding.
 
-Standard and Fast give one audio track, converted to E-AC-3: 5.1 at 640 kb/s when the source has 3 or more channels, otherwise stereo or mono at 224 kb/s. Every subtitle track, the chapters and the metadata are kept. Encodes run at the lowest CPU and disk priority.
+Standard and Fast give one audio track, converted to E-AC-3: 5.1 at 640 kb/s when the source has 3 or more channels, otherwise stereo or mono at 224 kb/s. Every subtitle track, the chapters and the metadata are kept. No subtitle track is marked default (forced flags are kept), so Jellyfin doesn't switch one on by itself and burn it into the picture. Encodes run at the lowest CPU and disk priority.
 
 Settings has an **Encoding** group:
-- **encode_after_rip:** Standard, Fast, Copy only or Off (default Standard). A finished rip queues its encode on its own.
+- **encode_after_rip:** Standard, Fast, Copy only or Off (default Standard). A finished rip queues its encode on its own. To pick differently for one disc, use **Encode with** on its drive card while it scans or rips; titles that finish after a change use the new choice. The Films page shows each rip's choice.
 - **encode_slots:** encodes run at once, 1 or 2 (default 1). A change applies after the container restarts.
 - **fast_quality:** the Fast preset's quality number, 1 to 51, lower is better (default 24; tune it after a test encode).
 - **raw_keep_hours:** how long the raw file is kept after a good encode (default 24).

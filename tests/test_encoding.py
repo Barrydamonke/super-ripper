@@ -71,7 +71,7 @@ def test_standard_bluray_argv_exact():
         "HandBrakeCLI", "-i", S, "-o", O, "--format", "av_mkv", "--markers", "--encoder", "x265_10bit",
         "--encoder-preset", "slow", "--quality", "20", "--crop-mode", "none", "--auto-anamorphic",
         "--audio", "1", "--aencoder", "eac3", "--ab", "640", "--mixdown", "5point1",
-        "--all-subtitles", "--subtitle-burned=none", "--json"]
+        "--all-subtitles", "--subtitle-burned=none", "--subtitle-default=none", "--json"]
 
 
 def test_standard_dvd_argv_exact():
@@ -81,7 +81,7 @@ def test_standard_dvd_argv_exact():
         "--encoder-preset", "slow", "--quality", "18", "--crop-mode", "none", "--auto-anamorphic",
         "--comb-detect", "--decomb", "--detelecine",
         "--audio", "1", "--aencoder", "eac3", "--ab", "640", "--mixdown", "5point1",
-        "--all-subtitles", "--subtitle-burned=none", "--json"]
+        "--all-subtitles", "--subtitle-burned=none", "--subtitle-default=none", "--json"]
 
 
 def test_standard_stereo_and_mono():
@@ -106,7 +106,7 @@ def test_fast_argv_exact():
     assert fast() == FAST_HEAD + [
         "-map", "0:v:0", "-map", "0:a:0?", "-map", "0:s?", "-map_chapters", "0",
         "-vf", "format=nv12,hwupload", "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", "24",
-        "-c:a", "eac3", "-b:a", "640k", "-ac", "6", "-c:s", "copy",
+        "-c:a", "eac3", "-b:a", "640k", "-ac", "6", "-c:s", "copy", "-disposition:s", "-default",
         "-progress", "pipe:1", "-nostats", O]
 
 
@@ -136,7 +136,7 @@ def test_fast_anamorphic_sets_sar():
 def test_copy_argv_exact():
     assert encoding.encode_argv("copy", SRC, OUT, disc_type="dvd", audio_channels=2, interlaced=False,
                                 fast_quality=24) == [
-        "ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", S, "-map", "0", "-c", "copy",
+        "ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", S, "-map", "0", "-c", "copy", "-disposition:s", "-default",
         "-progress", "pipe:1", "-nostats", O]
 
 

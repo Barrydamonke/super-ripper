@@ -231,3 +231,11 @@ def test_superseded_failure_has_no_retry(films):
     page = client.get("/films").text
     assert f'hx-post="/encodes/{old}/retry"' not in page
     assert f'hx-post="/encodes/{newer}/retry"' in page
+
+
+def test_films_page_shows_each_rips_encode_choice(films):
+    client, conn, config = films
+    rip = make_rip(conn, config)
+    conn.execute("UPDATE video_rips SET encode_preset = 'fast' WHERE rip_id = ?", (rip,))
+    conn.commit()
+    assert "Encode with: Fast" in client.get("/films").text

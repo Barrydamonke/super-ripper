@@ -633,3 +633,16 @@ def test_recent_and_running_jobs_link_their_logs(dash):
     assert f'href="/jobs/{done}/log"' in page
     assert f'href="/jobs/{running}/log"' in page
     assert "job-failed" not in page  # nothing failed, so no failure box
+
+
+def test_encode_choice_on_the_video_card(dash):
+    client, conn = dash
+    _video_disc(conn, DECOY, held=["two titles of about the same length (decoy playlists?)"])
+    text = _page(client)
+    assert 'hx-post="/dashboard/video/encode-choice"' in text
+    assert '<option value="standard" selected' in text  # the setting's default
+    r = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "fast"})
+    assert r.status_code == 200 and '<option value="fast" selected' in r.text
+    assert conn.execute("SELECT encode_choice FROM drives WHERE id = 'serial:A'").fetchone()[0] == "fast"
+    bad = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "turbo"})
+    assert bad.status_code == 400 and "Unknown preset." in bad.text

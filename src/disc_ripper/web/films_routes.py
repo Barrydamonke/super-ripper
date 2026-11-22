@@ -105,10 +105,14 @@ def _file_view(key: str, entry: dict, scan_titles: dict, rows: list[sqlite3.Row]
     }
 
 
+CHOICE_NAMES = {"standard": "Standard", "fast": "Fast", "copy": "Copy only", "off": "not encoded automatically"}
+
+
 def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, error: str | None = None,
                   notice: str | None = None, oob: bool = False) -> dict:
     now = now or datetime.now(timezone.utc)
     keep_hours = settings.get(conn, "raw_keep_hours")
+    default_choice = settings.get(conn, "encode_after_rip")
     rips = []
     for rip in conn.execute("SELECT * FROM video_rips ORDER BY rip_id DESC").fetchall():
         disc = conn.execute("SELECT disc_type, label, scan FROM video_discs WHERE fingerprint = ?",
@@ -131,6 +135,7 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
             "disc_type": DISC_NAMES.get(disc["disc_type"], "") if disc else "",
             "created_at": rip["created_at"], "files": views, "logs": logs,
             "can_encode_all": any(not f["deleted"] for f in views),
+            "encode_with": CHOICE_NAMES.get(rip["encode_preset"] or default_choice, ""),
         })
     return {"active": _active_rows(conn), "rips": rips, "presets": encoding.PRESET_LABEL,
             "error": error, "notice": notice, "oob": oob}
