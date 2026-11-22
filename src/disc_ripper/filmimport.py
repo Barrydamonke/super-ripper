@@ -22,6 +22,7 @@ IMPORT_TIMEOUT_SECONDS = 600.0
 BUSY = "Busy, try again in a moment."
 CONFIRM_HOURS = 24
 NOT_SEEN = "Jellyfin hasn't shown this film after 24 hours; the rip is kept. Check the library."
+MISPLACED = "The imported file isn't where Radarr put it, so the rip is kept. Check the library."
 NO_RADARR = "Set up Radarr in Settings to import films."
 DEFAULT_ROOT = "Movies"
 STEPS = ("identify", "claim", "add", "replace", "encode", "import", "unmonitor", "extras", "done")
@@ -580,11 +581,17 @@ async def _confirm_one(services, rip_id: int, now: datetime) -> None:
             return
         jlog = joblog.JobLog(services.config.config_dir / joblog.LOG_DIRNAME / f"import-{rip_id}.log")
         waited = now - _parse_utc(row["imported_at"]) >= timedelta(hours=CONFIRM_HOURS)
+        folder = services.config.downloads_dir / str(int(rip_id))
+        new = Path(row["new_path"])
+        if not await asyncio.to_thread(_library_file_safe, new, folder):
+            if row["message"] != MISPLACED:
+                film_imports.update(conn, rip_id, utc_now(), message=MISPLACED)
+                jlog.write(MISPLACED)
+            return
         client = services.jellyfin()
         if client is None:
             ready = waited
         else:
-            new = Path(row["new_path"])
             try:
                 size = (await asyncio.to_thread(new.stat)).st_size
                 sources = await asyncio.to_thread(client.movie_sources, row["tmdb_id"], row["title"] or "")
@@ -599,7 +606,6 @@ async def _confirm_one(services, rip_id: int, now: datetime) -> None:
                 return
         if not ready:
             return
-        folder = services.config.downloads_dir / str(int(rip_id))
         try:
             await asyncio.to_thread(_remove, folder)
         except OSError as exc:
@@ -609,6 +615,14 @@ async def _confirm_one(services, rip_id: int, now: datetime) -> None:
         jlog.write(f"{'Jellyfin has the film' if client else '24 hours passed'}; deleted {folder}")
     finally:
         conn.close()
+
+
+def _library_file_safe(new: Path, folder: Path) -> bool:
+    """The imported file exists and does not live inside the folder about to be deleted."""
+    try:
+        return new.is_file() and not new.resolve().is_relative_to(folder.resolve())
+    except OSError:
+        return False
 
 
 def _remove(folder: Path) -> None:

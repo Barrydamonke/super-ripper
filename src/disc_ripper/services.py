@@ -903,7 +903,10 @@ class Services:
             log.info("jobs: %d job(s) were running at the last stop; marked interrupted", count)
         await self._refresh_drives()
         self.encoder.start()
-        await filmimport.resume_after_restart(self)
+        try:
+            await filmimport.resume_after_restart(self)
+        except Exception:  # the loops must still start
+            log.exception("film import: resuming after the restart failed")
         for coro, name in (
             (self._raw_sweep_loop(), "raw sweep"),
             (self._film_confirm_loop(), "film import confirm"),

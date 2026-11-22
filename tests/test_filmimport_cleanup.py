@@ -109,11 +109,17 @@ def test_cleanup_with_folder_already_gone(config, setup, tmp_path):
 def test_failed_delete_is_retried(config, setup, tmp_path, monkeypatch):
     rip, services, row = imported(config, setup, tmp_path)
     services.jellyfin = lambda: None
-    monkeypatch.setattr(filmimport, "_remove", lambda folder: (_ for _ in ()).throw(PermissionError("locked")))
+    real, calls = filmimport._remove, []
+
+    def flaky(folder):
+        calls.append(folder)
+        if len(calls) == 1:
+            raise PermissionError("locked")
+        real(folder)
+
+    monkeypatch.setattr(filmimport, "_remove", flaky)
     confirm(services, at(row, 24))
     assert row_of(setup, rip)["state"] == "imported"
-    monkeypatch.undo()
-    monkeypatch.setattr(filmimport, "POLL_SECONDS", 0.0)
     confirm(services, at(row, 25))
     assert row_of(setup, rip)["state"] == "in_jellyfin"
 
@@ -165,3 +171,27 @@ def test_raw_sweep_skips_imported_rips(config, setup, tmp_path):
     assert "cleaned up once Jellyfin has the film" in refusal
     assert (config.downloads_dir / str(rip) / "title_t00.mkv").exists()
     assert services._sweep_raw(setup) == 0
+
+
+def test_no_cleanup_when_library_file_missing(config, setup, tmp_path):
+    rip, services, row = imported(config, setup, tmp_path)
+    services.jellyfin = lambda: None
+    Path(row["new_path"]).unlink()
+    confirm(services, at(row, 24))
+    after = row_of(setup, rip)
+    assert after["state"] == "imported" and after["message"] == filmimport.MISPLACED
+    assert (config.downloads_dir / str(rip)).exists()
+    stamp = after["updated_at"]
+    confirm(services, at(row, 25))
+    assert row_of(setup, rip)["updated_at"] == stamp
+    assert filmimport.MISPLACED in (config.config_dir / "logs" / f"import-{rip}.log").read_text(encoding="utf-8")
+
+
+def test_no_cleanup_when_imported_file_is_inside_rip_folder(config, setup, tmp_path):
+    rip, services, row = imported(config, setup, tmp_path)
+    services.jellyfin = lambda: None
+    inside = config.downloads_dir / str(rip) / "kept.mkv"
+    inside.write_bytes(b"x")
+    film_imports.update(setup, rip, "t", new_path=str(inside))
+    confirm(services, at(row, 24))
+    assert row_of(setup, rip)["state"] == "imported" and inside.is_file()
