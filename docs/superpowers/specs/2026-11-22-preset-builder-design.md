@@ -166,14 +166,39 @@ Unit tests pin the exact argv for:
   explicit track maps)
 - each option on its own
 
+- **Copy mode still picks tracks.** It maps the plan's tracks explicitly (`-map 0:v:0 -map
+  0:a:N … -c copy`) instead of step 6's `-map 0`, because rips now carry every language.
+- **Track check.** After the encode, the output's audio and subtitle languages and counts
+  (read with ffprobe) must match the plan. Otherwise the encode fails with "The encode's
+  tracks don't match the preset".
+  - This catches HandBrake numbering tracks differently from ffprobe.
+  - *(my call: HandBrake numbers MKV tracks in container order, which should match ffprobe's
+    order within each track type. The check makes a mismatch loud instead of silent, and a
+    fake-encoder test covers it.)*
+
 ### Data (migration 0008)
 
 **`presets`:** `id`, `name`, `settings` (JSON), `fingerprint`, `created_at`, `updated_at`.
 
 - The fingerprint is a short hash of the settings without the name, and changes on any real
   edit.
-- Seeded with Standard, Fast (quality from `fast_quality` if it was saved, else 24) and Copy
-  only.
+- **Seeded presets:** fixed ids 1 Standard, 2 Fast and 3 Copy only, so the old names map
+  without guesswork. The migration contains the seeded settings JSON itself and never imports
+  app code, so it can't drift when the code changes. The seeds reproduce step 6 exactly,
+  because step 6 decombs DVDs only, never crops, and uses one QP for both disc types:
+  - **Standard:**
+    - HandBrake, software, `x265_10bit`, `slow`
+    - RF 18 DVD / RF 20 Blu-ray
+    - no resolution cap, deinterlace `auto`, crop `off`
+    - E-AC-3 `max51`, 640/224 kb/s
+  - **Fast:**
+    - ffmpeg, hardware, `hevc_vaapi`
+    - QP from `fast_quality` if it was saved, else 24, for both disc types
+    - no resolution cap, deinterlace `auto`, crop `off`
+    - E-AC-3 `max51`, 640/224 kb/s
+  - **Copy only:**
+    - ffmpeg, copy mode
+    - audio `copy`, `audio_tracks: all`
 
 **`encodes` is rebuilt** to drop the `CHECK (preset IN …)` constraint, keeping its data and
 indexes. It gains these columns:
@@ -197,9 +222,16 @@ The old `preset` column goes.
 - **The MakeMKV track selection:**
   - The default changes to keep all audio and subtitles:
     `-sel:all,+sel:video,+sel:audio,+sel:subtitle,-sel:mvcvideo,=100:all,-10:eng`. The builder
-    checks the exact syntax against MakeMKV's docs and a scan capture in `tests/fixtures`.
-  - If the owner's saved value equals the old default, the migration updates it. A
-    hand-edited value is left alone.
+    checks the syntax against MakeMKV's documented selection grammar. *(my call: no capture of
+    a scan with this string exists yet; the owner's first rip confirms it)*
+  - The "old default" the migration compares against is step 6's exact
+    `DEFAULT_VIDEO_SELECTION`:
+    `-sel:all,+sel:video,+sel:(eng|nolang),+sel:(audio&single),-sel:(audio&special),+sel:(subtitle&forced),-sel:mvcvideo,=100:all,-10:eng`.
+    If the saved value equals it, the migration updates it. A hand-edited value is left alone.
+- **Rips made before this step** are English-only. A preset asking for another language on
+  one of them hits the "no match, keep the first track" rule. The note goes in the log and in
+  the finished encode's message on the Films page ("No Japanese audio in this rip; kept
+  English"). *(my call)*
 - **Seeded languages:** the seeded presets get `audio_languages ["eng"]`,
   `first_per_language`, no commentary, subtitles `all` in `["eng"]`. Encodes made with them
   therefore come out as today even though rips now carry more.
@@ -264,6 +296,11 @@ Copy only         ...
   - the Presets page, using a 2-hour film at a typical size for each disc type: 25 GB
     Blu-ray, 6 GB DVD
 - The estimate replaces step 6's `DEFAULT_SPEED` and `SIZE_FACTOR` tables.
+  `encodes.recent_speeds` and `reserved_bytes` are rewritten to work from the fingerprint.
+- **Which settings an estimate uses:**
+  - A queued encode uses its preset's current row. Deleting a preset is refused while an
+    encode with it is queued.
+  - A running or finished encode uses its snapshot.
 
 ### Everything else that reads the preset
 
