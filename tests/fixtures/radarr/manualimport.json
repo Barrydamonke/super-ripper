@@ -1,0 +1,5 @@
+[{"_comment": "SYNTHETIC: shaped per Radarr v3 docs, not a real response.",
+  "id": 1, "path": "/downloads/Elf/Elf.mkv", "relativePath": "Elf.mkv", "name": "Elf", "size": 4000000000,
+  "movie": {"id": 12, "title": "Elf", "tmdbId": 10719},
+  "quality": {"quality": {"id": 30, "name": "Remux-1080p"}, "revision": {"version": 1}},
+  "languages": [{"id": 1, "name": "English"}], "rejections": []}]
