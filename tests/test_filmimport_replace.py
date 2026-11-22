@@ -435,3 +435,39 @@ def test_skip_refuses_while_an_encode_is_active(config, setup, tmp_path, monkeyp
     assert asyncio.run(filmundo.skip(services, rip)) == message
     encodes.finish(setup, other, "done", NOW, output="o", output_bytes=1)
     assert asyncio.run(filmundo.skip(services, rip)) is None and not folder.exists()
+
+
+def _fast_timeout(monkeypatch):
+    monkeypatch.setattr(filmimport, "FOLDER_MOVE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(filmimport, "FOLDER_MOVE_POLL_SECONDS", 0.01)
+
+
+def test_undo_retry_after_folder_move_timeout(config, setup, tmp_path, monkeypatch):
+    rip, eid, services, fake, movie, old = _tidy_setup(config, setup, tmp_path, monkeypatch)
+    run(services, rip)
+    assert row_of(setup, rip)["state"] == "imported"
+    output = Path(encodes.get(setup, eid)["output"])
+    _fast_timeout(monkeypatch)
+    fake.move_delay = 10**6
+    assert asyncio.run(filmundo.undo(services, rip)).startswith("Undo stopped: Radarr didn't finish")
+    assert row_of(setup, rip)["new_path"] == str(fake.root / "Elf" / "Elf.mkv")  # recorded before waiting
+    fake._pending_moves[0]["left"] = 6  # Radarr gets on with the move
+    monkeypatch.setattr(filmimport, "FOLDER_MOVE_TIMEOUT_SECONDS", 120.0)
+    assert asyncio.run(filmundo.undo(services, rip)) == "Undone."
+    assert output.is_file() and old.read_bytes() == b"o" * 90
+    assert sorted(p.name for p in (fake.root / "Elf").iterdir()) == ["Old.mkv"]
+    assert not (fake.root / "Elf (2003)").exists()
+
+
+def test_tidy_retry_after_timeout_waits_again(config, setup, tmp_path, monkeypatch):
+    rip, eid, services, fake, movie, old = _tidy_setup(config, setup, tmp_path, monkeypatch)
+    _fast_timeout(monkeypatch)
+    fake.move_delay = 10**6
+    run(services, rip)
+    assert row_of(setup, rip)["state"] == "failed"
+    fake._pending_moves[0]["left"] = 6
+    monkeypatch.setattr(filmimport, "FOLDER_MOVE_TIMEOUT_SECONDS", 120.0)
+    assert asyncio.run(filmimport.retry_import(services, rip)) is None
+    row = row_of(setup, rip)
+    assert row["state"] == "imported", row["error"]
+    assert row["new_path"] == str(fake.root / "Elf (2003)" / "Elf.mkv") and Path(row["new_path"]).is_file()

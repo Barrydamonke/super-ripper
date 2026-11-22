@@ -90,14 +90,19 @@ async def _undo(flow: Flow, row) -> str:
     folder = new_path.parent if new_path else None
     if replacing and old_folder is not None:
         movie = await flow.call("movie", row["movie_id"])
-        if Path(movie["path"]) != old_folder:  # the folder was tidied: put its old name back
-            await flow.call("update_movie", {**movie, "path": str(old_folder)}, move_files=True)
-            await wait_for_folder_move(flow, row["movie_id"], str(old_folder))
-            flow.log.write(f"folder restored: {old_folder}")
-            if new_path is not None:
+        shown = (movie.get("movieFile") or {}).get("path")
+        settled = new_path is None or not shown or (
+            Path(shown).is_relative_to(old_folder) and await asyncio.to_thread(Path(shown).exists))
+        tidied = Path(movie["path"]) != old_folder  # the folder was tidied: put its old name back
+        if tidied or not settled:  # (or an earlier try saved the path but Radarr hadn't moved the files yet)
+            if tidied:
+                await flow.call("update_movie", {**movie, "path": str(old_folder)}, move_files=True)
+            if new_path is not None:  # recorded first: a timeout below leaves the row pointing at the right place
                 new_path = old_folder / new_path.name
                 folder = old_folder
                 flow.set(new_path=str(new_path))
+            await wait_for_folder_move(flow, row["movie_id"], str(old_folder))
+            flow.log.write(f"folder restored: {old_folder}")
 
     if new_path is not None and enc is not None and await asyncio.to_thread(new_path.exists):
         await asyncio.to_thread(_move, new_path, Path(enc["output"]))

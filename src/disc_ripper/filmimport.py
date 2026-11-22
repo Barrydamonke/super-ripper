@@ -261,6 +261,11 @@ class Flow:
                 after = await wait_for_folder_move(self, row["movie_id"], target)
                 self.log.write(f"folder tidied: {movie['path']} -> {after['path']}")
                 movie = after
+            else:  # an earlier try saved the path; the files may not have followed yet
+                shown = (movie.get("movieFile") or {}).get("path")
+                if shown and not (Path(shown).is_relative_to(Path(movie["path"]))
+                                  and await asyncio.to_thread(Path(shown).exists)):
+                    movie = await wait_for_folder_move(self, row["movie_id"], movie["path"])
         have = (movie.get("movieFile") or {}).get("path")
         if have and have != row["new_path"] and await asyncio.to_thread(Path(have).exists):
             with self.conn:
