@@ -31,9 +31,15 @@ FROM python:3.12-slim-trixie
 # util-linux provides setpriv, used to drop from root to PUID:PGID.
 # tini runs as PID 1 so child processes get signals and are reaped.
 # libssl3t64..libavcodec61: MakeMKV runtime libs; ffmpeg provides ffprobe.
-RUN apt-get update \
+# handbrake-cli: software x265 encodes. intel-media-va-driver-non-free + vainfo:
+# VAAPI HEVC on Gen9 iGPUs (UHD 630) needs Intel's closed shader kernels, which
+# only the non-free driver build ships (hence the non-free component).
+RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
+    && grep -q '^Components: main non-free$' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends tzdata util-linux tini cyanrip \
         libssl3t64 libexpat1 zlib1g libavcodec61 ffmpeg \
+        handbrake-cli intel-media-va-driver-non-free vainfo \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=makemkv-build /staging/usr/ /usr/
@@ -44,7 +50,8 @@ ENV PYTHONUNBUFFERED=1 \
     PUID=99 \
     PGID=100 \
     UMASK=0002 \
-    PORT=8580
+    PORT=8580 \
+    LIBVA_DRIVER_NAME=iHD
 
 WORKDIR /app
 COPY pyproject.toml README.md ./

@@ -1,4 +1,7 @@
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from disc_ripper import db
 from disc_ripper.config import load_config
@@ -46,9 +49,9 @@ def _tables(conn):
 def test_migrate_fresh_db(config):
     conn = db.connect(config.db_path)
     try:
-        assert db.migrate(conn) == 4
+        assert db.migrate(conn) == 5
         assert {"settings", "drives"} <= _tables(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     finally:
         conn.close()
 
@@ -59,7 +62,7 @@ def test_migrate_is_idempotent(config):
         db.migrate(conn)
         conn.execute("INSERT INTO settings (key, value) VALUES ('k', '1')")
         conn.commit()
-        assert db.migrate(conn) == 4
+        assert db.migrate(conn) == 5
         assert conn.execute("SELECT value FROM settings WHERE key='k'").fetchone()[0] == "1"
     finally:
         conn.close()
@@ -88,7 +91,7 @@ def test_migration_0002_from_step1_db(config):
         )
         conn.commit()
 
-        assert db.migrate(conn) == 4
+        assert db.migrate(conn) == 5
         row = conn.execute("SELECT * FROM drives").fetchone()
         assert row["media_state"] == "unknown"
         assert row["disc_type"] is None
@@ -125,7 +128,7 @@ def test_migration_0003_prefills_offsets(config):
                 (f"d{i}", model),
             )
         conn.commit()
-        assert db.migrate(conn) == 4
+        assert db.migrate(conn) == 5
         offsets = [r[0] for r in conn.execute("SELECT read_offset FROM drives ORDER BY id")]
         assert offsets == [667, 6, 0, 0]
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -149,5 +152,23 @@ def test_migration_0004_tables(config):
         assert {"video_discs", "video_rips"} <= _tables(conn)
         cols = {r[1]: r for r in conn.execute("PRAGMA table_info(drives)")}
         assert cols["video_hold"][4] == "0"
+    finally:
+        conn.close()
+
+
+def test_migration_0005(config):
+    conn = db.connect(config.db_path)
+    try:
+        db.migrate(conn)
+        assert "encodes" in _tables(conn)
+        cols = {r[1]: r for r in conn.execute("PRAGMA table_info(encodes)")}
+        assert {"rip_id", "title", "preset", "state", "source_audio", "speed", "output_bytes"} <= set(cols)
+        assert cols["source_audio"][4] == "-1"
+        indexes = {r[1] for r in conn.execute("PRAGMA index_list(encodes)")}
+        assert len(indexes) >= 2
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO encodes (rip_id, title, role, source, disc_type, source_seconds, source_bytes, "
+                "preset, state, created_at) VALUES (1, 1, 'main', 'x', 'bluray', 1, 1, 'bogus', 'queued', 't')")
     finally:
         conn.close()

@@ -234,6 +234,9 @@ async def _rip_title(ctx, params: dict, work: Path) -> None:
     await ctx.db(_after_move, ctx.config.work_dir, rip_id, ctx.job_id, title, moved, role, message, utc_now())
     if moved is not None:
         shutil.rmtree(work, ignore_errors=True)
+        hook = getattr(ctx.services, "file_recorded", None)
+        if hook is not None:
+            await hook(rip_id, title)
     if await ctx.db(lambda conn: titles.should_eject(video_rips.settled(conn, rip_id, ctx.job_id))):
         try:
             await asyncio.to_thread(_with_drive_lock, ctx, lambda: _drive(ctx, params["sr_name"]).eject())
@@ -248,7 +251,7 @@ runner.HANDLERS["rip_title"] = run_rip_title
 NOTHING_TO_MOVE = "Nothing left to move: the ripped file is no longer in the work area."
 
 
-def move_again_sync(conn, config, rip_id: int) -> str | None:
+def move_again_sync(conn, config, rip_id: int, on_recorded=None) -> str | None:
     """Retry the move for each finished title whose file still sits in /work.
     Returns an error message (also when nothing was left to move), or None."""
     min_free = settings.get(conn, "cache_min_free_gb")
@@ -270,6 +273,8 @@ def move_again_sync(conn, config, rip_id: int) -> str | None:
             continue
         shutil.rmtree(folder, ignore_errors=True)
         video_rips.record_file(conn, rip_id, title, moved, role, utc_now())
+        if on_recorded is not None:
+            on_recorded(rip_id, title)
     if error is None:  # clear the old move message so settle writes the new outcome
         video_rips.set_state(conn, rip_id, "ripping", "", utc_now())
     video_rips.settle(conn, rip_id, config.work_dir, utc_now())

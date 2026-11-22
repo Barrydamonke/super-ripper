@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 
-from . import jobs
+from . import encodes, jobs
 from .schedule import GuardState, local_zone
 
 
@@ -20,9 +20,10 @@ def _local(value: datetime | str | None) -> str | None:
 
 def busy_report(conn: sqlite3.Connection, guard: GuardState) -> dict:
     running = jobs.running_jobs(conn)
+    encoding = encodes.running(conn)
     return {
         # Past the grace period nothing may hold shutdown, whatever is running.
-        "busy": bool(running) and guard.holds_shutdown,
+        "busy": bool(running or encoding) and guard.holds_shutdown,
         "phase": guard.phase,
         "scheduledEnd": _local(guard.scheduled_end),
         "graceEndsAt": _local(guard.grace_ends_at),
@@ -34,5 +35,9 @@ def busy_report(conn: sqlite3.Connection, guard: GuardState) -> dict:
                 "estimatedFinish": _local(row["estimated_finish"]),
             }
             for row in running
+        ] + [
+            {"id": row["id"], "drive": "encoder", "kind": "encode",
+             "estimatedFinish": _local(row["estimated_finish"])}
+            for row in encoding
         ],
     }

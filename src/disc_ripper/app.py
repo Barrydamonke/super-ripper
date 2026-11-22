@@ -17,7 +17,7 @@ from . import auth, db, drives
 from .clock import utc_now
 from .config import AppConfig, load_config
 from .services import Services
-from .web import auth_routes, dashboard_routes, drive_routes, music_routes, settings_routes
+from .web import auth_routes, dashboard_routes, drive_routes, films_routes, music_routes, settings_routes
 from .web.deps import is_htmx
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
@@ -138,6 +138,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(auth_routes.router)
     app.include_router(dashboard_routes.router)
     app.include_router(music_routes.router)
+    app.include_router(films_routes.router)
     app.include_router(drive_routes.router)
     app.include_router(settings_routes.router)
     return app

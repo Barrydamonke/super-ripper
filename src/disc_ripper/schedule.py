@@ -40,6 +40,7 @@ class GuardState:
     phase: Phase
     scheduled_end: datetime | None
     grace_ends_at: datetime | None
+    window_start: datetime | None = None
 
     @property
     def holds_shutdown(self) -> bool:
@@ -121,7 +122,7 @@ def guard_state(entries: list[DayEntry] | None, now: datetime, grace: timedelta)
     now = now.astimezone(timezone.utc)
     for window in windows:
         if window.start <= now < window.end:
-            return GuardState("in_window", window.end, window.end + grace)
+            return GuardState("in_window", window.end, window.end + grace, window.start)
     ended = [w.end for w in windows if w.end <= now]
     if not ended:
         return GuardState("off_hours", None, None)

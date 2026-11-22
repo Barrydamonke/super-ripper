@@ -207,7 +207,17 @@ def _dashboard_sync(conn, config) -> dict:
         for row in drives.list_drives(conn)
         if row["present"] and row["enabled"]
     ]
-    return {"cards": cards, "guard_html": render_guard(conn, now), "default_minutes": DEFAULT_TEST_MINUTES}
+    from .films_routes import render_encodes
+
+    return {"cards": cards, "guard_html": render_guard(conn, now), "encodes_html": render_encodes(conn),
+            "default_minutes": DEFAULT_TEST_MINUTES}
+
+
+def _burst_sync(conn, config) -> dict:
+    """What a (re)connecting event stream sends: the dashboard's parts plus the Films list."""
+    from .films_routes import render_films
+
+    return {**_dashboard_sync(conn, config), "films_html": render_films(conn)}
 
 
 @router.get("/")
@@ -466,12 +476,14 @@ async def event_stream(svc: Services, request) -> AsyncIterator[str]:
         # Subscribe first so nothing published during the burst is missed.
         conn = db.connect(svc.config.db_path)
         try:
-            burst = await asyncio.to_thread(_dashboard_sync, conn, svc.config)
+            burst = await asyncio.to_thread(_burst_sync, conn, svc.config)
         finally:
             conn.close()
         yield format_sse("guard", burst["guard_html"])
         for card in burst["cards"]:
             yield format_sse(f"drive-{card['key']}", card["html"])
+        yield format_sse("encodes", burst["encodes_html"])
+        yield format_sse("films", burst["films_html"])
         while not sub.dropped and not await request.is_disconnected():
             try:
                 name, data = await asyncio.wait_for(sub.queue.get(), KEEPALIVE_SECONDS)

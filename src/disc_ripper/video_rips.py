@@ -92,6 +92,32 @@ def record_file(conn: sqlite3.Connection, rip_id: int, title: int, path: Path, r
                      (json.dumps(files), now, rip_id))
 
 
+def mark_raw_deleted(conn: sqlite3.Connection, rip_id: int, title: int, now: str) -> None:
+    row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    files = json.loads(row["files"]) if row else {}
+    if str(title) not in files:
+        return
+    files[str(title)]["raw_deleted_at"] = now
+    with conn:
+        conn.execute("UPDATE video_rips SET files = ?, updated_at = ? WHERE rip_id = ?",
+                     (json.dumps(files), now, rip_id))
+
+
+def raw_deleted(conn: sqlite3.Connection, rip_id: int, title: int) -> bool:
+    row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    entry = json.loads(row["files"] or "{}").get(str(title)) if row else None
+    return bool(entry and entry.get("raw_deleted_at"))
+
+
+def clear_raw_deleted(conn: sqlite3.Connection, rip_id: int, title: int) -> None:
+    row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    files = json.loads(row["files"]) if row else {}
+    if str(title) in files:
+        files[str(title)].pop("raw_deleted_at", None)
+        with conn:
+            conn.execute("UPDATE video_rips SET files = ? WHERE rip_id = ?", (json.dumps(files), rip_id))
+
+
 def set_state(conn: sqlite3.Connection, rip_id: int, state: str, message: str, now: str) -> None:
     with conn:
         conn.execute("UPDATE video_rips SET state = ?, message = ?, updated_at = ? WHERE rip_id = ?",

@@ -118,6 +118,33 @@ SETTINGS: tuple[SettingDef, ...] = (
              "go into the MKV. Leave as is unless you know the syntax.",
         group="DVD and Blu-ray",
     ),
+    SettingDef(
+        "encode_after_rip", "Encode after ripping", "choice", "standard",
+        help="What to make of each ripped title automatically. The raw rip is kept until encoded.",
+        choices=(("standard", "Standard (HandBrake x265)"), ("fast", "Fast (hardware)"),
+                 ("copy", "Copy only"), ("off", "Off")),
+        group="Encoding",
+    ),
+    SettingDef(
+        "encode_slots", "Encodes at once", "int", 1, "", 1, 2,
+        "How many encodes may run at the same time. A change applies after the container restarts.",
+        group="Encoding",
+    ),
+    SettingDef(
+        "fast_quality", "Fast preset quality", "int", 24, "", 1, 51,
+        "Constant quality (QP) for the hardware preset. Lower is better and bigger.",
+        group="Encoding",
+    ),
+    SettingDef(
+        "raw_keep_hours", "Keep raw rips for", "int", 24, "hours", 0, 720,
+        "A raw rip is deleted this long after one of its encodes finishes, if the output is still there.",
+        group="Encoding",
+    ),
+    SettingDef(
+        "encode_stall_minutes", "Stop a silent encode after", "int", 10, "minutes", 1, 240,
+        "If an encoder prints nothing for this long it is stopped and the encode fails, so it can be retried.",
+        group="Encoding",
+    ),
 )
 
 _BY_KEY = {s.key: s for s in SETTINGS}

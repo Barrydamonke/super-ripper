@@ -79,3 +79,19 @@ def test_times_reported_in_local_zone(conn, monkeypatch):
     assert report["graceEndsAt"] == "2026-11-19T03:00:00+01:00"
     assert report["jobs"][0]["estimatedFinish"] == "2026-11-19T00:30:00+01:00"
     assert j
+
+
+def test_running_encode_is_busy_and_listed(conn):
+    from pathlib import Path
+
+    from disc_ripper import encodes
+
+    eid = encodes.create(conn, rip_id=1, title=1, role="main", source=Path("/d/f.mkv"), disc_type="dvd",
+                         source_seconds=60.0, source_bytes=1000, source_audio=1, preset="fast", now="t")
+    encodes.start(conn, eid, "t")
+    encodes.set_progress(conn, eid, 0.2, "", "2026-11-18T23:30:00+00:00")
+    report = busy.busy_report(conn, GuardState("in_window", END, GRACE_END))
+    assert report["busy"] is True
+    assert report["jobs"] == [
+        {"id": eid, "drive": "encoder", "kind": "encode", "estimatedFinish": "2026-11-18T23:30:00+00:00"}]
+    assert busy.busy_report(conn, GuardState("off_hours", END, GRACE_END))["busy"] is False

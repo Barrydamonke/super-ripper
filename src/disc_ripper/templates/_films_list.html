@@ -1,0 +1,63 @@
+{% if oob %}<div id="films-notice" hx-swap-oob="true">{% if error %}<p class="error">{{ error }}</p>{% endif %}{% if notice %}<p class="ok">{{ notice }}</p>{% endif %}</div>{% endif %}
+<section class="encodes-top">
+  <h2>Encoding</h2>
+  {% set target = "films" %}{% include "_encodes_panel.html" %}
+</section>
+{% for rip in rips %}
+  <section class="film-rip">
+    <h2>Rip {{ rip.rip_id }}{% if rip.label %} · {{ rip.label }}{% endif %}{% if rip.disc_type %} · {{ rip.disc_type }}{% endif %} · {{ rip.created_at|day }}
+      {% for job_id in rip.logs %}<a class="hint" href="/jobs/{{ job_id }}/log" target="_blank">log</a> {% endfor %}</h2>
+    {% if rip.can_encode_all %}
+    <form class="inline" hx-post="/films/encode-all" hx-target="#films" hx-disabled-elt="find button">
+      <input type="hidden" name="rip_id" value="{{ rip.rip_id }}">
+      <select name="preset">{% for key, label in presets.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select>
+      <button type="submit">Encode all</button>
+    </form>
+    {% endif %}
+    {% for f in rip.files %}
+      <div class="film-file">
+        <strong>{{ f.name }}</strong>
+        {% if f.seconds %} · {{ f.seconds|hms }}{% endif %}
+        · {% if f.deleted %}raw deleted{% elif f.size is not none %}{{ f.size|gb }} raw{% else %}raw missing{% endif %}
+        {% for e in f.encodes %}
+          <div class="encode-row">
+            {% if e.state == "done" %}
+              → {{ e.output_name }} · {{ e.preset_label }} · {{ e.output_bytes|gb }}
+              <a class="hint" href="/encodes/{{ e.id }}/log" target="_blank">log</a>
+            {% elif e.state in ("queued", "running") %}
+              {{ "encoding" if e.state == "running" else "queued" }} ({{ e.preset_label }}){% if e.state == "running" %} {{ e.percent }}%{% endif %}
+              <button hx-post="/encodes/{{ e.id }}/cancel" hx-target="#films">Cancel</button>
+              <a class="hint" href="/encodes/{{ e.id }}/log" target="_blank">log</a>
+            {% elif e.state == "failed" %}
+              <span class="error job-failed"><strong>Encode #{{ e.id }} failed:</strong> {{ e.error or "no reason was recorded" }}
+                {% if not e.superseded %}<button hx-post="/encodes/{{ e.id }}/retry" hx-target="#films">Retry</button>{% endif %}
+                <a href="/encodes/{{ e.id }}/log" target="_blank">log</a></span>
+            {% else %}
+              {{ e.state }} ({{ e.preset_label }}){% if e.message %} · {{ e.message }}{% endif %}
+              {% if not e.superseded %}<button hx-post="/encodes/{{ e.id }}/retry" hx-target="#films">Retry</button>{% endif %}
+              <a class="hint" href="/encodes/{{ e.id }}/log" target="_blank">log</a>
+            {% endif %}
+          </div>
+        {% endfor %}
+        {% if f.no_intact %}<span class="hint">raw kept: no intact encode</span>{% endif %}
+        {% if f.countdown %}<span class="hint">raw deleted {{ f.countdown }}</span>{% endif %}
+        {% if f.can_delete %}
+          <button hx-post="/films/delete-raw" hx-vals='{"rip_id": {{ rip.rip_id }}, "title": {{ f.title }}}' hx-target="#films"
+                  hx-confirm="Delete the raw rip? It can't be undone; the disc is the backup.">Delete raw now</button>
+        {% endif %}
+        {% if not f.deleted %}
+        <form class="inline" hx-post="/films/encode" hx-target="#films" hx-disabled-elt="find button">
+          <input type="hidden" name="rip_id" value="{{ rip.rip_id }}">
+          <input type="hidden" name="title" value="{{ f.title }}">
+          <select name="preset">{% for key, label in presets.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select>
+          <button type="submit">Encode</button>
+        </form>
+        {% endif %}
+      </div>
+    {% else %}
+      <p class="hint">No files recorded for this rip yet.</p>
+    {% endfor %}
+  </section>
+{% else %}
+  <p>No DVD or Blu-ray rips yet.</p>
+{% endfor %}

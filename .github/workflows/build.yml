@@ -59,6 +59,10 @@ jobs:
           # MakeMKV (built from source) and ffprobe must run as the app user.
           docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HOME=/tmp makemkvcon -r info disc:9999' | grep -q '^MSG:'
           docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups ffprobe -version | grep -q '^ffprobe version'
+          # ffmpeg VAAPI HEVC encoder, plus the HandBrake 10-bit x265 and E-AC-3 encoders the presets use.
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -encoders | grep -q hevc_vaapi'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HandBrakeCLI --help 2>&1 | grep -q x265_10bit'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HandBrakeCLI --help 2>&1 | grep -qw eac3'
           docker logs smoke
           docker rm -f smoke
 
