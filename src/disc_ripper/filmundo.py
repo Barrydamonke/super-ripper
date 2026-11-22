@@ -75,7 +75,7 @@ async def _undo(flow: Flow, row) -> str:
         if await asyncio.to_thread(Path(enc["output"]).exists):
             raise _Refused(f"Undo stopped: {enc['output']} already exists")
     if replacing and recycled is not None and await asyncio.to_thread(recycled.exists):
-        if await asyncio.to_thread(old_path.exists):
+        if await asyncio.to_thread(old_path.exists) and old_path != new_path:  # new_path is moved away first
             raise _Refused(f"Undo stopped: {old_path} already exists")
 
     # Each step is recorded on the row as it finishes, so a retry carries on from where this stopped.
@@ -112,8 +112,13 @@ async def _undo(flow: Flow, row) -> str:
             message += " " + BIN_GONE
         await flow.call("command", "RescanMovie", movieId=row["movie_id"])
     elif row["added_by_us"]:
+        try:
+            folder = Path((await flow.call("movie", row["movie_id"]))["path"])
+        except (RadarrError, KeyError):
+            pass  # keep the folder the new file was in, if any
         await flow.call("delete_movie", row["movie_id"], delete_files=False)
         if folder is not None:
+            await asyncio.to_thread(_remove_empty, folder / "extras")
             await asyncio.to_thread(_remove_empty, folder)
     elif row["movie_id"]:  # the owner already had this movie: leave it, and let Radarr see it has no file
         await flow.call("command", "RescanMovie", movieId=row["movie_id"])

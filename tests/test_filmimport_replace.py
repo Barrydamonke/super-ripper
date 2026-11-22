@@ -308,3 +308,28 @@ def test_skip_refuses_imported_and_reports_delete_failure(config, setup, tmp_pat
     message = asyncio.run(filmundo.skip(services, rip))
     assert message.startswith("Couldn't delete ") and "denied" in message
     assert row_of(setup, rip)["state"] == "failed"
+
+
+def test_undo_replace_same_filename(config, setup, tmp_path, monkeypatch):
+    rip, eid, services, fake, movie, old = start(config, setup, tmp_path, monkeypatch, name="The Lego Movie.mkv")
+    ask_off(setup)
+    run(services, rip)
+    row = row_of(setup, rip)
+    assert row["state"] == "imported" and row["new_path"] == row["old_path"] == str(old)
+    output = Path(encodes.get(setup, eid)["output"])
+    assert asyncio.run(filmundo.undo(services, rip)) == "Undone."
+    assert output.read_bytes() == b"e" * 200
+    assert old.read_bytes() == b"o" * 90 and not (fake.recycle / old.name).exists()
+
+
+def test_undo_retry_removes_empty_folder_of_added_movie(config, setup, tmp_path, monkeypatch):
+    probe(monkeypatch)
+    rip, _ = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    run(services, rip)
+    folder = Path(row_of(setup, rip)["new_path"]).parent
+    fake.fail_once.add("delete_movie")
+    assert asyncio.run(filmundo.undo(services, rip)).startswith("Undo stopped")
+    assert folder.is_dir() and row_of(setup, rip)["new_path"] is None
+    assert asyncio.run(filmundo.undo(services, rip)) == "Undone."
+    assert not folder.exists()
