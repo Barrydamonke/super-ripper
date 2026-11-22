@@ -57,6 +57,35 @@ class Jellyfin:
         except Exception as exc:  # not the JSON shape we expect: some other server, or another version
             raise JellyfinError(f"unexpected answer from Jellyfin ({type(exc).__name__})") from None
 
+    def movie_sources(self, tmdb_id: int, title: str) -> list[tuple[str, int]]:
+        """(path, size) of every media source of the movie with this TMDb ID.
+
+        Searches by title and compares ProviderIds, like has_album, because
+        provider-ID filtering is unreliable across Jellyfin versions.
+        """
+        query = urllib.parse.urlencode(
+            {
+                "Recursive": "true",
+                "IncludeItemTypes": "Movie",
+                "Fields": "ProviderIds,MediaSources,Path",
+                "searchTerm": title,
+            }
+        )
+        body = self._call("GET", f"/Items?{query}")
+        try:
+            items = json.loads(body).get("Items") or []
+            sources: list[tuple[str, int]] = []
+            for item in items:
+                if (item.get("ProviderIds") or {}).get("Tmdb") != str(tmdb_id):
+                    continue
+                for source in item.get("MediaSources") or []:
+                    path, size = source.get("Path"), source.get("Size")
+                    if path is not None and size is not None:
+                        sources.append((path, int(size)))
+            return sources
+        except Exception as exc:  # not the JSON shape we expect: some other server, or another version
+            raise JellyfinError(f"unexpected answer from Jellyfin ({type(exc).__name__})") from None
+
     def refresh(self) -> None:
         self._call("POST", "/Library/Refresh")
 
