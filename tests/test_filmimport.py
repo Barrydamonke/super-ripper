@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from disc_ripper import encodepool, encodes, film_imports, filmimport, jobs, makemkv, video_rips
+from disc_ripper import encodepool, encodes, film_imports, filmimport, jobs, makemkv, presets, video_rips
 
 from .fake_radarr import LEGO, LION_1994, LION_2019, FakeRadarr
 from .test_encodepool import FakeSpace, Notifier, sync  # noqa: F401
@@ -20,7 +20,7 @@ def instant_polls(monkeypatch):
 
 
 def make_rip(conn, config, *, main=0, label="The Lego Movie", disc_label="THE_LEGO_MOVIE_D1", seconds=6000,
-             encode=True, preset="standard", extras=()):
+             encode=True, preset=1, extras=()):
     """A ripped disc: raw file, one done encode of the main title, and (title, name) extras."""
     rip = jobs.enqueue(conn, "serial:A", "rip_title", {}, uses_drive=True, now="t")
     titles = [dataclasses.asdict(makemkv.Title(number=n, seconds=seconds if n == 0 else 300, size=1000, chapters=1,
@@ -46,12 +46,13 @@ def make_rip(conn, config, *, main=0, label="The Lego Movie", disc_label="THE_LE
     return rip, eid
 
 
-def add_encode(conn, rip, title, folder, name, raw, seconds, role, preset="standard", disc_type="dvd"):
+def add_encode(conn, rip, title, folder, name, raw, seconds, role, preset=1, disc_type="dvd"):
     folder.mkdir(parents=True, exist_ok=True)
     out = folder / name
     out.write_bytes(b"e" * 200)
     eid = encodes.create(conn, rip_id=rip, title=title, role=role, source=raw, disc_type=disc_type,
-                         source_seconds=seconds, source_bytes=100, source_audio=2, preset=preset, now=NOW)
+                         source_seconds=seconds, source_bytes=100, source_audio=2, preset_id=preset,
+                         preset_name=presets.SEEDS[preset][0], now=NOW)
     encodes.start(conn, eid, NOW)
     encodes.finish(conn, eid, "done", NOW, output=str(out), output_bytes=200)
     return eid
@@ -392,3 +393,15 @@ def test_retry_waits_while_other_rip_imports_same_film(config, setup, tmp_path):
     row = row_of(setup, second)
     assert row["state"] == "waiting_other" and row["message"] == message
     assert "add_movie" not in fake.calls and fake.movies == {}
+
+
+def test_radarr_quality_follows_the_encodes_preset(config, setup, tmp_path):
+    rip, eid = make_rip(setup, config, preset=3)  # Copy only
+    setup.execute("UPDATE encodes SET disc_type = 'bluray' WHERE id = ?", (eid,))
+    setup.commit()
+    services, fake = services_with(config, tmp_path)
+    asyncio.run(filmimport.run_import(services, rip))
+    assert row_of(setup, rip)["state"] == "imported"
+    [entry] = next(iter(fake.commands.values()))["files"]
+    assert entry["quality"]["quality"]["name"] == "Remux-1080p"
+    assert "(Copy only)" in import_log(config, rip)

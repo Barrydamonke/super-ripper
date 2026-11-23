@@ -1,9 +1,10 @@
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from disc_ripper import db, encodes
+from disc_ripper import db, encodes, presets
 
 
 @pytest.fixture
@@ -14,10 +15,19 @@ def conn(config):
     c.close()
 
 
-def _create(conn, rip_id=1, title=1, preset="standard", disc_type="bluray", now="2026-01-01T00:00:00+00:00"):
-    return encodes.create(
+def fingerprint_of(preset_id):
+    return presets.fingerprint(presets.PresetSettings.from_dict(presets.SEEDS[preset_id][1]))
+
+
+def _create(conn, rip_id=1, title=1, preset=1, disc_type="bluray", now="2026-01-01T00:00:00+00:00"):
+    eid = encodes.create(
         conn, rip_id=rip_id, title=title, role="main", source=Path("/d/1/film.mkv"), disc_type=disc_type,
-        source_seconds=6035.0, source_bytes=30_000_000_000, source_audio=2, preset=preset, now=now)
+        source_seconds=6035.0, source_bytes=30_000_000_000, source_audio=2, preset_id=preset,
+        preset_name=presets.SEEDS[preset][0], now=now)
+    if eid is not None:  # as if it had started once: history is by the settings' fingerprint
+        conn.execute("UPDATE encodes SET preset_fingerprint = ? WHERE id = ?", (fingerprint_of(preset), eid))
+        conn.commit()
+    return eid
 
 
 def test_create_refuses_second_active_for_same_file(conn):
@@ -32,7 +42,7 @@ def test_create_refuses_second_active_for_same_file(conn):
 
 
 def test_retry_copies_source_fields(conn):
-    first = _create(conn, preset="fast")
+    first = _create(conn, preset=2)
     assert encodes.retry(conn, first, "t") is None  # still queued
     encodes.start(conn, first, "t")
     encodes.finish(conn, first, "failed", "t", error="boom")
@@ -40,7 +50,7 @@ def test_retry_copies_source_fields(conn):
     assert new is not None and new != first
     a, b = encodes.get(conn, first), encodes.get(conn, new)
     for k in ("rip_id", "title", "role", "source", "disc_type", "source_seconds", "source_bytes",
-              "source_audio", "preset"):
+              "source_audio", "preset_id", "preset_name"):
         assert a[k] == b[k]
     assert b["state"] == "queued" and b["created_at"] == "t2"
     assert encodes.retry(conn, first, "t3") is None  # refused while the retry is active
@@ -58,14 +68,14 @@ def test_requeue_interrupted(conn):
     assert encodes.next_queued(conn)["id"] == a
 
 
-def test_recent_speeds_last_five_by_preset_and_type(conn):
+def test_history_speeds_last_five_by_preset_and_type(conn):
     ids = []
     for i in range(7):
         eid = _create(conn, rip_id=10 + i)
         encodes.start(conn, eid, "t")
         encodes.finish(conn, eid, "done", "t", speed=float(i + 1))
         ids.append(eid)
-    other = _create(conn, rip_id=50, preset="fast")
+    other = _create(conn, rip_id=50, preset=2)
     encodes.start(conn, other, "t")
     encodes.finish(conn, other, "done", "t", speed=99.0)
     dvd = _create(conn, rip_id=51, disc_type="dvd")
@@ -74,9 +84,9 @@ def test_recent_speeds_last_five_by_preset_and_type(conn):
     failed = _create(conn, rip_id=52)
     encodes.start(conn, failed, "t")
     encodes.finish(conn, failed, "failed", "t", speed=97.0)
-    assert sorted(encodes.recent_speeds(conn, "standard", "bluray")) == [3.0, 4.0, 5.0, 6.0, 7.0]
-    assert encodes.recent_speeds(conn, "fast", "bluray") == [99.0]
-    assert encodes.recent_speeds(conn, "copy", "bluray") == []
+    assert sorted(encodes.history(conn, fingerprint_of(1), "bluray")[0]) == [3.0, 4.0, 5.0, 6.0, 7.0]
+    assert encodes.history(conn, fingerprint_of(2), "bluray")[0] == [99.0]
+    assert encodes.history(conn, fingerprint_of(3), "bluray")[0] == []
 
 
 def test_cancel_queued_and_progress(conn):
@@ -123,10 +133,10 @@ def test_unique_index_is_a_backstop(conn):
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO encodes (rip_id, title, role, source, disc_type, source_seconds, source_bytes, "
-            "preset, state, created_at) VALUES (1, 1, 'main', 'x', 'bluray', 1, 1, 'fast', 'running', 't')")
+            "preset_id, state, created_at) VALUES (1, 1, 'main', 'x', 'bluray', 1, 1, 2, 'running', 't')")
 
 
-def _running(conn, progress, rip_id=1, preset="standard", started="2026-01-01T00:00:00+00:00"):
+def _running(conn, progress, rip_id=1, preset=1, started="2026-01-01T00:00:00+00:00"):
     eid = _create(conn, rip_id=rip_id, preset=preset)
     assert encodes.start(conn, eid, started)
     encodes.set_progress(conn, eid, progress, "x", None)
@@ -153,13 +163,47 @@ def test_interrupted_with_unreadable_times_records_no_speed(conn):
     assert encodes.get(conn, eid)["speed"] is None
 
 
-def test_recent_speeds_include_interrupted_and_requeued(conn):
+def test_history_speeds_include_interrupted_and_requeued(conn):
     done = _create(conn, rip_id=1)
     encodes.start(conn, done, "2026-01-01T00:00:00+00:00")
     encodes.finish(conn, done, "done", "2026-01-01T01:00:00+00:00", speed=7.0)
     eid = _running(conn, 0.2, rip_id=2, started="2026-01-02T00:00:00+00:00")
     encodes.mark_interrupted(conn, "2026-01-02T00:16:40+00:00")
-    assert sorted(encodes.recent_speeds(conn, "standard", "bluray")) == pytest.approx([6035.0 * 0.2 / 1000, 7.0])
+    assert sorted(encodes.history(conn, fingerprint_of(1), "bluray")[0]) == pytest.approx([6035.0 * 0.2 / 1000, 7.0])
     encodes.requeue_interrupted(conn, "t3")  # a restart puts it back in the queue; its speed still counts
     assert encodes.get(conn, eid)["state"] == "queued"
-    assert len(encodes.recent_speeds(conn, "standard", "bluray")) == 2
+    assert len(encodes.history(conn, fingerprint_of(1), "bluray")[0]) == 2
+
+
+def test_history_sizes_are_bytes_per_second_of_film_for_done_films_only(conn):
+    done = _create(conn, rip_id=1)
+    encodes.start(conn, done, "t")
+    encodes.finish(conn, done, "done", "t", output="/o", output_bytes=6_035_000_000, speed=2.0)
+    failed = _create(conn, rip_id=2)
+    encodes.start(conn, failed, "t")
+    encodes.finish(conn, failed, "failed", "t", output_bytes=5, speed=2.0)
+    sample = _create(conn, rip_id=3)
+    encodes.start(conn, sample, "t")
+    encodes.finish(conn, sample, "done", "t", output="/s", output_bytes=1000, speed=2.0)
+    conn.execute("UPDATE encodes SET kind = 'sample' WHERE id = ?", (sample,))
+    assert encodes.history(conn, fingerprint_of(1), "bluray")[1] == [pytest.approx(1_000_000.0)]
+
+
+def test_requeue_clears_the_snapshot_but_keeps_the_speed_history(conn):
+    a = _create(conn)
+    encodes.start(conn, a, "2026-01-01T00:00:00+00:00")
+    encodes.snapshot(conn, a, "Standard", "{}", fingerprint_of(1))
+    encodes.set_progress(conn, a, 0.5, "x", None)
+    encodes.mark_interrupted(conn, "2026-01-01T00:10:00+00:00")
+    encodes.requeue_interrupted(conn, "t3")
+    row = encodes.get(conn, a)
+    assert row["preset_settings"] is None and row["preset_fingerprint"] == fingerprint_of(1)
+    assert encodes.history(conn, fingerprint_of(1), "bluray")[0]
+
+
+def test_reserved_bytes_uses_the_running_encodes_snapshot(conn):
+    a = _create(conn)
+    encodes.start(conn, a, "t")
+    s = presets.PresetSettings.from_dict(presets.SEEDS[3][1])  # copy: the whole source
+    encodes.snapshot(conn, a, "Copy only", json.dumps(s.to_dict()), presets.fingerprint(s))
+    assert encodes.reserved_bytes(conn) == 30_000_000_000

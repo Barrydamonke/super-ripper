@@ -1,15 +1,16 @@
-"""Encode presets as data: the settings model, validation and the rules for greying out options.
-
-Pure: no I/O, no database.
-"""
+"""Encode presets as data: the settings model, validation and the rules for greying out options,
+then the presets table (the database functions at the end)."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import re
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
+
+from . import settings
 
 ENGINES = ("handbrake", "ffmpeg")
 MODES = ("software", "hardware", "copy")
@@ -267,3 +268,152 @@ SEEDS: dict[int, tuple[str, dict]] = {
 }
 
 STANDARD = PresetSettings.from_dict(SEEDS[1][1])
+
+
+# -- the presets table ------------------------------------------------------------------------------
+
+UNKNOWN = "Unknown preset."
+GONE = "That preset was deleted; choose another with Encode ▾."
+
+
+@dataclass(frozen=True)
+class Preset:
+    id: int
+    name: str
+    settings: PresetSettings
+    fingerprint: str
+
+
+def _preset(row) -> Preset:
+    s = PresetSettings.from_dict(json.loads(row["settings"]))
+    return Preset(row["id"], row["name"], s, row["fingerprint"] or fingerprint(s))
+
+
+def list_presets(conn: sqlite3.Connection) -> list[Preset]:
+    return [_preset(r) for r in conn.execute("SELECT * FROM presets ORDER BY id")]
+
+
+def get_preset(conn: sqlite3.Connection, preset_id: int) -> Preset | None:
+    row = conn.execute("SELECT * FROM presets WHERE id = ?", (preset_id,)).fetchone()
+    return _preset(row) if row else None
+
+
+def _taken(conn: sqlite3.Connection, name: str, own_id: int | None) -> bool:
+    row = conn.execute("SELECT id FROM presets WHERE lower(name) = lower(?)", (name,)).fetchone()
+    return row is not None and row["id"] != own_id
+
+
+_DUPLICATE = PresetError("name", "A preset with that name already exists.")
+
+
+def create_preset(conn: sqlite3.Connection, name: str, s: PresetSettings, now: str) -> int:
+    name = validate_name(name)
+    if _taken(conn, name, None):
+        raise _DUPLICATE
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO presets (name, settings, fingerprint, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (name, json.dumps(s.to_dict()), fingerprint(s), now, now))
+    except sqlite3.IntegrityError:  # the unique index: a concurrent create of the same name
+        raise _DUPLICATE from None
+    return cur.lastrowid
+
+
+def update_preset(conn: sqlite3.Connection, preset_id: int, name: str, s: PresetSettings, now: str) -> None:
+    name = validate_name(name)
+    if _taken(conn, name, preset_id):
+        raise _DUPLICATE
+    try:
+        with conn:
+            conn.execute("UPDATE presets SET name = ?, settings = ?, fingerprint = ?, updated_at = ? WHERE id = ?",
+                         (name, json.dumps(s.to_dict()), fingerprint(s), now, preset_id))
+            # A queued encode shows its preset's current name; running and finished ones keep their snapshot.
+            conn.execute("UPDATE encodes SET preset_name = ? WHERE preset_id = ? AND state = 'queued'",
+                         (name, preset_id))
+    except sqlite3.IntegrityError:
+        raise _DUPLICATE from None
+
+
+def uses(conn: sqlite3.Connection, preset_id: int) -> list[str]:
+    """Human phrases for what still uses this preset (empty: nothing does)."""
+    key = str(preset_id)
+    out = []
+    for state in ("queued", "running"):
+        if conn.execute("SELECT 1 FROM encodes WHERE preset_id = ? AND state = ?", (preset_id, state)).fetchone():
+            out.append(f"a {state} encode")
+    for r in conn.execute("SELECT label, model FROM drives WHERE encode_choice = ? ORDER BY id", (key,)):
+        out.append(f"the {r['label'] or r['model']} dropdown")
+    if conn.execute("SELECT 1 FROM video_rips WHERE encode_preset = ? AND state = 'ripping'", (key,)).fetchone():
+        out.append("a rip in progress")
+    if default_choice(conn) == key:
+        out.append("After ripping")
+    return out
+
+
+def _join(phrases: list[str]) -> str:
+    return phrases[0] if len(phrases) == 1 else ", ".join(phrases[:-1]) + " and " + phrases[-1]
+
+
+def delete_preset(conn: sqlite3.Connection, preset_id: int) -> str | None:
+    """The reason it can't be deleted, or None once it is."""
+    preset = get_preset(conn, preset_id)
+    if preset is None:
+        return UNKNOWN
+    if conn.execute("SELECT count(*) FROM presets").fetchone()[0] <= 1:
+        return "The last preset can't be deleted."
+    used = uses(conn, preset_id)
+    if used:
+        return f"{preset.name} is in use by {_join(used)}; choose another preset there first."
+    with conn:  # encodes.preset_id goes NULL on finished rows, which keep their name
+        conn.execute("DELETE FROM presets WHERE id = ?", (preset_id,))
+    return None
+
+
+_DEFAULT_KEY = "internal.encode_default"
+
+
+def default_choice(conn: sqlite3.Connection) -> str:
+    return str(settings.get_internal(conn, _DEFAULT_KEY, "1"))
+
+
+def parse_choice(conn: sqlite3.Connection, value: str, *, allow_off: bool = True) -> str | None:
+    """None when value is `off` (if allowed) or an existing preset id; else the error text."""
+    if value == "off" and allow_off:
+        return None
+    if re.fullmatch(r"[1-9][0-9]*", value or "") and get_preset(conn, int(value)) is not None:
+        return None
+    return UNKNOWN
+
+
+def set_default_choice(conn: sqlite3.Connection, choice: str) -> str | None:
+    error = parse_choice(conn, choice)
+    if error is None:
+        settings.set_internal(conn, _DEFAULT_KEY, choice)
+    return error
+
+
+def choices(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """(value, label) pairs for the dropdowns: every preset, then Off."""
+    return [(str(p.id), p.name) for p in list_presets(conn)] + [("off", "Off")]
+
+
+def for_encode(conn: sqlite3.Connection, row) -> tuple[str, PresetSettings, str] | None:
+    """(name, settings, fingerprint) for an encode row: its snapshot, else its live preset, else None."""
+    if row["preset_settings"]:
+        s = PresetSettings.from_dict(json.loads(row["preset_settings"]))
+        return row["preset_name"], s, row["preset_fingerprint"] or fingerprint(s)
+    live = get_preset(conn, row["preset_id"]) if row["preset_id"] is not None else None
+    return (live.name, live.settings, live.fingerprint) if live else None
+
+
+def fill_fingerprints(conn: sqlite3.Connection) -> None:
+    """Compute any fingerprint the migration left NULL (it can't run Python)."""
+    with conn:
+        for r in conn.execute("SELECT id, settings FROM presets WHERE fingerprint IS NULL").fetchall():
+            conn.execute("UPDATE presets SET fingerprint = ? WHERE id = ?",
+                         (fingerprint(PresetSettings.from_dict(json.loads(r["settings"]))), r["id"]))
+        for r in conn.execute("SELECT id, preset_settings FROM encodes "
+                              "WHERE preset_fingerprint IS NULL AND preset_settings IS NOT NULL").fetchall():
+            conn.execute("UPDATE encodes SET preset_fingerprint = ? WHERE id = ?",
+                         (fingerprint(PresetSettings.from_dict(json.loads(r["preset_settings"]))), r["id"]))

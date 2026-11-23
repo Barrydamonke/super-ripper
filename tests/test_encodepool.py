@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from disc_ripper import db, encodepool, encodes, runner, settings
+from disc_ripper import db, encodepool, encodes, presets, runner, settings
 from disc_ripper.schedule import GuardState
 
 
@@ -57,11 +57,11 @@ def conn(config):
     c.close()
 
 
-def add(conn, n=1, preset="standard", source_seconds=600.0, disc_type="bluray"):
+def add(conn, n=1, preset=1, source_seconds=600.0, disc_type="bluray"):
     return encodes.create(
         conn, rip_id=n, title=1, role="main", source=Path(f"/d/{n}/film.mkv"), disc_type=disc_type,
-        source_seconds=source_seconds, source_bytes=10_000_000_000, source_audio=2, preset=preset,
-        now="2026-01-01T00:00:00+00:00")
+        source_seconds=source_seconds, source_bytes=10_000_000_000, source_audio=2, preset_id=preset,
+        preset_name=presets.SEEDS[preset][0], now="2026-01-01T00:00:00+00:00")
 
 
 def pool_for(config, space=None, services=None, **kw):
@@ -184,7 +184,7 @@ async def test_space_wait(config, conn, monkeypatch):
     assert state(conn, eid) in ("queued", "done")
     await wait_until(lambda: state(conn, eid) == "done")  # rechecked, then fits
     assert len(space.calls) >= 3
-    assert space.calls[0][0] == 3_500_000_000  # estimate_size of 10 GB standard
+    assert space.calls[0][0] == 3_500_000_000  # the estimate of a 10 GB Standard encode
     await pool.stop()
 
 
@@ -366,7 +366,7 @@ def test_late_finish_does_not_overwrite(conn):
 
 
 def test_reserved_bytes(conn):
-    a, b = add(conn, 1), add(conn, 2, preset="copy")
+    a, b = add(conn, 1), add(conn, 2, preset=3)
     assert encodes.reserved_bytes(conn) == 0
     encodes.start(conn, a, "t")
     encodes.start(conn, b, "t")

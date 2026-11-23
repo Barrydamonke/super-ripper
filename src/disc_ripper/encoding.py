@@ -15,13 +15,11 @@ from .presets import PresetSettings, language_name
 from .schedule import GuardState
 from .videofiles import Stream
 
-PRESETS = ("standard", "fast", "copy")
-PRESET_LABEL = {"standard": "Standard", "fast": "Fast", "copy": "Copy"}
 RENDER_NODE = "/dev/dri/renderD128"
 
 
-def output_name(raw: Path, preset: str) -> str:
-    return f"{raw.stem} - {PRESET_LABEL[preset]}.mkv"
+def output_name(raw: Path, preset_name: str) -> str:
+    return f"{raw.stem} - {preset_name}.mkv"
 
 
 def audio_plan(channels: int) -> tuple[int, int]:
@@ -110,58 +108,6 @@ def ffmpeg_prefix() -> list[str]:
 
 def priority_prefix() -> list[str]:
     return ["nice", "-n", "19", "ionice", "-c", "3"] if os.name == "posix" else []
-
-
-def _standard(src: str, out: str, disc_type: str, audio_channels: int | None) -> list[str]:
-    dvd = disc_type == "dvd"
-    argv = [*handbrake_prefix(), "-i", src, "-o", out, "--format", "av_mkv", "--markers",
-            "--encoder", "x265_10bit", "--encoder-preset", "slow",
-            "--quality", "18" if dvd else "20", "--crop-mode", "none", "--auto-anamorphic"]
-    if dvd:
-        argv += ["--comb-detect", "--decomb", "--detelecine"]
-    if audio_channels is None:
-        argv += ["--audio", "none"]
-    else:
-        channels, kbps = audio_plan(audio_channels)
-        mixdown = {6: "5point1", 2: "stereo", 1: "mono"}[channels]
-        argv += ["--audio", "1", "--aencoder", "eac3", "--ab", str(kbps), "--mixdown", mixdown]
-    # Not --subtitle-default=none: in HandBrake 1.9 it also drops "forced". clear_default_subtitles_argv
-    # runs afterwards instead.
-    return argv + ["--all-subtitles", "--subtitle-burned=none", "--json"]
-
-
-def _fast(src: str, out: str, audio_channels: int | None, interlaced: bool, quality: int,
-          sar: tuple[int, int]) -> list[str]:
-    argv = [*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-y", "-vaapi_device", RENDER_NODE, "-i", src,
-            "-map", "0:v:0"]
-    if audio_channels is not None:
-        argv += ["-map", "0:a:0?"]
-    argv += ["-map", "0:s?", "-map_chapters", "0",
-             "-vf", "format=nv12,hwupload" + (",deinterlace_vaapi" if interlaced else ""),
-             "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", str(quality)]
-    if audio_channels is None:
-        argv += ["-an"]
-    else:
-        channels, kbps = audio_plan(audio_channels)
-        argv += ["-c:a", "eac3", "-b:a", f"{kbps}k", "-ac", str(channels)]
-    argv += ["-c:s", "copy", "-disposition:s", "-default"]  # keep "forced", drop "default"
-    if sar != (1, 1):  # hevc_vaapi can drop the aspect ratio (FFmpeg tickets #8376, #6276)
-        argv += ["-bsf:v", f"hevc_metadata=sample_aspect_ratio={sar[0]}/{sar[1]}"]
-    return argv + ["-progress", "pipe:1", "-nostats", out]
-
-
-def encode_argv(preset: str, source: Path, output: Path, *, disc_type: str, audio_channels: int | None,
-                interlaced: bool, fast_quality: int, sar: tuple[int, int] = (1, 1)) -> list[str]:
-    """The command for a preset, without the priority prefix."""
-    src, out = str(source), str(output)
-    if preset == "standard":
-        return _standard(src, out, disc_type, audio_channels)
-    if preset == "fast":
-        return _fast(src, out, audio_channels, interlaced, fast_quality, sar)
-    if preset == "copy":
-        return [*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-y", "-i", src, "-map", "0", "-c", "copy",
-                "-disposition:s", "-default", "-progress", "pipe:1", "-nostats", out]
-    raise ValueError(f"unknown preset {preset!r}")
 
 
 _HB_AUDIO = {"eac3": "eac3", "ac3": "ac3", "aac": "av_aac", "opus": "opus", "copy": "copy"}
@@ -442,26 +388,6 @@ def parse_idet(text: str) -> bool:
         return False
     tff, bff, progressive = (int(n) for n in found[-1])
     return tff + bff > progressive
-
-
-# Seconds of film encoded per second: (DVD, Blu-ray).
-DEFAULT_SPEED = {"standard": (1.0, 0.4), "fast": (6.0, 2.0), "copy": (30.0, 15.0)}
-SIZE_FACTOR = {"standard": 0.35, "fast": 0.5, "copy": 1.0}
-
-
-def estimate_seconds(source_seconds: float, preset: str, disc_type: str,
-                     recent: list[float]) -> tuple[float, bool]:
-    """(seconds, rough): from the mean recent speed when there is history, else the default table."""
-    if recent:
-        speed = sum(recent) / len(recent)
-    else:
-        dvd_speed, bluray_speed = DEFAULT_SPEED[preset]
-        speed = dvd_speed if disc_type == "dvd" else bluray_speed
-    return source_seconds / speed, not recent
-
-
-def estimate_size(source_bytes: int, preset: str) -> int:
-    return int(source_bytes * SIZE_FACTOR[preset])
 
 
 # Defaults used until there is history. Speed is seconds of film per second.

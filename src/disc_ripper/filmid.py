@@ -97,12 +97,6 @@ def parse_ref(text: str) -> tuple[str, str] | None:
     return None
 
 
-def quality_name(disc_type: str, preset: str) -> str:
-    if disc_type == "dvd":
-        return "DVD"
-    return "Remux-1080p" if preset == "copy" else "Bluray-1080p"
-
-
 def quality_for(disc_type: str, s: PresetSettings) -> str:
     """The Radarr quality name for what this preset produces."""
     if disc_type == "dvd":

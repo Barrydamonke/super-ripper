@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
-from .. import busy, cd_rips, db, drives, joblog, jobs, makemkv, schedule_source, settings, video_rips
+from .. import busy, cd_rips, db, drives, joblog, jobs, makemkv, presets, schedule_source, settings, video_rips
 from .. import titles as titles_mod
 from ..cdtoc import musicbrainz_disc_id
 from ..clock import utc_now
@@ -52,7 +52,7 @@ def _gb(size: int) -> str:
 def _video_context(conn: sqlite3.Connection, drive_row: sqlite3.Row, grouped, config) -> dict:
     """Template context for a DVD/Blu-ray card: the scanned disc, any blocking rip, the current rip."""
     ctx = {"video": None, "video_blocking": None, "video_rip": None, "video_done": {}, "video_notes": {},
-           "video_moves": [], "encode_choice": None}
+           "video_moves": [], "encode_choice": None, "encode_choices": []}
     # Rips from this drive whose move to downloads failed: shown whether or not a disc is in,
     # since the disc ejects once the rip itself is done.
     for rip in conn.execute(
@@ -64,7 +64,8 @@ def _video_context(conn: sqlite3.Connection, drive_row: sqlite3.Row, grouped, co
     disc_fp = None
     if drive_row["media_state"] == "disc" and drive_row["disc_type"] in ("dvd", "bluray"):
         # How this disc will be encoded: its rip's choice, else the drive's pending choice, else the setting.
-        ctx["encode_choice"] = drive_row["encode_choice"] or settings.get(conn, "encode_after_rip")
+        ctx["encode_choice"] = drive_row["encode_choice"] or presets.default_choice(conn)
+        ctx["encode_choices"] = presets.choices(conn)
         row = video_rips.disc_in_drive(conn, drive_row["id"])
         if row is not None:
             disc_fp = row["fingerprint"]

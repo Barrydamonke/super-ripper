@@ -10,7 +10,7 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
-from . import db, encodes, film_imports, filmid, joblog, settings, videofiles
+from . import db, encodes, film_imports, filmid, joblog, presets, settings, videofiles
 from .clock import utc_now
 from .jellyfin import JellyfinError
 from .radarr import RadarrError, parse_resolution, parse_runtime, to_candidate
@@ -160,7 +160,7 @@ class Flow:
 
     async def _step_encode(self) -> None:
         chosen = self.pick_encode()
-        self.log.write(f"importing encode #{chosen['id']} ({chosen['preset']}): {chosen['output']}")
+        self.log.write(f"importing encode #{chosen['id']} ({chosen['preset_name']}): {chosen['output']}")
         self.set(encode_id=chosen["id"])
 
     async def _step_import(self) -> None:
@@ -181,7 +181,10 @@ class Flow:
         if seen is None:
             raise RadarrError("Radarr can't see the encoded file in its folder.")
         definitions = await self.call("quality_definitions")
-        wanted = filmid.quality_name(enc["disc_type"], enc["preset"])
+        found = presets.for_encode(self.conn, enc)
+        if found is None:
+            raise RadarrError("The encode's preset is unknown, so its Radarr quality can't be chosen.")
+        wanted = filmid.quality_for(enc["disc_type"], found[1])
         definition = next((d for d in definitions if (d.get("quality") or {}).get("name") == wanted
                            or d.get("title") == wanted), None)
         if definition is None:

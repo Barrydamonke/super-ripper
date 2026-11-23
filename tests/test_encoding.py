@@ -18,22 +18,10 @@ def _no_env(monkeypatch):
     monkeypatch.delenv("FFMPEG_BIN", raising=False)
 
 
-def std(**kw):
-    args = dict(disc_type="bluray", audio_channels=6, interlaced=False, fast_quality=24)
-    args.update(kw)
-    return encoding.encode_argv("standard", SRC, OUT, **args)
-
-
-def fast(**kw):
-    args = dict(disc_type="bluray", audio_channels=6, interlaced=False, fast_quality=24)
-    args.update(kw)
-    return encoding.encode_argv("fast", SRC, OUT, **args)
-
-
 def test_output_name():
-    assert encoding.output_name(Path("/w/The Lego Movie_t01.mkv"), "standard") == "The Lego Movie_t01 - Standard.mkv"
-    assert encoding.PRESETS == ("standard", "fast", "copy")
-    assert encoding.PRESET_LABEL["fast"] == "Fast"
+    assert encoding.output_name(Path("/w/The Lego Movie_t01.mkv"), "Standard") == "The Lego Movie_t01 - Standard.mkv"
+    assert encoding.output_name(Path("/w/Film.mkv"), "Anime (jpn)") == "Film - Anime (jpn).mkv"
+    assert not hasattr(encoding, "PRESETS") and not hasattr(encoding, "encode_argv")
 
 
 def test_audio_plan():
@@ -46,14 +34,6 @@ def test_audio_plan():
     assert encoding.audio_plan(3) == (6, 640)
 
 
-@pytest.mark.parametrize("channels,ab,mix,ffac", [(0, "224", "stereo", "2"), (4, "640", "5point1", "6")])
-def test_odd_channel_counts_agree_between_presets(channels, ab, mix, ffac):
-    s = std(audio_channels=channels)
-    assert s[s.index("--ab"):s.index("--ab") + 4] == ["--ab", ab, "--mixdown", mix]
-    f = fast(audio_channels=channels)
-    assert f[f.index("-b:a"):f.index("-b:a") + 4] == ["-b:a", ab + "k", "-ac", ffac]
-
-
 def test_env_overrides(monkeypatch):
     assert encoding.handbrake_prefix() == ["HandBrakeCLI"]
     assert encoding.ffmpeg_prefix() == ["ffmpeg"]
@@ -61,83 +41,6 @@ def test_env_overrides(monkeypatch):
     monkeypatch.setenv("FFMPEG_BIN", json.dumps(["python", "fake.py"]))
     assert encoding.handbrake_prefix() == ["/x/hb"]
     assert encoding.ffmpeg_prefix() == ["python", "fake.py"]
-
-
-BLURAY_TAIL = ["--format", "av_mkv", "--markers", "--encoder", "x265_10bit", "--encoder-preset", "slow"]
-
-
-def test_standard_bluray_argv_exact():
-    assert std() == [
-        "HandBrakeCLI", "-i", S, "-o", O, "--format", "av_mkv", "--markers", "--encoder", "x265_10bit",
-        "--encoder-preset", "slow", "--quality", "20", "--crop-mode", "none", "--auto-anamorphic",
-        "--audio", "1", "--aencoder", "eac3", "--ab", "640", "--mixdown", "5point1",
-        "--all-subtitles", "--subtitle-burned=none", "--json"]
-
-
-def test_standard_dvd_argv_exact():
-    argv = std(disc_type="dvd")
-    assert argv == [
-        "HandBrakeCLI", "-i", S, "-o", O, "--format", "av_mkv", "--markers", "--encoder", "x265_10bit",
-        "--encoder-preset", "slow", "--quality", "18", "--crop-mode", "none", "--auto-anamorphic",
-        "--comb-detect", "--decomb", "--detelecine",
-        "--audio", "1", "--aencoder", "eac3", "--ab", "640", "--mixdown", "5point1",
-        "--all-subtitles", "--subtitle-burned=none", "--json"]
-
-
-def test_standard_stereo_and_mono():
-    stereo = std(audio_channels=2)
-    assert stereo[stereo.index("--ab"):stereo.index("--ab") + 4] == ["--ab", "224", "--mixdown", "stereo"]
-    mono = std(audio_channels=1)
-    assert mono[mono.index("--mixdown") + 1] == "mono"
-
-
-def test_standard_no_audio():
-    argv = std(audio_channels=None)
-    assert "--audio" in argv and argv[argv.index("--audio") + 1] == "none"
-    for flag in ("--aencoder", "--ab", "--mixdown"):
-        assert flag not in argv
-    assert argv[argv.index("--audio"):argv.index("--audio") + 3] == ["--audio", "none", "--all-subtitles"]
-
-
-FAST_HEAD = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-vaapi_device", "/dev/dri/renderD128", "-i", S]
-
-
-def test_fast_argv_exact():
-    assert fast() == FAST_HEAD + [
-        "-map", "0:v:0", "-map", "0:a:0?", "-map", "0:s?", "-map_chapters", "0",
-        "-vf", "format=nv12,hwupload", "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", "24",
-        "-c:a", "eac3", "-b:a", "640k", "-ac", "6", "-c:s", "copy", "-disposition:s", "-default",
-        "-progress", "pipe:1", "-nostats", O]
-
-
-def test_fast_interlaced_and_stereo():
-    argv = fast(interlaced=True, audio_channels=2, fast_quality=28)
-    assert argv[argv.index("-vf") + 1] == "format=nv12,hwupload,deinterlace_vaapi"
-    assert argv[argv.index("-qp") + 1] == "28"
-    assert argv[argv.index("-b:a"):argv.index("-b:a") + 4] == ["-b:a", "224k", "-ac", "2"]
-
-
-def test_fast_no_audio():
-    argv = fast(audio_channels=None)
-    assert "0:a:0?" not in argv
-    for flag in ("-c:a", "-b:a", "-ac"):
-        assert flag not in argv
-    assert "-an" in argv
-
-
-def test_fast_anamorphic_sets_sar():
-    argv = fast(sar=(64, 45))
-    i = argv.index("-bsf:v")
-    assert argv[i + 1] == "hevc_metadata=sample_aspect_ratio=64/45"
-    assert argv[i + 2] == "-progress"
-    assert "-bsf:v" not in fast(sar=(1, 1))
-
-
-def test_copy_argv_exact():
-    assert encoding.encode_argv("copy", SRC, OUT, disc_type="dvd", audio_channels=2, interlaced=False,
-                                fast_quality=24) == [
-        "ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", S, "-map", "0", "-c", "copy", "-disposition:s", "-default",
-        "-progress", "pipe:1", "-nostats", O]
 
 
 def test_idet_argv():
@@ -228,19 +131,6 @@ def test_parse_idet():
     assert encoding.parse_idet("junk\n" + IDET_I + "\n") is True
     assert encoding.parse_idet(IDET_I + "\n" + IDET_P) is False
     assert encoding.parse_idet("nothing here") is False
-
-
-def test_estimate_defaults_and_history():
-    assert encoding.estimate_seconds(6035, "standard", "bluray", []) == (15087.5, True)
-    assert encoding.estimate_seconds(6035, "standard", "bluray", [0.5, 0.5]) == (12070.0, False)
-    assert encoding.estimate_seconds(600, "fast", "dvd", [])[0] == 100.0
-    assert encoding.estimate_seconds(600, "copy", "dvd", [])[0] == 20.0
-
-
-def test_estimate_size():
-    assert encoding.estimate_size(1000, "standard") == 350
-    assert encoding.estimate_size(1000, "fast") == 500
-    assert encoding.estimate_size(1000, "copy") == 1000
 
 
 def test_guard_decision():

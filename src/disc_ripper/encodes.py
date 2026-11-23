@@ -6,11 +6,11 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from . import encoding
+from . import encoding, presets
 
 _ACTIVE = "('queued', 'running')"
 _SOURCE_FIELDS = ("rip_id", "title", "role", "source", "disc_type", "source_seconds", "source_bytes",
-                  "source_audio", "preset")
+                  "source_audio", "preset_id", "preset_name")
 
 
 def _insert_unless_active(conn: sqlite3.Connection, fields: dict, now: str, check=None) -> int | None:
@@ -28,9 +28,9 @@ def _insert_unless_active(conn: sqlite3.Connection, fields: dict, now: str, chec
         cur = conn.execute(
             """
             INSERT INTO encodes (rip_id, title, role, source, disc_type, source_seconds, source_bytes,
-                                 source_audio, preset, state, created_at)
+                                 source_audio, preset_id, preset_name, state, created_at)
             VALUES (:rip_id, :title, :role, :source, :disc_type, :source_seconds, :source_bytes,
-                    :source_audio, :preset, 'queued', :now)
+                    :source_audio, :preset_id, :preset_name, 'queued', :now)
             """,
             {**fields, "now": now})
         conn.commit()
@@ -44,18 +44,25 @@ def _insert_unless_active(conn: sqlite3.Connection, fields: dict, now: str, chec
 
 
 def create(conn: sqlite3.Connection, *, rip_id: int, title: int, role: str, source: Path, disc_type: str,
-           source_seconds: float, source_bytes: int, source_audio: int, preset: str, now: str,
+           source_seconds: float, source_bytes: int, source_audio: int, preset_id: int, preset_name: str, now: str,
            check=None) -> int | None:
     """Queue an encode; None when that (rip_id, title) already has one queued or running,
     or when check(conn) (run inside the same transaction) is false."""
     return _insert_unless_active(conn, {
         "rip_id": rip_id, "title": title, "role": role, "source": str(source), "disc_type": disc_type,
         "source_seconds": source_seconds, "source_bytes": source_bytes, "source_audio": source_audio,
-        "preset": preset}, now, check)
+        "preset_id": preset_id, "preset_name": preset_name}, now, check)
 
 
 def get(conn: sqlite3.Connection, encode_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM encodes WHERE id = ?", (encode_id,)).fetchone()
+
+
+def snapshot(conn: sqlite3.Connection, encode_id: int, name: str, settings_json: str, fingerprint: str) -> None:
+    """Record the preset an encode actually ran with; from here on edits to the preset don't touch it."""
+    with conn:
+        conn.execute("UPDATE encodes SET preset_name = ?, preset_settings = ?, preset_fingerprint = ? WHERE id = ?",
+                     (name, settings_json, fingerprint, encode_id))
 
 
 def next_queued(conn: sqlite3.Connection) -> sqlite3.Row | None:
@@ -87,12 +94,13 @@ def wait(conn: sqlite3.Connection, encode_id: int, message: str) -> None:
 
 
 def finish(conn: sqlite3.Connection, encode_id: int, state: str, now: str, *, error: str | None = None,
-           output: str | None = None, output_bytes: int | None = None, speed: float | None = None) -> None:
+           output: str | None = None, output_bytes: int | None = None, speed: float | None = None, message: str | None = None) -> None:
     with conn:
         conn.execute(
-            "UPDATE encodes SET state = ?, finished_at = ?, error = ?, output = ?, output_bytes = ?, speed = ? "
+            "UPDATE encodes SET state = ?, finished_at = ?, error = ?, output = ?, output_bytes = ?, speed = ?, "
+            "message = COALESCE(?, message) "
             "WHERE id = ? AND state = 'running'",  # a late finish must not overwrite a row that already ended
-            (state, now, error, output, output_bytes, speed, encode_id))
+            (state, now, error, output, output_bytes, speed, message, encode_id))
 
 
 def cancel_queued(conn: sqlite3.Connection, encode_id: int, now: str) -> str:
@@ -117,7 +125,10 @@ def retry(conn: sqlite3.Connection, encode_id: int, now: str) -> int | None:
     row = get(conn, encode_id)
     if row is None or row["state"] not in ("failed", "cancelled", "interrupted"):
         return None
-    return _insert_unless_active(conn, {k: row[k] for k in _SOURCE_FIELDS}, now)
+    live = presets.get_preset(conn, row["preset_id"]) if row["preset_id"] is not None else None
+    if live is None:  # the preset was deleted since: the caller says so
+        return None
+    return _insert_unless_active(conn, {**{k: row[k] for k in _SOURCE_FIELDS}, "preset_name": live.name}, now)
 
 
 MIN_SPEED_PROGRESS = 0.05  # an interrupted encode this far along has told us how fast the machine is
@@ -164,7 +175,8 @@ def requeue_interrupted(conn: sqlite3.Connection, now: str) -> int:
                 continue
             conn.execute(
                 "UPDATE encodes SET state = 'queued', progress = 0, message = '', error = NULL, "
-                "estimated_finish = NULL, started_at = NULL, finished_at = NULL WHERE id = ?", (row["id"],))
+                "estimated_finish = NULL, started_at = NULL, finished_at = NULL, preset_settings = NULL WHERE id = ?",
+                (row["id"],))  # a queued encode follows its preset's current settings again
             n += 1
         conn.commit()
     except BaseException:
@@ -185,19 +197,36 @@ def for_rip(conn: sqlite3.Connection, rip_id: int) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM encodes WHERE rip_id = ? ORDER BY id", (rip_id,)).fetchall()
 
 
-def recent_speeds(conn: sqlite3.Connection, preset: str, disc_type: str, n: int = 5) -> list[float]:
-    """Speeds (seconds of film per second) of the last n encodes of this preset and disc type that
-    finished, or were interrupted far enough along to measure (still counting once requeued)."""
-    rows = conn.execute(
+def history(conn: sqlite3.Connection, fingerprint: str, disc_type: str, n: int = 5) -> tuple[list[float], list[float]]:
+    """(speeds, sizes) of the last n encodes with these settings and disc type.
+
+    Speeds are seconds of film per second, from encodes that finished or were interrupted far enough
+    along to measure (still counting once requeued). Sizes are output bytes per second of film, from
+    finished film encodes. Non-positive values are left out: a zero speed would divide by zero."""
+    speeds = conn.execute(
         "SELECT speed FROM encodes WHERE state IN ('done', 'interrupted', 'queued', 'running') "
-        "AND speed IS NOT NULL AND preset = ? AND disc_type = ? "
-        "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC LIMIT ?", (preset, disc_type, n)).fetchall()
-    return [r[0] for r in rows]
+        "AND speed > 0 AND preset_fingerprint = ? AND disc_type = ? "
+        "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC LIMIT ?", (fingerprint, disc_type, n)).fetchall()
+    sizes = conn.execute(
+        "SELECT output_bytes * 1.0 / source_seconds FROM encodes WHERE state = 'done' AND kind = 'film' "
+        "AND output_bytes > 0 AND source_seconds > 0 AND preset_fingerprint = ? AND disc_type = ? "
+        "ORDER BY COALESCE(finished_at, created_at) DESC, id DESC LIMIT ?", (fingerprint, disc_type, n)).fetchall()
+    return [r[0] for r in speeds], [r[0] for r in sizes]
+
+
+def estimate_for(conn: sqlite3.Connection, row) -> encoding.Estimate | None:
+    """Time and size for an encode row from its preset (snapshot or live); None if the preset is gone."""
+    found = presets.for_encode(conn, row)
+    if found is None:
+        return None
+    _name, s, fingerprint = found
+    speeds, sizes = history(conn, fingerprint, row["disc_type"])
+    return encoding.estimate(s, row["disc_type"], row["source_seconds"], row["source_bytes"], speeds, sizes)
 
 
 def reserved_bytes(conn: sqlite3.Connection) -> int:
     """Disk the running encodes are expected to still write (estimated output sizes)."""
-    return sum(encoding.estimate_size(r["source_bytes"], r["preset"]) for r in running(conn))
+    return sum(e.bytes for e in (estimate_for(conn, r) for r in running(conn)) if e is not None)
 
 
 def same_file(a: Path, b: Path) -> bool:

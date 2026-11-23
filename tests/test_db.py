@@ -49,9 +49,9 @@ def _tables(conn):
 def test_migrate_fresh_db(config):
     conn = db.connect(config.db_path)
     try:
-        assert db.migrate(conn) == 7
+        assert db.migrate(conn) == 8
         assert {"settings", "drives"} <= _tables(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
     finally:
         conn.close()
 
@@ -62,7 +62,7 @@ def test_migrate_is_idempotent(config):
         db.migrate(conn)
         conn.execute("INSERT INTO settings (key, value) VALUES ('k', '1')")
         conn.commit()
-        assert db.migrate(conn) == 7
+        assert db.migrate(conn) == 8
         assert conn.execute("SELECT value FROM settings WHERE key='k'").fetchone()[0] == "1"
     finally:
         conn.close()
@@ -91,7 +91,7 @@ def test_migration_0002_from_step1_db(config):
         )
         conn.commit()
 
-        assert db.migrate(conn) == 7
+        assert db.migrate(conn) == 8
         row = conn.execute("SELECT * FROM drives").fetchone()
         assert row["media_state"] == "unknown"
         assert row["disc_type"] is None
@@ -128,7 +128,7 @@ def test_migration_0003_prefills_offsets(config):
                 (f"d{i}", model),
             )
         conn.commit()
-        assert db.migrate(conn) == 7
+        assert db.migrate(conn) == 8
         offsets = [r[0] for r in conn.execute("SELECT read_offset FROM drives ORDER BY id")]
         assert offsets == [667, 6, 0, 0]
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -162,13 +162,14 @@ def test_migration_0005(config):
         db.migrate(conn)
         assert "encodes" in _tables(conn)
         cols = {r[1]: r for r in conn.execute("PRAGMA table_info(encodes)")}
-        assert {"rip_id", "title", "preset", "state", "source_audio", "speed", "output_bytes"} <= set(cols)
+        assert {"rip_id", "title", "preset_id", "preset_name", "preset_settings", "preset_fingerprint", "kind", "state",
+                "source_audio", "speed", "output_bytes"} <= set(cols)
         assert cols["source_audio"][4] == "-1"
         indexes = {r[1] for r in conn.execute("PRAGMA index_list(encodes)")}
         assert len(indexes) >= 2
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 "INSERT INTO encodes (rip_id, title, role, source, disc_type, source_seconds, source_bytes, "
-                "preset, state, created_at) VALUES (1, 1, 'main', 'x', 'bluray', 1, 1, 'bogus', 'queued', 't')")
+                "preset_id, state, created_at) VALUES (1, 1, 'main', 'x', 'bluray', 1, 1, 1, 'bogus', 't')")
     finally:
         conn.close()
