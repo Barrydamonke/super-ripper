@@ -71,7 +71,8 @@ def test_old_rows_mapped(migrated):
         "SELECT preset_id, preset_name, preset_settings, preset_fingerprint, kind FROM encodes ORDER BY id").fetchall()
     assert [(r[0], r[1], r[4]) for r in enc] == [(1, "Standard", "film"), (2, "Fast", "film")]
     assert enc[0][3] == presets.fingerprint(presets.PresetSettings.from_dict(json.loads(enc[0][2])))
-    assert json.loads(enc[1][2])["quality_bluray"] == 21  # the snapshot carries the migrated Fast quality
+    assert enc[1][2] is None and enc[1][3] is None  # queued: no snapshot, it follows its preset until it starts
+    assert json.loads(migrated.execute("SELECT settings FROM presets WHERE id = 2").fetchone()[0])["quality_bluray"] == 21
     assert migrated.execute("SELECT encode_choice FROM drives").fetchone()[0] == "3"
     assert migrated.execute("SELECT encode_preset FROM video_rips").fetchone()[0] == "1"
     assert presets.default_choice(migrated) == "2"

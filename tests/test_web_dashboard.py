@@ -641,6 +641,7 @@ def test_encode_choice_on_the_video_card(dash):
     text = _page(client)
     assert 'hx-post="/dashboard/video/encode-choice"' in text
     assert '<option value="1" selected' in text  # the after-rip default
+    assert '<option value="off"' in text and ">Off</option>" in text  # the drive card keeps Off
     r = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "2"})
     assert r.status_code == 200 and '<option value="2" selected' in r.text
     assert conn.execute("SELECT encode_choice FROM drives WHERE id = 'serial:A'").fetchone()[0] == "2"

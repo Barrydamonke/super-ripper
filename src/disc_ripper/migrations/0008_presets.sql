@@ -21,6 +21,7 @@ UPDATE presets SET settings = json_set(settings,
     '$.quality_bluray', COALESCE((SELECT CAST(json_extract(value, '$') AS INTEGER) FROM settings WHERE key = 'fast_quality'), 24))
 WHERE id = 2;
 
+-- Queued encodes get no snapshot: like any queued encode they follow their preset until they start.
 -- encodes: preset TEXT becomes a reference plus a snapshot of what actually ran.
 CREATE TABLE encodes_new (
   id INTEGER PRIMARY KEY,
@@ -57,7 +58,7 @@ INSERT INTO encodes_new (id, rip_id, title, role, source, disc_type, source_seco
                          estimated_finish, output, output_bytes, speed, created_at, started_at, finished_at,
                          imported_path, imported_at)
 SELECT e.id, e.rip_id, e.title, e.role, e.source, e.disc_type, e.source_seconds, e.source_bytes, e.source_audio,
-       p.id, p.name, p.settings, e.state, e.progress, e.message, e.error,
+       p.id, p.name, CASE WHEN e.state = 'queued' THEN NULL ELSE p.settings END, e.state, e.progress, e.message, e.error,
        e.estimated_finish, e.output, e.output_bytes, e.speed, e.created_at, e.started_at, e.finished_at,
        e.imported_path, e.imported_at
 FROM encodes e

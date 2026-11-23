@@ -184,7 +184,7 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
                 rip["encode_preset"] or (default_choice if rip["state"] == "ripping" else ""), ""),
         })
     recent = [imports[r["rip_id"]] for r in film_imports.recent(conn)]
-    return {"active": _active_rows(conn), "rips": rips, "presets": presets.choices(conn),
+    return {"active": _active_rows(conn), "rips": rips, "presets": [c for c in presets.choices(conn) if c[0] != "off"],
             "recent": recent, "radarr_set_up": _radarr_set_up(conn), "no_radarr": filmimport.NO_RADARR,
             "error": error, "notice": notice, "oob": oob}
 

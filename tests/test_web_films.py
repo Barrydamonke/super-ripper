@@ -252,15 +252,15 @@ def test_old_rip_without_a_choice_shows_none(films):
     assert "Encode with:" not in client.get("/films").text
 
 
-def test_dropdowns_list_the_presets_and_off(films):
+def test_films_dropdowns_list_the_presets_without_off(films):
     client, conn, config = films
-    rip = make_rip(conn, config)
+    make_rip(conn, config)
     page = client.get("/films").text
-    for value, label in (("1", "Standard"), ("2", "Fast"), ("3", "Copy only"), ("off", "Off")):
+    for value, label in (("1", "Standard"), ("2", "Fast"), ("3", "Copy only")):
         assert f'<option value="{value}">{label}</option>' in page, label
+    assert 'value="off"' not in page
     new = presets.create_preset(conn, "Anime", presets.get_preset(conn, 1).settings, "t")
     assert f'<option value="{new}">Anime</option>' in client.get("/films").text
-    assert rip
 
 
 def test_retry_after_the_preset_was_deleted_is_refused_not_a_500(films):
@@ -269,6 +269,7 @@ def test_retry_after_the_preset_was_deleted_is_refused_not_a_500(films):
     pid = presets.create_preset(conn, "Temp", presets.get_preset(conn, 1).settings, "t")
     eid = queue(conn, rip, preset=1, state="failed", error="boom")
     conn.execute("UPDATE encodes SET preset_id = ? WHERE id = ?", (pid, eid))
+    conn.commit()
     assert presets.delete_preset(conn, pid) is None  # nothing queued uses it, so it can go
     r = client.post(f"/encodes/{eid}/retry")
     assert r.status_code == 409 and "That preset was deleted; choose another with Encode ▾." in r.text

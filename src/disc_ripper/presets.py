@@ -357,16 +357,25 @@ def _join(phrases: list[str]) -> str:
 
 def delete_preset(conn: sqlite3.Connection, preset_id: int) -> str | None:
     """The reason it can't be deleted, or None once it is."""
-    preset = get_preset(conn, preset_id)
-    if preset is None:
-        return UNKNOWN
-    if conn.execute("SELECT count(*) FROM presets").fetchone()[0] <= 1:
-        return "The last preset can't be deleted."
-    used = uses(conn, preset_id)
-    if used:
-        return f"{preset.name} is in use by {_join(used)}; choose another preset there first."
-    with conn:  # encodes.preset_id goes NULL on finished rows, which keep their name
-        conn.execute("DELETE FROM presets WHERE id = ?", (preset_id,))
+    conn.execute("BEGIN IMMEDIATE")  # the checks and the delete are one step: an encode can't be queued between
+    try:
+        preset = get_preset(conn, preset_id)
+        if preset is None:
+            conn.rollback()
+            return UNKNOWN
+        if conn.execute("SELECT count(*) FROM presets").fetchone()[0] <= 1:
+            conn.rollback()
+            return "The last preset can't be deleted."
+        used = uses(conn, preset_id)
+        if used:
+            conn.rollback()
+            return f"{preset.name} is in use by {_join(used)}; choose another preset there first."
+        conn.execute("DELETE FROM presets WHERE id = ?", (preset_id,))  # finished encodes keep their name
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     return None
 
 
