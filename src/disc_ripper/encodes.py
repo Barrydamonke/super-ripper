@@ -94,7 +94,8 @@ def wait(conn: sqlite3.Connection, encode_id: int, message: str) -> None:
 
 
 def finish(conn: sqlite3.Connection, encode_id: int, state: str, now: str, *, error: str | None = None,
-           output: str | None = None, output_bytes: int | None = None, speed: float | None = None, message: str | None = None) -> None:
+           output: str | None = None, output_bytes: int | None = None, speed: float | None = None,
+           message: str | None = None) -> None:
     with conn:
         conn.execute(
             "UPDATE encodes SET state = ?, finished_at = ?, error = ?, output = ?, output_bytes = ?, speed = ?, "
@@ -165,7 +166,8 @@ def requeue_interrupted(conn: sqlite3.Connection, now: str) -> int:
     n = 0
     conn.execute("BEGIN IMMEDIATE")
     try:
-        for row in conn.execute("SELECT id, rip_id, title FROM encodes WHERE state = 'interrupted' ORDER BY id").fetchall():
+        rows = conn.execute("SELECT id, rip_id, title FROM encodes WHERE state = 'interrupted' ORDER BY id").fetchall()
+        for row in rows:
             busy = conn.execute(
                 f"SELECT 1 FROM encodes WHERE rip_id = ? AND title = ? AND state IN {_ACTIVE}",  # noqa: S608
                 (row["rip_id"], row["title"])).fetchone()

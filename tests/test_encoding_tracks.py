@@ -87,3 +87,20 @@ def test_subtitles():
     ("keep", 2, (2, 224))])
 def test_audio_out(mode, ch, expected):
     assert audio_out(ch, settings(audio_codec="aac", audio_channels=mode)) == expected
+
+
+def test_language_aliases_match_either_way():
+    st = [A(0, "fre"), A(1, "eng")]
+    assert [t.index for t in pick_tracks(st, settings(audio_languages=("fra",))).audio] == [0]
+    assert [t.index for t in pick_tracks([A(0, "fra")], settings(audio_languages=("fre",))).audio] == [0]
+
+
+def test_all_preset_with_both_codes_maps_each_track_once():
+    st = [A(0, "fre"), A(1, "eng")]
+    picked = pick_tracks(st, settings(audio_tracks="all", audio_languages=("fre", "fra"))).audio
+    assert [t.index for t in picked] == [0]
+
+
+@pytest.mark.parametrize("ch,expected", [(3, 6), (4, 6), (5, 6), (6, 6), (7, 8), (8, 8)])
+def test_keep_maps_odd_channel_counts(ch, expected):
+    assert audio_out(ch, settings(audio_codec="aac", audio_channels="keep"))[0] == expected

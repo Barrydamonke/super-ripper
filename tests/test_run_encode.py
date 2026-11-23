@@ -367,3 +367,43 @@ def test_running_encode_keeps_snapshot_after_edit(config, conn, monkeypatch):
     snap = encodes.get(conn, row["id"])
     assert json.loads(snap["preset_settings"])["quality_bluray"] == 20
     assert presets.get_preset(conn, 1).settings.quality_bluray == 30
+
+
+def test_track_check_accepts_language_aliases(config, conn, monkeypatch):
+    monkeypatch.setenv("FAKE_RELABEL", json.dumps({"fre": "fra"}))
+    raw = make_raw(config, streams=[stream("audio", "fre"), stream("subtitle", "eng")])
+    go(config, conn, queue(conn, raw, preset=new_preset(conn, "French", audio_languages=["fra"])))
+
+
+def test_track_check_und_matches_anything(config, conn, monkeypatch):
+    monkeypatch.setenv("FAKE_RELABEL", json.dumps({"eng": "und"}))
+    go(config, conn, queue(conn, make_raw(config)))
+
+
+def test_track_check_audio_language_mismatch_fails(config, conn, monkeypatch):
+    monkeypatch.setenv("FAKE_RELABEL", json.dumps({"eng": "jpn"}))
+    with pytest.raises(RuntimeError, match="expected audio eng; got jpn"):
+        go(config, conn, queue(conn, make_raw(config)))
+
+
+def test_handbrake_subtitle_shortfall_is_noted_not_failed(config, conn, monkeypatch):
+    monkeypatch.setenv("FAKE_SUB_KEEP", "1")
+    raw = make_raw(config, streams=[stream("audio"), stream("subtitle", index=0), stream("subtitle", index=1)])
+    row = queue(conn, raw)
+    ctx = go(config, conn, row)
+    assert "HandBrake kept 1 of 2 subtitle tracks" in log_text(ctx)
+    done = encodes.get(conn, row["id"])
+    assert done["state"] == "done" and "HandBrake kept 1 of 2 subtitle tracks" in done["message"]
+
+
+def test_handbrake_audio_count_must_still_match(config, conn, monkeypatch):
+    monkeypatch.setenv("FAKE_ENCODE_MODE", "drop_audio")
+    with pytest.raises(RuntimeError, match="tracks don't match"):
+        go(config, conn, queue(conn, make_raw(config)))
+
+
+def test_ffmpeg_subtitle_shortfall_still_fails(config, conn, monkeypatch):
+    monkeypatch.setenv("FAKE_SUB_KEEP", "1")
+    raw = make_raw(config, streams=[stream("audio"), stream("subtitle", index=0), stream("subtitle", index=1)])
+    with pytest.raises(RuntimeError, match="expected 2 subtitle tracks; got 1"):
+        go(config, conn, queue(conn, raw, preset=2))

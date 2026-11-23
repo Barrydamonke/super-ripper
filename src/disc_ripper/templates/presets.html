@@ -22,7 +22,8 @@
   <div>
     <a href="/presets/{{ c.preset.id }}">Edit</a> ·
     <a href="/presets/new?from={{ c.preset.id }}">Copy</a>
-    <form method="post" action="/presets/{{ c.preset.id }}/delete" class="inline"><button type="submit">Delete</button></form>
+    <form method="post" action="/presets/{{ c.preset.id }}/delete" class="inline"
+          onsubmit='return confirm({{ ("Delete preset " ~ c.preset.name ~ "?")|tojson }})'><button type="submit">Delete</button></form>
     {# Test on a rip... goes here #}
   </div>
 </div>

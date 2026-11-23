@@ -37,10 +37,15 @@ async def _form(request: Request) -> dict[str, str]:
     return {k: v for k, v in (await request.form()).items() if isinstance(v, str)}
 
 
+def _id(value: str) -> bool:
+    """A usable preset id in a form: digits, short enough not to overflow SQLite."""
+    return value.isdigit() and value.isascii() and len(value) <= 10
+
+
 def _base(conn: sqlite3.Connection, form: dict[str, str]) -> tuple[PresetSettings, int | None]:
     """The settings that fields left out of the form keep: the preset being edited, else the one copied."""
     for key in ("id", "from"):
-        if form.get(key, "").isdigit():
+        if _id(form.get(key, "")):
             found = presets.get_preset(conn, int(form[key]))
             if found:
                 return found.settings, found.id if key == "id" else None
@@ -94,7 +99,7 @@ async def set_default(request: Request, conn: sqlite3.Connection = Depends(get_c
 @router.get("/presets/new")
 def new_preset(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     source = request.query_params.get("from", "")
-    found = presets.get_preset(conn, int(source)) if source.isdigit() else None
+    found = presets.get_preset(conn, int(source)) if _id(source) else None
     found = found or presets.get_preset(conn, 1)
     s, name = (found.settings, f"{found.name} copy") if found else (presets.STANDARD, "New preset")
     form = {"from": str(found.id)} if found else {}
@@ -116,6 +121,8 @@ def _parse(conn: sqlite3.Connection, form: dict[str, str]):
         name, s = presets.from_form(form, base)
     except PresetError as exc:
         values = {**_values(base, ""), **{k: v for k, v in form.items() if k not in ("id", "from")}}
+        if "audio_tracks" in form:  # an unticked box posts nothing, so it must stay unticked
+            values["keep_commentary"] = "1" if "keep_commentary" in form else ""
         return own, form.get("name", "").strip(), None, {exc.field: exc.message}, values
     return own, name, s, {}, _values(s, name)
 
@@ -124,7 +131,7 @@ def _parse(conn: sqlite3.Connection, form: dict[str, str]):
 async def save(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     form = await _form(request)
     own, name, s, errors, values = _parse(conn, form)
-    if form.get("id", "").isdigit() and own is None:
+    if _id(form.get("id", "")) and own is None:
         raise HTTPException(404, presets.UNKNOWN)
     if s is not None:
         try:

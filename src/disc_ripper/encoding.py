@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .presets import PresetSettings, language_name
+from .presets import PresetSettings, canonical_language, language_name
 from .schedule import GuardState
 from .videofiles import Stream
 
@@ -36,7 +36,7 @@ def audio_out(channels: int, s: PresetSettings) -> tuple[int, int]:
     if s.audio_channels == "stereo":
         out = 2 if channels < 1 else min(channels, 2)
     elif s.audio_channels == "keep":
-        out = channels or 2
+        out = {3: 6, 4: 6, 5: 6, 7: 8}.get(channels, channels or 2)
     else:  # max51
         out = 2 if channels < 1 else min(channels, 6) if channels <= 2 else 6
     return out, s.bitrate_surround if out >= 3 else s.bitrate_stereo
@@ -53,6 +53,10 @@ def _is_commentary(t: Stream) -> bool:
     return t.comment or "commentary" in t.title.lower()
 
 
+def _lang(t: Stream) -> str:
+    return canonical_language(t.language)
+
+
 def pick_tracks(streams: Sequence[Stream], s: PresetSettings) -> TrackPlan:
     """Which audio and subtitle tracks the preset keeps, in output order."""
     audio = [t for t in streams if t.kind == "audio"]
@@ -61,25 +65,25 @@ def pick_tracks(streams: Sequence[Stream], s: PresetSettings) -> TrackPlan:
     picked: list[Stream] = []
     if s.audio_tracks == "all":
         for lang in langs:
-            picked += [t for t in normal if t.language == lang]
-        picked += [t for t in normal if t.language == "und"]
+            picked += [t for t in normal if _lang(t) == lang]
+        picked += [t for t in normal if _lang(t) == "und"]
     else:
         for lang in langs:
-            first = next((t for t in normal if t.language == lang), None)
+            first = next((t for t in normal if _lang(t) == lang), None)
             if first:
                 picked.append(first)
         if not picked:
-            first = next((t for t in normal if t.language == "und"), None)
+            first = next((t for t in normal if _lang(t) == "und"), None)
             if first:
                 picked.append(first)
     if s.keep_commentary:
-        picked += [t for t in audio if _is_commentary(t) and (t.language in langs or t.language == "und")]
+        picked += [t for t in audio if _is_commentary(t) and (_lang(t) in langs or _lang(t) == "und")]
     notes: tuple[str, ...] = ()
     if audio and not picked:
         first_listed = language_name(langs[0]) if langs else "listed-language"
         picked = [audio[0]]
         notes = (f"No {first_listed} audio in this rip; kept {language_name(audio[0].language)}.",)
-    subs = [t for t in streams if t.kind == "subtitle" and (t.language in s.subtitle_languages or t.language == "und")]
+    subs = [t for t in streams if t.kind == "subtitle" and (_lang(t) in s.subtitle_languages or _lang(t) == "und")]
     if s.subtitles == "none":
         subs = []
     elif s.subtitles == "forced_only":

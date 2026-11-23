@@ -102,3 +102,13 @@ def test_fingerprint_follows_the_rule():
     assert fingerprint(copy) == expected
     other = PresetSettings.from_dict({**SEEDS[3][1], "quality_bluray": 30, "speed": "fast"})
     assert fingerprint(other) == expected
+
+
+def test_languages_canonicalised_and_deduplicated():
+    from disc_ripper.presets import canonical_language, from_form, language_name
+    assert canonical_language("fra") == "fre" and canonical_language("ENG") == "eng" and canonical_language("und") == "und"
+    assert language_name("fra") == language_name("fre") == "French"
+    s = PresetSettings.from_dict({**SEEDS[1][1], "audio_languages": ["fre", "fra", "eng"]})
+    assert s.audio_languages == ("fre", "eng")
+    _, s = from_form({"name": "X", "audio_languages": "eng, eng"}, PresetSettings.from_dict(SEEDS[1][1]))
+    assert s.audio_languages == ("eng",)

@@ -34,13 +34,32 @@ _AUDIO_ENCODE_FIELDS = ("audio_codec", "audio_channels", "bitrate_surround", "bi
 _NAME = re.compile(r"[A-Za-z0-9 \-_()+.]{1,40}")
 _LANG = re.compile(r"[a-z]{3}")
 
+# ISO 639-2 terminology (T) codes mapped to the bibliographic (B) code MakeMKV and ffprobe emit.
+_LANGUAGE_ALIASES = {
+    "fra": "fre", "deu": "ger", "zho": "chi", "nld": "dut", "ces": "cze", "ell": "gre", "fas": "per",
+    "ron": "rum", "slk": "slo", "cym": "wel", "isl": "ice", "mkd": "mac", "msa": "may", "bod": "tib",
+    "hye": "arm", "kat": "geo", "eus": "baq", "sqi": "alb", "mya": "bur",
+}
 _LANGUAGE_NAMES = {
-    "eng": "English", "jpn": "Japanese", "fra": "French", "fre": "French", "deu": "German",
-    "ger": "German", "spa": "Spanish", "ita": "Italian", "por": "Portuguese", "rus": "Russian",
-    "kor": "Korean", "zho": "Chinese", "chi": "Chinese", "nld": "Dutch", "swe": "Swedish",
+    "eng": "English", "jpn": "Japanese", "fre": "French", "ger": "German",
+    "spa": "Spanish", "ita": "Italian", "por": "Portuguese", "rus": "Russian",
+    "kor": "Korean", "chi": "Chinese", "dut": "Dutch", "swe": "Swedish",
     "nor": "Norwegian", "dan": "Danish", "fin": "Finnish", "pol": "Polish", "hin": "Hindi",
+    "cze": "Czech", "gre": "Greek", "per": "Persian", "rum": "Romanian", "slo": "Slovak",
+    "wel": "Welsh", "ice": "Icelandic", "mac": "Macedonian", "may": "Malay", "tib": "Tibetan",
+    "arm": "Armenian", "geo": "Georgian", "baq": "Basque", "alb": "Albanian", "bur": "Burmese",
     "und": "unlabelled",
 }
+
+
+def canonical_language(code: str) -> str:
+    """One code per language: ISO 639-2 T codes (fra) become the B code (fre) the tools emit."""
+    code = code.lower()
+    return _LANGUAGE_ALIASES.get(code, code)
+
+
+def _canonical_list(codes) -> list[str]:
+    return list(dict.fromkeys(canonical_language(c) for c in codes))
 
 
 class PresetError(ValueError):
@@ -107,8 +126,8 @@ class PresetSettings:
                 _choice(key, v[key], _OPTIONS[key])
             if key in blocked and v[key] in blocked[key]:
                 raise PresetError(key, blocked[key][v[key]])
-        v["audio_languages"] = tuple(v["audio_languages"])
-        v["subtitle_languages"] = tuple(v["subtitle_languages"])
+        v["audio_languages"] = tuple(_canonical_list(v["audio_languages"]))
+        v["subtitle_languages"] = tuple(_canonical_list(v["subtitle_languages"]))
         return cls(**v)
 
     def to_dict(self) -> dict:
@@ -194,6 +213,7 @@ def fingerprint(s: PresetSettings) -> str:
 
 
 def language_name(code: str) -> str:
+    code = canonical_language(code)
     return _LANGUAGE_NAMES.get(code, code)
 
 
@@ -254,10 +274,13 @@ def _seed_audio() -> dict:
     return {"audio_codec": "eac3", "audio_channels": "max51", "bitrate_surround": 640,
             "bitrate_stereo": 224, "audio_languages": ["eng"], "audio_tracks": "first_per_language",
             "keep_commentary": False, "subtitles": "all", "subtitle_languages": ["eng"]}
+
+
 def _standard_seed() -> dict:
     return {"engine": "handbrake", "mode": "software", "codec": "x265_10bit", "quality_dvd": 18,
-                  "quality_bluray": 20, "speed": "slow", "max_height": None, "deinterlace": "auto",
-                  "crop": "off", **_seed_audio()}
+            "quality_bluray": 20, "speed": "slow", "max_height": None, "deinterlace": "auto",
+            "crop": "off", **_seed_audio()}
+
 
 SEEDS: dict[int, tuple[str, dict]] = {
     1: ("Standard", _standard_seed()),
@@ -396,6 +419,8 @@ def list_presets(conn: sqlite3.Connection) -> list[Preset]:
 
 
 def get_preset(conn: sqlite3.Connection, preset_id: int) -> Preset | None:
+    if not 0 < preset_id < 2**63:  # a URL can carry any integer; SQLite can't
+        return None
     row = conn.execute("SELECT * FROM presets WHERE id = ?", (preset_id,)).fetchone()
     return _preset(row) if row else None
 
@@ -458,7 +483,10 @@ def _join(phrases: list[str]) -> str:
 
 
 def delete_preset(conn: sqlite3.Connection, preset_id: int) -> str | None:
-    """The reason it can't be deleted, or None once it is."""
+    """The reason it can't be deleted, or None once it is.
+
+    Call with no open transaction (it runs BEGIN IMMEDIATE).
+    """
     conn.execute("BEGIN IMMEDIATE")  # the checks and the delete are one step: an encode can't be queued between
     try:
         preset = get_preset(conn, preset_id)
@@ -492,7 +520,7 @@ def parse_choice(conn: sqlite3.Connection, value: str, *, allow_off: bool = True
     """None when value is `off` (if allowed) or an existing preset id; else the error text."""
     if value == "off" and allow_off:
         return None
-    if re.fullmatch(r"[1-9][0-9]*", value or "") and get_preset(conn, int(value)) is not None:
+    if re.fullmatch(r"[1-9][0-9]{0,9}", value or "") and get_preset(conn, int(value)) is not None:
         return None
     return UNKNOWN
 

@@ -101,17 +101,26 @@ async def _detect_crop(ctx, source: Path, seconds: float, stall_minutes: int, wo
 
 
 def _langs(streams, kind: str) -> list[str]:
-    return [t.language for t in streams if t.kind == kind]
+    return [presets.canonical_language(t.language) for t in streams if t.kind == kind]
 
 
-def _track_check(plan: encoding.TrackPlan, out_streams) -> None:
+def _same_langs(expected: list[str], got: list[str]) -> bool:
+    """Same count and, track by track, the same language; `und` on either side matches anything."""
+    return len(expected) == len(got) and all(a == b or "und" in (a, b) for a, b in zip(expected, got))
+
+
+def _track_check(plan: encoding.TrackPlan, out_streams, engine: str = "ffmpeg") -> str | None:
+    """Raise when the output's tracks aren't the plan's; the note to keep when HandBrake dropped subtitles."""
     expected, got = _langs(plan.audio, "audio"), _langs(out_streams, "audio")
-    if expected != got:
+    if not _same_langs(expected, got):
         raise RuntimeError(f"{TRACKS_WRONG} expected audio {', '.join(expected) or 'none'}; "
                            f"got {', '.join(got) or 'none'}.")
     want_subs, got_subs = len(plan.subtitles), len(_langs(out_streams, "subtitle"))
+    if engine == "handbrake" and got_subs < want_subs:
+        return f"HandBrake kept {got_subs} of {want_subs} subtitle tracks"
     if want_subs != got_subs:
         raise RuntimeError(f"{TRACKS_WRONG} expected {want_subs} subtitle tracks; got {got_subs}.")
+    return None
 
 
 def _aspect_check(source_dar: float | None, out_dar: float | None) -> None:
@@ -131,7 +140,10 @@ def _move(config, rip_id, role, out, min_free, cancel, reserved) -> Path:
 
 
 async def run_encode(ctx: JobContext, row) -> None:
-    """Encode one file beside its raw. The raw is never modified or deleted; the work folder never outlives a failure."""
+    """Encode one file beside its raw. The raw is never modified or deleted.
+
+    The work folder never outlives a failure.
+    """
     work = ctx.config.work_dir / f"encode-{ctx.job_id}"
     try:
         await _encode(ctx, row, work)
@@ -231,7 +243,9 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
     else:
         _aspect_check(encoding.expected_dar(info.dar, info.width, info.height, crop) if info.dar else None,
                       out_info.dar)
-    _track_check(plan, out_info.streams)
+    sub_note = _track_check(plan, out_info.streams, s.engine)
+    if sub_note:
+        ctx.log.write(sub_note)
 
     await ctx.report(0.99, "Moving to downloads…")
     stop = threading.Event()
@@ -248,7 +262,7 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
     shutil.rmtree(work, ignore_errors=True)
     await ctx.db(encodes.finish, ctx.job_id, "done", utc_now(), output=str(landed),
                  output_bytes=landed.stat().st_size, speed=seconds / max(elapsed, 0.001),
-                 message=" ".join(plan.notes) or None)
+                 message=" ".join((*plan.notes, *([sub_note] if sub_note else []))) or None)
     await ctx.report(1.0, "Done")
 
 

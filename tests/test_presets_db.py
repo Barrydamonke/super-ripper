@@ -148,3 +148,7 @@ def test_retry_with_deleted_preset_refused(conn):
     encodes.start(conn, ok, NOW)
     encodes.finish(conn, ok, "failed", NOW, error="boom")
     assert encodes.retry(conn, ok, NOW) is not None
+
+
+def test_parse_choice_rejects_huge_ids(conn):
+    assert presets.parse_choice(conn, "9" * 30) == "Unknown preset."

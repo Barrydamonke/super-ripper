@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from disc_ripper import db, presets
+from disc_ripper.presets import PresetSettings
 from disc_ripper.app import create_app
 
 from .conftest import TEST_PASSWORD
@@ -132,3 +133,24 @@ def test_name_is_escaped_on_list(client, conn):
     conn.execute("UPDATE presets SET name = '<b>x</b>' WHERE name = 'A(b)'"); conn.commit()
     t = client.get("/presets").text
     assert "<b>x</b>" not in t and "&lt;b&gt;x&lt;/b&gt;" in t
+
+
+def test_unticked_keep_commentary_stays_unticked_after_error(client, conn):
+    s = PresetSettings.from_dict({**presets.SEEDS[1][1], "keep_commentary": True})
+    pid = presets.create_preset(conn, "Chatty", s, "2026-01-01T00:00:00+00:00")
+    r = client.post("/presets/save", data={**form_for(1, name="Chatty", quality_bluray=999), "id": str(pid)})
+    assert 'name="keep_commentary"' in r.text
+    assert "checked" not in r.text.split('name="keep_commentary"')[1].split(">")[0]
+
+
+def test_huge_ids_do_not_500(client):
+    big = "9" * 30
+    assert client.get(f"/presets/new?from={big}").status_code == 200
+    assert client.post("/presets/save", data={**form_for(1), "id": big}).status_code == 200
+    assert client.post("/presets/save", data={**form_for(1, name="Y"), "from": big}).status_code in (200, 303)
+    assert client.post(f"/presets/{big}/delete").status_code in (200, 404)
+
+
+def test_delete_button_confirms_with_the_name(client):
+    html = client.get("/presets").text
+    assert "onsubmit='return confirm(&#34;Delete preset Standard?&#34;)'" in html or         "onsubmit='return confirm(\"Delete preset Standard?\")'" in html

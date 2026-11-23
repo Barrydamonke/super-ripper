@@ -175,7 +175,7 @@ Every change redraws two **previews** (an example DVD and an example Blu-ray, ea
 
 **Editing** a preset applies to encodes that start afterwards, including ones already queued. Finished encodes keep the settings they were made with. Renaming doesn't rename old files.
 
-**Deleting** is refused while a queued or running encode, a drive's Encode with choice, a rip waiting to encode, or After ripping uses the preset. At least one preset must always remain.
+**Deleting** is refused while a queued or running encode, a drive's Encode with choice, a rip in progress, or After ripping uses the preset. At least one preset must always remain.
 
 A rip made before this update holds English tracks only. A preset asking for another language on it keeps the first audio track, and the Films page says so.
 
@@ -183,10 +183,10 @@ A rip made before this update holds English tracks only. A preset asking for ano
 
 1. Force Update the container.
 2. Open Presets and check the three seeds. Fast should show your old quality.
-3. Copy Standard as "Anime" with `jpn, eng` audio, and check the preview keeps Japanese first.
+3. Copy Standard as "Anime" with `jpn, eng` audio, and check the Blu-ray example preview keeps Japanese first.
 4. Rip a disc with a second language. The rip keeps it (check the log's track list).
 5. Encode with the new preset, and check the tracks in Jellyfin.
-6. Try a 720p cap preset, and check that Radarr imports it as Bluray-720p.
+6. Try a 720p cap preset, and check that Radarr imports a Blu-ray one as Bluray-720p (the cap applies to Blu-ray sources).
 7. Try crop auto on a 2.39:1 film.
 8. Try deleting a preset that's in use.
 

@@ -3,6 +3,7 @@
 FAKE_ENCODE_MODE: ok | fail | hang | short | no_audio | drop_audio (claims success, writes no audio streams).
 FAKE_IDET: progressive | interlaced.  FAKE_CROP: what cropdetect runs answer (default 1920:1080:0:0).
 FAKE_ARGV_FILE: append each run's argv (one JSON line).  FAKE_DAR: the output's display aspect (default 1.778).
+FAKE_RELABEL: JSON {from: to} applied to the output streams' languages.  FAKE_SUB_KEEP: keep only this many subtitle tracks.
 FAKE_BLOCKS: replay the progress fixture this many times (log-size test).
 Replays the progress fixtures and writes a JSON stub to the file named by -o, or the last argv item.
 The stub keeps the source stub's streams that the argv mapped (--audio/--subtitle lists, -map 0:a:N / 0:s:N, or -map 0).
@@ -96,6 +97,11 @@ source = read_source()
 streams = mapped(source.get("streams", []))
 if mode in ("no_audio", "drop_audio"):
     streams = [s for s in streams if s["kind"] != "audio"]
+if "FAKE_SUB_KEEP" in os.environ:
+    keep = int(os.environ["FAKE_SUB_KEEP"])
+    streams = [s for s in streams if s["kind"] != "subtitle"] + [s for s in streams if s["kind"] == "subtitle"][:keep]
+relabel = json.loads(os.environ.get("FAKE_RELABEL", "{}"))
+streams = [{**s, "language": relabel.get(s["language"], s["language"])} for s in streams]
 audio = 0 if mode == "no_audio" else 1
 Path(out).write_text(json.dumps(
     {"seconds": seconds, "video": 1, "audio": audio, "audio_channels": [6] if audio else [],
