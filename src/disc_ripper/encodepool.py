@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import shutil
@@ -20,7 +21,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, encodes, encoding, joblog, jobs, runner, schedule_source, settings, videofiles, videorip
+from . import db, encodes, encoding, joblog, jobs, presets, runner, schedule_source, settings, videofiles, videorip
 from . import space as space_mod
 from .clock import utc_now
 from .config import AppConfig
@@ -35,11 +36,11 @@ STALL_UNIT_SECONDS = 60  # the stall setting is in minutes; tests shrink this
 ASPECT_TOLERANCE = 0.02
 CHECK_FAILED = "The encode failed its check:"
 SEE_LOG = "See the log for the encoder's messages."
+TRACKS_WRONG = "The encode's tracks don't match the preset:"
 
 
 def _read_settings(conn):
-    return (settings.get(conn, "fast_quality"), settings.get(conn, "encode_stall_minutes"),
-            settings.get(conn, "cache_min_free_gb"))
+    return settings.get(conn, "encode_stall_minutes"), settings.get(conn, "cache_min_free_gb")
 
 
 def _other_reserved(conn, work_dir: Path, encode_id: int) -> int:
@@ -48,7 +49,8 @@ def _other_reserved(conn, work_dir: Path, encode_id: int) -> int:
     for other in encodes.running(conn):
         if other["id"] != encode_id:
             written = space_mod.tree_size(work_dir / f"encode-{other['id']}")
-            total += max(encoding.estimate_size(other["source_bytes"], other["preset"]) - written, 0)
+            est = encodes.estimate_for(conn, other)
+            total += max((est.bytes if est else 0) - written, 0)
     return total
 
 
@@ -82,6 +84,45 @@ async def _detect_interlaced(ctx, source: Path, seconds: float, stall_minutes: i
     return interlaced
 
 
+async def _detect_crop(ctx, source: Path, seconds: float, stall_minutes: int, work: Path,
+                       info) -> tuple[int, int, int, int] | None:
+    found = []
+    for fraction in (0.2, 0.5, 0.8):
+        lines: list[str] = []
+
+        async def collect(line: str) -> None:
+            lines.append(line)
+
+        await _run_tool(ctx, encoding.cropdetect_argv(source, seconds * fraction), collect, stall_minutes, work)
+        found.append(encoding.parse_cropdetect("\n".join(lines)))
+    crop = encoding.pick_crop(found, info.width, info.height)
+    ctx.log.write(f"cropdetect: {crop[0]}x{crop[1]} at {crop[2]},{crop[3]}" if crop else "cropdetect: no crop")
+    return crop
+
+
+def _langs(streams, kind: str) -> list[str]:
+    return [presets.canonical_language(t.language) for t in streams if t.kind == kind]
+
+
+def _same_langs(expected: list[str], got: list[str]) -> bool:
+    """Same count and, track by track, the same language; `und` on either side matches anything."""
+    return len(expected) == len(got) and all(a == b or "und" in (a, b) for a, b in zip(expected, got))
+
+
+def _track_check(plan: encoding.TrackPlan, out_streams, engine: str = "ffmpeg") -> str | None:
+    """Raise when the output's tracks aren't the plan's; the note to keep when HandBrake dropped subtitles."""
+    expected, got = _langs(plan.audio, "audio"), _langs(out_streams, "audio")
+    if not _same_langs(expected, got):
+        raise RuntimeError(f"{TRACKS_WRONG} expected audio {', '.join(expected) or 'none'}; "
+                           f"got {', '.join(got) or 'none'}.")
+    want_subs, got_subs = len(plan.subtitles), len(_langs(out_streams, "subtitle"))
+    if engine == "handbrake" and got_subs < want_subs:
+        return f"HandBrake kept {got_subs} of {want_subs} subtitle tracks"
+    if want_subs != got_subs:
+        raise RuntimeError(f"{TRACKS_WRONG} expected {want_subs} subtitle tracks; got {got_subs}.")
+    return None
+
+
 def _aspect_check(source_dar: float | None, out_dar: float | None) -> None:
     if not source_dar or not out_dar:
         return
@@ -99,7 +140,10 @@ def _move(config, rip_id, role, out, min_free, cancel, reserved) -> Path:
 
 
 async def run_encode(ctx: JobContext, row) -> None:
-    """Encode one file beside its raw. The raw is never modified or deleted; the work folder never outlives a failure."""
+    """Encode one file beside its raw. The raw is never modified or deleted.
+
+    The work folder never outlives a failure.
+    """
     work = ctx.config.work_dir / f"encode-{ctx.job_id}"
     try:
         await _encode(ctx, row, work)
@@ -127,23 +171,35 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
     source = Path(row["source"])
     if not source.is_file():
         raise RuntimeError("The ripped file is no longer there.")
-    preset, seconds = row["preset"], float(row["source_seconds"])
-    fast_quality, stall_minutes, min_free = await ctx.db(_read_settings)
+    seconds = float(row["source_seconds"])
+    found = await ctx.db(presets.for_encode, row)
+    if found is None:
+        raise RuntimeError(presets.GONE)
+    name, s, fingerprint = found
+    settings_json = json.dumps(s.to_dict())
+    await ctx.db(encodes.snapshot, ctx.job_id, name, settings_json, fingerprint)  # before any work
+    ctx.log.write(f"preset: {name} {settings_json}")
+    stall_minutes, min_free = await ctx.db(_read_settings)
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
 
-    interlaced = False
-    if preset == "fast" and row["disc_type"] == "dvd":
-        interlaced = await _detect_interlaced(ctx, source, seconds, stall_minutes, work)
     info = await asyncio.to_thread(videofiles.PROBE, source)
-    channels = info.audio_channels[0] if info.audio_channels else None
-    output = work / encoding.output_name(source, preset)
-    argv = encoding.priority_prefix() + encoding.encode_argv(
-        preset, source, output, disc_type=row["disc_type"], audio_channels=channels,
-        interlaced=interlaced, fast_quality=fast_quality, sar=info.sar)
+    plan = encoding.pick_tracks(info.streams, s)
+    for note in plan.notes:
+        ctx.log.write(note)
+    interlaced = encoding.forced_interlaced(s)
+    if encoding.needs_idet(s, row["disc_type"]):
+        interlaced = await _detect_interlaced(ctx, source, seconds, stall_minutes, work)
+    crop = None
+    if encoding.needs_cropdetect(s):
+        crop = await _detect_crop(ctx, source, seconds, stall_minutes, work, info)
+    output = work / encoding.output_name(source, name)
+    argv = encoding.priority_prefix() + encoding.build_argv(
+        s, source, output, disc_type=row["disc_type"], plan=plan, source_height=info.height,
+        interlaced=interlaced, crop=crop, sar=info.sar)
 
-    parser = encoding.HandBrakeProgress() if preset == "standard" else encoding.FfmpegProgress(seconds)
-    label = encoding.PRESET_LABEL[preset]
+    parser = encoding.progress_parser(s, seconds)
+    label = name
     tail: list[str] = []
     noise = encoding.ProgressNoise()
     quiet = [False]
@@ -173,7 +229,7 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
         said = " / ".join(tail) or f"The encoder exited with code {code}"
         raise RuntimeError(f"{said}{'' if said.endswith(('.', '!', '?')) else '.'} {SEE_LOG}")
 
-    if preset == "standard":
+    if s.engine == "handbrake":
         await _clear_default_subtitles(ctx, output, stall_minutes, work)
 
     try:
@@ -182,7 +238,14 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
     except RuntimeError as exc:
         raise RuntimeError(f"{CHECK_FAILED} {exc}") from None
     out_info = await asyncio.to_thread(videofiles.PROBE, out)
-    _aspect_check(info.dar, out_info.dar)
+    if s.engine == "handbrake" and s.crop == "auto":
+        ctx.log.write("aspect check skipped: HandBrake chooses its own crop")
+    else:
+        _aspect_check(encoding.expected_dar(info.dar, info.width, info.height, crop) if info.dar else None,
+                      out_info.dar)
+    sub_note = _track_check(plan, out_info.streams, s.engine)
+    if sub_note:
+        ctx.log.write(sub_note)
 
     await ctx.report(0.99, "Moving to downloads…")
     stop = threading.Event()
@@ -198,7 +261,8 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
         raise
     shutil.rmtree(work, ignore_errors=True)
     await ctx.db(encodes.finish, ctx.job_id, "done", utc_now(), output=str(landed),
-                 output_bytes=landed.stat().st_size, speed=seconds / max(elapsed, 0.001))
+                 output_bytes=landed.stat().st_size, speed=seconds / max(elapsed, 0.001),
+                 message=" ".join((*plan.notes, *([sub_note] if sub_note else []))) or None)
     await ctx.report(1.0, "Done")
 
 
@@ -325,14 +389,16 @@ class EncodePool:
 
     def _decide(self, conn, row) -> tuple[str, str]:
         """("start" | "wait" | "too_long", message) from the schedule guard, then the work space."""
-        recent = encodes.recent_speeds(conn, row["preset"], row["disc_type"])
-        seconds, rough = encoding.estimate_seconds(row["source_seconds"], row["preset"], row["disc_type"], recent)
+        est = encodes.estimate_for(conn, row)
+        if est is None:
+            return "start", ""  # its preset is gone: let the encode fail with the reason
         now = self.now()
-        verdict, message = encoding.guard_decision(schedule_source.current_guard(conn, now), now, seconds, rough)
+        verdict, message = encoding.guard_decision(schedule_source.current_guard(conn, now), now, est.seconds,
+                                                   est.rough_time)
         if verdict != "start":
             return verdict, message
         reason = self.space.check(
-            encoding.estimate_size(row["source_bytes"], row["preset"]),
+            est.bytes,
             jobs.running_bytes(conn) + encodes.reserved_bytes(conn),
             settings.get(conn, "work_budget_gb"),
             settings.get(conn, "cache_min_free_gb"),
@@ -391,9 +457,9 @@ class EncodePool:
         encode_id = row["id"]
         self.space.invalidate()  # it is about to write into /work
         await self.notify()
-        log.info("encodes: started #%s (%s)", encode_id, row["preset"])
+        log.info("encodes: started #%s (%s)", encode_id, row["preset_name"])
         ctx = JobContext(self, encode_id, "", {}, log=joblog.JobLog(self._log_path(encode_id)))
-        ctx.log.write(f"encode #{encode_id} ({row['preset']}) started: {row['source']}")
+        ctx.log.write(f"encode #{encode_id} ({row['preset_name']}) started: {row['source']}")
         # Looked up at call time so tests can patch it.
         task = asyncio.create_task(globals()["run_encode"](ctx, row), name=f"encode {encode_id}")
         self._running[encode_id] = task

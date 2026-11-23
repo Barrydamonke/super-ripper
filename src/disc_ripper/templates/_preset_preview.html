@@ -1,0 +1,13 @@
+{% if errors %}
+<p class="error">Fix the field marked above to see the commands.</p>
+{% else %}
+{% for p in previews %}
+<div class="preset-preview">
+  <h3>{{ p.label }}</h3>
+  <p>Keeps: {{ p.keeps }}</p>
+  <p>Estimate: {{ p.estimate }}</p>
+  {% for n in p.notes %}<p class="hint">{{ n }}</p>{% endfor %}
+  <pre><code>{{ p.command }}</code></pre>
+</div>
+{% endfor %}
+{% endif %}

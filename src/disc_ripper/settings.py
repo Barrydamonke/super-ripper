@@ -15,10 +15,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 INTERNAL_PREFIX = "internal."
-DEFAULT_VIDEO_SELECTION = (
-    "-sel:all,+sel:video,+sel:(eng|nolang),+sel:(audio&single),-sel:(audio&special),"
-    "+sel:(subtitle&forced),-sel:mvcvideo,=100:all,-10:eng"
-)
+DEFAULT_VIDEO_SELECTION = "-sel:all,+sel:video,+sel:audio,+sel:subtitle,-sel:mvcvideo,=100:all,-10:eng"
 _TRUE_VALUES = {"on", "true", "1"}
 
 
@@ -119,20 +116,8 @@ SETTINGS: tuple[SettingDef, ...] = (
         group="DVD and Blu-ray",
     ),
     SettingDef(
-        "encode_after_rip", "Encode after ripping", "choice", "standard",
-        help="What to make of each ripped title automatically. The raw rip is kept until encoded.",
-        choices=(("standard", "Standard (HandBrake x265)"), ("fast", "Fast (hardware)"),
-                 ("copy", "Copy only"), ("off", "Off")),
-        group="Encoding",
-    ),
-    SettingDef(
         "encode_slots", "Encodes at once", "int", 1, "", 1, 2,
         "How many encodes may run at the same time. A change applies after the container restarts.",
-        group="Encoding",
-    ),
-    SettingDef(
-        "fast_quality", "Fast preset quality", "int", 24, "", 1, 51,
-        "Constant quality (QP) for the hardware preset. Lower is better and bigger.",
         group="Encoding",
     ),
     SettingDef(

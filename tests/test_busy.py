@@ -87,7 +87,7 @@ def test_running_encode_is_busy_and_listed(conn):
     from disc_ripper import encodes
 
     eid = encodes.create(conn, rip_id=1, title=1, role="main", source=Path("/d/f.mkv"), disc_type="dvd",
-                         source_seconds=60.0, source_bytes=1000, source_audio=1, preset="fast", now="t")
+                         source_seconds=60.0, source_bytes=1000, source_audio=1, preset_id=2, preset_name="Fast", now="t")
     encodes.start(conn, eid, "t")
     encodes.set_progress(conn, eid, 0.2, "", "2026-11-18T23:30:00+00:00")
     report = busy.busy_report(conn, GuardState("in_window", END, GRACE_END))

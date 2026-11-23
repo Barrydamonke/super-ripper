@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from disc_ripper import db, encodes, jobs, video_rips
+from disc_ripper import db, encodes, jobs, presets, video_rips
 
 FP = "fp1"
 CONFIRM = "Delete the raw rip? It can't be undone; the disc is the backup."
@@ -34,10 +34,11 @@ def make_rip(conn, config, *, label="THE_LEGO_MOVIE", disc_type="bluray", names=
     return job
 
 
-def queue(conn, rip, title=0, preset="standard", state="queued", error=None, output=None):
+def queue(conn, rip, title=0, preset=1, state="queued", error=None, output=None):
     path = json.loads(conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip,)).fetchone()[0])[str(title)]["path"]
     eid = encodes.create(conn, rip_id=rip, title=title, role="main", source=Path(path), disc_type="bluray",
-                         source_seconds=6035.0, source_bytes=1000, source_audio=2, preset=preset, now="t")
+                         source_seconds=6035.0, source_bytes=1000, source_audio=2, preset_id=preset,
+                         preset_name=presets.SEEDS[preset][0], now="t")
     if state != "queued":
         encodes.start(conn, eid, "t")
         if state != "running":
@@ -66,22 +67,24 @@ def test_films_empty(films):
 def test_encode_button_queues(films):
     client, conn, config = films
     rip = make_rip(conn, config)
-    r = client.post("/films/encode", data={"rip_id": rip, "title": 0, "preset": "fast"})
+    r = client.post("/films/encode", data={"rip_id": rip, "title": 0, "preset": "2"})
     assert r.status_code == 200 and "<html" not in r.text
     [row] = conn.execute("SELECT * FROM encodes").fetchall()
-    assert (row["preset"], row["state"]) == ("fast", "queued")
-    r = client.post("/films/encode", data={"rip_id": rip, "title": 0, "preset": "fast"})
+    assert (row["preset_id"], row["preset_name"], row["state"]) == (2, "Fast", "queued")
+    r = client.post("/films/encode", data={"rip_id": rip, "title": 0, "preset": "2"})
     assert r.status_code == 409 and "already has an encode" in r.text
     assert client.post("/films/encode", data={"rip_id": rip, "title": 0, "preset": "bogus"}).status_code == 400
+    r = client.post("/films/encode", data={"rip_id": rip, "title": 0, "preset": "99"})
+    assert r.status_code == 400 and "Unknown preset." in r.text
 
 
 def test_encode_all(films):
     client, conn, config = films
     rip = make_rip(conn, config, names=("a.mkv", "b.mkv"))
-    r = client.post("/films/encode-all", data={"rip_id": rip, "preset": "copy"})
+    r = client.post("/films/encode-all", data={"rip_id": rip, "preset": "3"})
     assert "Queued 2 of 2" in r.text
     assert conn.execute("SELECT COUNT(*) FROM encodes").fetchone()[0] == 2
-    r = client.post("/films/encode-all", data={"rip_id": rip, "preset": "copy"})
+    r = client.post("/films/encode-all", data={"rip_id": rip, "preset": "3"})
     assert "Queued 0 of 2" in r.text and "already has an encode" in r.text
 
 
@@ -168,7 +171,7 @@ def test_notice_lives_outside_the_swapped_list(films):
     client, conn, config = films
     rip = make_rip(conn, config)
     assert '<div id="films-notice"></div>' in client.get("/films").text  # outside #films, so SSE swaps keep it
-    r = client.post("/films/encode-all", data={"rip_id": rip, "preset": "standard"})
+    r = client.post("/films/encode-all", data={"rip_id": rip, "preset": "1"})
     assert 'id="films-notice" hx-swap-oob="true"' in r.text and "Queued 1 of 1 files." in r.text
     # what the SSE stream publishes carries no notice element, so it can't wipe or blank one
     assert "films-notice" not in client.app.state.services._render_films()
@@ -236,7 +239,7 @@ def test_superseded_failure_has_no_retry(films):
 def test_films_page_shows_each_rips_encode_choice(films):
     client, conn, config = films
     rip = make_rip(conn, config)
-    conn.execute("UPDATE video_rips SET encode_preset = 'fast' WHERE rip_id = ?", (rip,))
+    conn.execute("UPDATE video_rips SET encode_preset = '2' WHERE rip_id = ?", (rip,))
     conn.commit()
     assert "Encode with: Fast" in client.get("/films").text
 
@@ -247,3 +250,34 @@ def test_old_rip_without_a_choice_shows_none(films):
     conn.execute("UPDATE video_rips SET state = 'ripped', encode_preset = NULL WHERE rip_id = ?", (rip,))
     conn.commit()
     assert "Encode with:" not in client.get("/films").text
+
+
+def test_films_dropdowns_list_the_presets_without_off(films):
+    client, conn, config = films
+    make_rip(conn, config)
+    page = client.get("/films").text
+    for value, label in (("1", "Standard"), ("2", "Fast"), ("3", "Copy only")):
+        assert f'<option value="{value}">{label}</option>' in page, label
+    assert 'value="off"' not in page
+    new = presets.create_preset(conn, "Anime", presets.get_preset(conn, 1).settings, "t")
+    assert f'<option value="{new}">Anime</option>' in client.get("/films").text
+
+
+def test_retry_after_the_preset_was_deleted_is_refused_not_a_500(films):
+    client, conn, config = films
+    rip = make_rip(conn, config)
+    pid = presets.create_preset(conn, "Temp", presets.get_preset(conn, 1).settings, "t")
+    eid = queue(conn, rip, preset=1, state="failed", error="boom")
+    conn.execute("UPDATE encodes SET preset_id = ? WHERE id = ?", (pid, eid))
+    conn.commit()
+    assert presets.delete_preset(conn, pid) is None  # nothing queued uses it, so it can go
+    r = client.post(f"/encodes/{eid}/retry")
+    assert r.status_code == 409 and "That preset was deleted; choose another with Encode ▾." in r.text
+    assert conn.execute("SELECT COUNT(*) FROM encodes WHERE state = 'queued'").fetchone()[0] == 0
+
+
+def test_films_page_shows_the_encodes_preset_name(films):
+    client, conn, config = films
+    rip = make_rip(conn, config)
+    queue(conn, rip, preset=3)
+    assert "queued (Copy only)" in client.get("/films").text

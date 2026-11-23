@@ -59,10 +59,25 @@ jobs:
           # MakeMKV (built from source) and ffprobe must run as the app user.
           docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HOME=/tmp makemkvcon -r info disc:9999' | grep -q '^MSG:'
           docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups ffprobe -version | grep -q '^ffprobe version'
-          # ffmpeg VAAPI HEVC encoder, plus the HandBrake 10-bit x265 and E-AC-3 encoders the presets use.
-          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -encoders | grep -q hevc_vaapi'
-          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HandBrakeCLI --help 2>&1 | grep -q x265_10bit'
-          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HandBrakeCLI --help 2>&1 | grep -qw eac3'
+          # Every encoder and filter the Presets page offers must be in the image, each checked on its own so a failure names it.
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HandBrakeCLI --help 2>&1 | grep -qE "^[[:space:]]+x265_10bit$"'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HandBrakeCLI --help 2>&1 | grep -qE "^[[:space:]]+x264$"'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HandBrakeCLI --help 2>&1 | grep -qE "^[[:space:]]+eac3$"'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HandBrakeCLI --help 2>&1 | grep -qE "^[[:space:]]+ac3$"'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HandBrakeCLI --help 2>&1 | grep -qE "^[[:space:]]+av_aac$"'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'HandBrakeCLI --help 2>&1 | grep -qE "^[[:space:]]+opus$"'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -encoders | grep -qw libx265'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -encoders | grep -qw libx264'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -encoders | grep -qw hevc_vaapi'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -encoders | grep -qw h264_vaapi'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -encoders | grep -qw eac3'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -encoders | grep -qw ac3'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -encoders | grep -qw aac'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -encoders | grep -qw libopus'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -filters | grep -qw bwdif'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -filters | grep -qw cropdetect'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -filters | grep -qw scale_vaapi'
+          docker exec smoke setpriv --reuid=99 --regid=100 --clear-groups sh -c 'ffmpeg -hide_banner -filters | grep -qw deinterlace_vaapi'
           docker logs smoke
           docker rm -f smoke
 

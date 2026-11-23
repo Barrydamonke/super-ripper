@@ -32,7 +32,7 @@
     {% if rip.can_encode_all %}
     <form class="inline" hx-post="/films/encode-all" hx-target="#films" hx-disabled-elt="find button">
       <input type="hidden" name="rip_id" value="{{ rip.rip_id }}">
-      <select name="preset">{% for key, label in presets.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select>
+      <select name="preset">{% for key, label in presets %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select>
       <button type="submit">Encode all</button>
     </form>
     {% endif %}
@@ -71,7 +71,7 @@
         <form class="inline" hx-post="/films/encode" hx-target="#films" hx-disabled-elt="find button">
           <input type="hidden" name="rip_id" value="{{ rip.rip_id }}">
           <input type="hidden" name="title" value="{{ f.title }}">
-          <select name="preset">{% for key, label in presets.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select>
+          <select name="preset">{% for key, label in presets %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select>
           <button type="submit">Encode</button>
         </form>
         {% endif %}

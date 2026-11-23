@@ -640,11 +640,12 @@ def test_encode_choice_on_the_video_card(dash):
     _video_disc(conn, DECOY, held=["two titles of about the same length (decoy playlists?)"])
     text = _page(client)
     assert 'hx-post="/dashboard/video/encode-choice"' in text
-    assert '<option value="standard" selected' in text  # the setting's default
-    r = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "fast"})
-    assert r.status_code == 200 and '<option value="fast" selected' in r.text
-    assert conn.execute("SELECT encode_choice FROM drives WHERE id = 'serial:A'").fetchone()[0] == "fast"
-    bad = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "turbo"})
+    assert '<option value="1" selected' in text  # the after-rip default
+    assert '<option value="off"' in text and ">Off</option>" in text  # the drive card keeps Off
+    r = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "2"})
+    assert r.status_code == 200 and '<option value="2" selected' in r.text
+    assert conn.execute("SELECT encode_choice FROM drives WHERE id = 'serial:A'").fetchone()[0] == "2"
+    bad = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "99"})
     assert bad.status_code == 400 and "Unknown preset." in bad.text
 
 
@@ -660,6 +661,6 @@ def test_encode_choice_survives_live_card_updates(dash):
 def test_encode_choice_needs_a_disc(dash):
     client, conn = dash
     drives.set_media(conn, "serial:A", "empty", None, "", "t")
-    r = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "fast"})
+    r = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "2"})
     assert r.status_code == 400 and "No DVD or Blu-ray in the drive." in r.text
     assert conn.execute("SELECT encode_choice FROM drives WHERE id = 'serial:A'").fetchone()[0] is None

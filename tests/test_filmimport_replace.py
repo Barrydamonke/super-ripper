@@ -425,7 +425,7 @@ def test_skip_refuses_while_an_encode_is_active(config, setup, tmp_path, monkeyp
     rip, eid = make_rip(setup, config)
     services, fake = services_with(config, tmp_path)
     other = encodes.create(setup, rip_id=rip, title=1, role="extra", source=Path("x.mkv"), disc_type="dvd",
-                           source_seconds=300, source_bytes=1, source_audio=2, preset="standard", now=NOW)
+                           source_seconds=300, source_bytes=1, source_audio=2, preset_id=1, preset_name="Standard", now=NOW)
     assert other is not None  # queued
     folder = config.downloads_dir / str(rip)
     message = "An encode of this rip is still running; cancel it first."

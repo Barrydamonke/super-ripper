@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from disc_ripper import db, encodepool, encodes, jobs, settings, video_rips, videofiles
+from disc_ripper import db, encodepool, encodes, jobs, presets, settings, video_rips, videofiles
 from disc_ripper.services import Services
 
 from .test_encodepool import FakeSpace  # noqa: F401
@@ -31,13 +31,14 @@ def test_rip_completion_queues_default_preset(config, setup):
     services, rip = scanned(config, setup)
     run_until_done(config, setup, services, rip)
     [row] = encodes_of(setup)
-    assert (row["rip_id"], row["preset"], row["state"], row["role"]) == (rip, "standard", "queued", "main")
+    assert (row["rip_id"], row["preset_id"], row["preset_name"], row["state"], row["role"]) == (
+        rip, 1, "Standard", "queued", "main")
     assert row["disc_type"] == "dvd" and row["source_bytes"] > 0 and row["source_seconds"] > 0
     assert row["source"] == str(config.downloads_dir / str(rip) / "title_t00.mkv")
 
 
 def test_encode_after_rip_off(config, setup):
-    set_setting(setup, "encode_after_rip", "off")
+    presets.set_default_choice(setup, "off")
     services, rip = scanned(config, setup)
     run_until_done(config, setup, services, rip)
     assert rip_state(setup, rip)["state"] == "ripped"
@@ -47,31 +48,32 @@ def test_encode_after_rip_off(config, setup):
 def test_encode_refused_while_one_is_active(config, setup):
     services, rip = scanned(config, setup)
     run_until_done(config, setup, services, rip)  # one is queued by the rip
-    assert asyncio.run(services.queue_encode(rip, 0, "fast")) is None
+    assert asyncio.run(services.queue_encode(rip, 0, "2")) is None
     assert len(encodes_of(setup)) == 1
 
 
 def test_encode_all_queues_each_file(config, setup):
-    set_setting(setup, "encode_after_rip", "off")
+    presets.set_default_choice(setup, "off")
     services, rip = scanned(config, setup)
     for n, name in ((0, "a.mkv"), (1, "b.mkv")):
         path = config.downloads_dir / str(rip) / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"x" * 10)
         video_rips.record_file(setup, rip, n, path, "main" if n == 0 else "extra", "t")
-    ids = asyncio.run(services.encode_all(rip, "fast"))
+    ids = asyncio.run(services.encode_all(rip, "2"))
     assert len(ids) == 2
-    assert [(r["title"], r["role"], r["preset"]) for r in encodes_of(setup)] == [(0, "main", "fast"), (1, "extra", "fast")]
-    assert asyncio.run(services.encode_all(rip, "fast")) == []  # both are still queued
+    assert [(r["title"], r["role"], r["preset_id"], r["preset_name"]) for r in encodes_of(setup)] == [
+        (0, "main", 2, "Fast"), (1, "extra", 2, "Fast")]
+    assert asyncio.run(services.encode_all(rip, "2")) == []  # both are still queued
 
 
 def test_encode_refused_after_raw_deleted(config, setup):
-    set_setting(setup, "encode_after_rip", "off")
+    presets.set_default_choice(setup, "off")
     services, rip = scanned(config, setup)
     run_until_done(config, setup, services, rip)
     video_rips.mark_raw_deleted(setup, rip, 0, "t")
-    assert asyncio.run(services.queue_encode(rip, 0, "standard")) is None
-    assert asyncio.run(services.queue_encode(rip, 9, "standard")) is None  # unknown file
+    assert asyncio.run(services.queue_encode(rip, 0, "1")) is None
+    assert asyncio.run(services.queue_encode(rip, 9, "1")) is None  # unknown file
     assert encodes_of(setup) == []
 
 
@@ -106,7 +108,7 @@ def filed(config, setup):
     out = config.downloads_dir / str(jid) / "film-out.mkv"
     out.write_bytes(b"out")
     enc = encodes.create(setup, rip_id=jid, title=0, role="main", source=raw, disc_type="dvd", source_seconds=60,
-                         source_bytes=3, source_audio=1, preset="standard", now="t")
+                         source_bytes=3, source_audio=1, preset_id=1, preset_name="Standard", now="t")
     set_enc_done(setup, enc, out, NOW - timedelta(hours=30))
     return Services(config), jid, raw, out, enc
 
@@ -136,7 +138,7 @@ def test_raw_deleted_after_keep_hours(filed, setup):
 def test_raw_kept_while_another_encode_queued(filed, setup):
     services, rip, raw, out, enc = filed
     assert encodes.create(setup, rip_id=rip, title=0, role="main", source=raw, disc_type="dvd", source_seconds=60,
-                          source_bytes=3, source_audio=1, preset="fast", now="t") is not None
+                          source_bytes=3, source_audio=1, preset_id=2, preset_name="Fast", now="t") is not None
     assert "waiting or running" in services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0)
     assert raw.exists()
 
@@ -179,8 +181,8 @@ def test_sweep_deletes_old_raws_only(filed, setup):
 
 def test_start_requeues_interrupted(config, setup, monkeypatch):
     enc = encodes.create(setup, rip_id=1, title=0, role="main", source=config.downloads_dir / "f.mkv",
-                         disc_type="dvd", source_seconds=60, source_bytes=3, source_audio=1, preset="standard",
-                         now="t")
+                         disc_type="dvd", source_seconds=60, source_bytes=3, source_audio=1, preset_id=1,
+                         preset_name="Standard", now="t")
     assert encodes.start(setup, enc, "t")  # left running by a crash
     seen = []
     monkeypatch.setattr(encodepool.EncodePool, "start",
@@ -194,6 +196,7 @@ def test_start_requeues_interrupted(config, setup, monkeypatch):
     asyncio.run(main())
     assert seen == ["queued"]
     assert encodes_of(setup)[0]["state"] == "queued"
+    assert all(r[0] for r in setup.execute("SELECT fingerprint FROM presets"))  # filled at start-up
 
 
 # -- review fixes ----------------------------------------------------------------
@@ -204,15 +207,15 @@ def test_queue_refused_without_scan_length(config, setup, filed):
     with setup:
         setup.execute("UPDATE encodes SET state = 'failed' WHERE id = ?", (enc,))
     # the fixture's disc has an empty scan: no length to check the encode against
-    result = asyncio.run(services.queue_encode_result(rip, 0, "standard"))
+    result = asyncio.run(services.queue_encode_result(rip, 0, "1"))
     assert result == (None, "The rip's scan is missing, so its length can't be checked; can't encode.")
     scan = {"titles": [{"number": 0, "seconds": 0, "audio": 1}]}
     with setup:
         setup.execute("UPDATE video_discs SET scan = ?", (json.dumps(scan),))
-    assert asyncio.run(services.queue_encode(rip, 0, "standard")) is None  # zero seconds
+    assert asyncio.run(services.queue_encode(rip, 0, "1")) is None  # zero seconds
     with setup:
         setup.execute("DELETE FROM video_discs")
-    assert asyncio.run(services.queue_encode(rip, 0, "standard")) is None  # no disc row
+    assert asyncio.run(services.queue_encode(rip, 0, "1")) is None  # no disc row
     assert [r["state"] for r in encodes_of(setup)] == ["failed"]
 
 
@@ -225,7 +228,7 @@ def test_queue_between_flag_and_unlink_is_refused(filed, setup, monkeypatch):
     real = Services._unlink_raw
 
     def racing_unlink(path):
-        seen.append(services._db(services._queue_encode, rip, 0, "fast"))  # a queue lands mid-delete
+        seen.append(services._db(services._queue_encode, rip, 0, "2"))  # a queue lands mid-delete
         real(path)
 
     monkeypatch.setattr(Services, "_unlink_raw", staticmethod(racing_unlink))

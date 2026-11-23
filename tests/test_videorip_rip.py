@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 import types
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -197,8 +198,10 @@ def test_move_never_overwrites_and_ignores_part(config, tmp_path):
 
 def test_parse_ffprobe():
     info = videofiles.parse_ffprobe((FIXTURES / "ffprobe_ok.json").read_text())
-    assert info == videofiles.MkvInfo(seconds=6730.04, video=1, audio=2, audio_channels=(6, 2), width=720, height=480,
-                                video_codec="mpeg2video", audio_codec="ac3")
+    assert [s.language for s in info.streams] == ["eng", "spa", "eng"]
+    assert replace(info, streams=()) == videofiles.MkvInfo(
+        seconds=6730.04, video=1, audio=2, audio_channels=(6, 2), width=720, height=480,
+        video_codec="mpeg2video", audio_codec="ac3")
 
 
 def test_attempts_feed_should_eject(config, setup):

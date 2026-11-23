@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import cd_rips, cdrip, coverart, db, drives, encodes, film_imports, filmimport, joblog, jobs, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
+from . import cd_rips, cdrip, coverart, db, drives, encodes, film_imports, filmimport, joblog, jobs, presets, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
 from .jellyfin import Jellyfin, RefreshDebouncer
 from .musicbrainz import MusicBrainz
 from .radarr import Radarr
@@ -59,15 +59,12 @@ def _configure_logging() -> None:
         logger.setLevel(logging.INFO)
 
 
-ENCODE_CHOICES = ("standard", "fast", "copy", "off")
-
-
 def _encode_preset_for(conn, rip_id: int) -> str:
-    """The rip's own encode choice, else the encode_after_rip setting."""
+    """The rip's own encode choice (a preset id or "off"), else the after-rip default."""
     row = conn.execute("SELECT encode_preset FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
-    if row is not None and row["encode_preset"] in ENCODE_CHOICES:
+    if row is not None and row["encode_preset"] and presets.parse_choice(conn, row["encode_preset"]) is None:
         return row["encode_preset"]
-    return settings.get(conn, "encode_after_rip")
+    return presets.default_choice(conn)
 
 
 class Services:
@@ -430,8 +427,12 @@ class Services:
 
     # -- encodes ---------------------------------------------------------------
 
-    def _queue_encode(self, conn, rip_id: int, title: int, preset: str) -> tuple[int | None, str | None]:
-        """(encode id, None) or (None, why it was refused)."""
+    def _queue_encode(self, conn, rip_id: int, title: int, choice: str) -> tuple[int | None, str | None]:
+        """(encode id, None) or (None, why it was refused). choice is a preset id as a string."""
+        error = presets.parse_choice(conn, choice, allow_off=False)
+        preset = presets.get_preset(conn, int(choice)) if error is None else None
+        if preset is None:
+            return None, presets.UNKNOWN
         rip = conn.execute("SELECT * FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
         entry = json.loads(rip["files"] or "{}").get(str(title)) if rip else None
         if entry is None:
@@ -457,33 +458,34 @@ class Services:
         encode_id = encodes.create(
             conn, rip_id=rip_id, title=title, role=entry.get("role", "title"), source=source,
             disc_type=disc["disc_type"], source_seconds=float(seconds), source_bytes=size,
-            source_audio=int(scanned.get("audio", -1)), preset=preset, now=utc_now(),
+            source_audio=int(scanned.get("audio", -1)), preset_id=preset.id, preset_name=preset.name,
+            now=utc_now(),
             check=lambda c: not video_rips.raw_deleted(c, rip_id, title))  # same transaction as the insert
         if encode_id is None:
             return None, "This file already has an encode waiting or running, or its raw rip was just deleted."
         return encode_id, None
 
-    async def queue_encode_result(self, rip_id: int, title: int, preset: str) -> tuple[int | None, str | None]:
+    async def queue_encode_result(self, rip_id: int, title: int, choice: str) -> tuple[int | None, str | None]:
         """Like queue_encode, but also says why it was refused (for the page)."""
-        encode_id, error = await asyncio.to_thread(self._db, self._queue_encode, rip_id, title, preset)
+        encode_id, error = await asyncio.to_thread(self._db, self._queue_encode, rip_id, title, choice)
         if encode_id is not None:
             self.encoder.wake()
             await self.encodes_changed()
         return encode_id, error
 
-    async def queue_encode(self, rip_id: int, title: int, preset: str) -> int | None:
+    async def queue_encode(self, rip_id: int, title: int, choice: str) -> int | None:
         """Queue an encode of one ripped file. None when refused (queue_encode_result says why):
         the raw is deleted or unknown, the scan is missing, or the file already has an encode active."""
-        return (await self.queue_encode_result(rip_id, title, preset))[0]
+        return (await self.queue_encode_result(rip_id, title, choice))[0]
 
-    def _queue_all(self, conn, rip_id: int, preset: str) -> list[int]:
+    def _queue_all(self, conn, rip_id: int, choice: str) -> list[int]:
         row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
         numbers = sorted(int(t) for t in json.loads(row["files"] or "{}")) if row else []
-        ids = [self._queue_encode(conn, rip_id, t, preset)[0] for t in numbers]
+        ids = [self._queue_encode(conn, rip_id, t, choice)[0] for t in numbers]
         return [i for i in ids if i is not None]
 
-    async def encode_all(self, rip_id: int, preset: str) -> list[int]:
-        ids = await asyncio.to_thread(self._db, self._queue_all, rip_id, preset)
+    async def encode_all(self, rip_id: int, choice: str) -> list[int]:
+        ids = await asyncio.to_thread(self._db, self._queue_all, rip_id, choice)
         if ids:
             self.encoder.wake()
             await self.encodes_changed()
@@ -504,6 +506,8 @@ class Services:
             return None, "The raw rip has been deleted, so it can't be encoded."
         if not Path(row["source"]).is_file():
             return None, "The raw rip is no longer on disk."
+        if row["preset_id"] is None or presets.get_preset(conn, row["preset_id"]) is None:
+            return None, presets.GONE
         new_id = encodes.retry(conn, encode_id, utc_now())
         if new_id is None:
             return None, "This file already has an encode waiting or running."
@@ -524,8 +528,8 @@ class Services:
         return await self.encoder.cancel(encode_id)
 
     def _set_encode_choice(self, conn, drive_id: str, preset: str) -> str | None:
-        if preset not in ENCODE_CHOICES:
-            return "Unknown preset."
+        if (error := presets.parse_choice(conn, preset)) is not None:
+            return error
         drive = conn.execute("SELECT media_state, disc_type FROM drives WHERE id = ?", (drive_id,)).fetchone()
         if drive is None:
             return "Unknown drive."
@@ -542,7 +546,7 @@ class Services:
         return None
 
     async def set_encode_choice(self, drive_id: str, preset: str) -> str | None:
-        """Choose how the disc in a drive is encoded (standard/fast/copy/off). Returns an error, or None."""
+        """Choose how the disc in a drive is encoded (a preset id or "off"). Returns an error, or None."""
         error = await asyncio.to_thread(self._db, self._set_encode_choice, drive_id, preset)
         if error is None:
             await self.drive_changed(drive_id)
@@ -920,6 +924,7 @@ class Services:
             count = jobs.mark_interrupted(conn, utc_now())
             encodes.mark_interrupted(conn, utc_now())  # a stale running row can survive a stop race
             encodes.requeue_interrupted(conn, utc_now())
+            presets.fill_fingerprints(conn)
             cd_rips.reconcile(conn, self.config.work_dir)
             for rip_id in video_rips.unsettled(conn):  # rips whose last job ended in the last run
                 video_rips.settle(conn, rip_id, self.config.work_dir, utc_now())

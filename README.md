@@ -82,7 +82,7 @@ Music/Various Artists/<Album> (<Year>)/01 - <Artist> - <Title>.flac (compilation
 Settings has a **DVD and Blu-ray** group:
 - **MakeMKV key:** paste the current beta key from the MakeMKV forum (it changes every month or two) or a purchased key. It is never shown again once saved.
 - **Shortest title to list:** titles shorter than this (default 120 s) are ignored in the scan.
-- **Track selection:** MakeMKV's default selection string (`app_DefaultSelectionString`). The default keeps English audio without commentary (or the only audio track if there is no English), plus English and forced subtitles. Change it only if you know the MakeMKV syntax.
+- **Track selection:** MakeMKV's default selection string (`app_DefaultSelectionString`). The default keeps every audio and subtitle track in every language, so a preset can pick any of them later. An upgrade changes the old English-only default to this one; a selection you edited by hand is left alone. Change it only if you know the MakeMKV syntax.
 
 What happens on insert: the disc is scanned and the **longest title** is taken as the main one. It rips straight away and the disc ejects when done, unless the disc is **held** for you to choose. A disc is held when:
 - the main title is unclear, or the disc looks like TV (several titles of similar length);
@@ -108,7 +108,7 @@ Every job (scans, rips, test jobs) keeps a log in `/config/logs/job-<id>.log`: w
 1. Insert a plain film DVD in each drive. It rips and ejects, and the MKV plays from downloads.
 2. Insert a Blu-ray with decoy playlists, if you have one. It is held, then rips after you pick a title.
 3. Tick an extra mid-rip. It lands in `extras/`, and the eject waits for it.
-4. Press Hold during a scan. Check one rip's tracks with `ffprobe`: English audio, English and forced subtitles, no commentary.
+4. Press Hold during a scan. Check one rip's tracks with `ffprobe`: every audio and subtitle language is there, commentary included.
 5. Cancel mid-rip. Restart the container mid-rip; Retry works.
 6. Re-insert a ripped disc: "Already ripped". Rip again works.
 7. Insert a disc too big for the remaining budget: "Waiting for cache space".
@@ -116,20 +116,20 @@ Every job (scans, rips, test jobs) keeps a log in `/config/logs/job-<id>.log`: w
 
 ### Encoding
 
-After a rip, the main title is encoded to HEVC, and the encode lands **beside the raw file** as `<name> - <Preset>.mkv` (for example `The Lego Movie_t01 - Standard.mkv`) in the rip's downloads folder. There are three presets (fixed in code, chosen per encode):
+After a rip, the main title is encoded to HEVC, and the encode lands **beside the raw file** as `<name> - <Preset>.mkv` (for example `The Lego Movie_t01 - Standard.mkv`) in the rip's downloads folder. Presets live on the **Presets** page (see below); you pick one per encode. Three come with the app:
 
 - **Standard:** HandBrake, x265 10-bit, preset `slow`, quality RF 20 for Blu-ray and RF 18 for DVD. Slow but small and clean; DVDs are also deinterlaced when combing is detected.
-- **Fast:** ffmpeg on the Intel GPU (`hevc_vaapi`, constant quality `fast_quality`, default 24). Much faster, larger files. DVDs are checked for interlacing first.
+- **Fast:** ffmpeg on the Intel GPU (`hevc_vaapi`, constant quality, starting at the value you had in the old `fast_quality` setting, default 24). Much faster, larger files. DVDs are checked for interlacing first.
 - **Copy only:** a lossless remux into a new MKV, with no re-encoding.
 
-Standard and Fast give one audio track, converted to E-AC-3: 5.1 at 640 kb/s when the source has 3 or more channels, otherwise stereo or mono at 224 kb/s. Every subtitle track, the chapters and the metadata are kept. No subtitle track is marked default (forced flags are kept), so Jellyfin doesn't switch one on by itself and burn it into the picture. Encodes run at the lowest CPU and disk priority.
+The seeded presets give one English audio track, converted to E-AC-3: 5.1 at 640 kb/s when the source has 3 or more channels, otherwise stereo or mono at 224 kb/s. Every English subtitle track, the chapters and the metadata are kept. No subtitle track is marked default (forced flags are kept), so Jellyfin doesn't switch one on by itself and burn it into the picture. Encodes run at the lowest CPU and disk priority.
 
 Settings has an **Encoding** group:
-- **encode_after_rip:** Standard, Fast, Copy only or Off (default Standard). A finished rip queues its encode on its own. To pick differently for one disc, use **Encode with** on its drive card while it scans or rips; titles that finish after a change use the new choice. The Films page shows each rip's choice.
 - **encode_slots:** encodes run at once, 1 or 2 (default 1). A change applies after the container restarts.
-- **fast_quality:** the Fast preset's quality number, 1 to 51, lower is better (default 24; tune it after a test encode).
 - **raw_keep_hours:** how long the raw file is kept after a good encode (default 24).
 - **encode_stall_minutes:** stop an encoder that prints nothing for this long (default 10).
+
+What a finished rip does next is set by **After ripping** on the Presets page. To pick differently for one disc, use **Encode with** on its drive card while it scans or rips; titles that finish after a change use the new choice. The Films page shows each rip's choice.
 
 Encodes queue behind the shutdown guard (a running encode holds shutdown like a rip, and an encode that would run past the grace period waits for the next session) and behind the work-area space check. Stopping the container mid-encode marks the encode interrupted and it restarts at the next boot.
 
@@ -142,7 +142,7 @@ Encodes queue behind the shutdown guard (a running encode holds shutdown like a 
 ### Testing step 6 on the server
 
 1. Encode The Lego Movie with Standard and Madagascar with Fast. Play both in Jellyfin.
-2. Check Fast's quality and size, and tune `fast_quality`.
+2. Check Fast's quality and size, and tune the quality in the Fast preset.
 3. Check Madagascar's Standard encode for combing (deinterlacing).
 4. Press **Delete raw now** on one film. Let another raw expire after `raw_keep_hours` (or set it to 0 temporarily).
 5. Stop the container mid-encode. The encode restarts at the next boot.
@@ -155,6 +155,40 @@ Encodes queue behind the shutdown guard (a running encode holds shutdown like a 
    docker exec disc-ripper rm -f /tmp/hb-test.mkv /tmp/ff-test.mkv
    ```
    Then copy them into `tests/fixtures/encode/` and check the parsers against them. Do this once for a DVD and once for a Blu-ray.
+
+### Presets
+
+The **Presets** page (`/presets`, in the nav) lists every preset with a plain summary, an estimate for a DVD and a Blu-ray, and **Edit**, **Copy** and **Delete**. **New preset** and **Copy** open the edit page; Copy starts from an existing preset. Rips keep every language on the disc; each preset decides which tracks go into its encode.
+
+**After ripping** at the top picks the preset a finished rip queues on its own, or Off. It replaces the old `encode_after_rip` setting.
+
+The edit page has three sections:
+- **Video:** the engine (HandBrake or ffmpeg), the mode (software, hardware or copy), the codec, quality for DVD and for Blu-ray (lower is better), speed (software only), a height cap (scales down only, never up), deinterlacing (auto is DVDs only, off, or always) and crop (off, or auto to cut the black bars).
+- **Audio:** the codec (E-AC-3, AC-3, AAC, Opus, or copy untouched), the channels (up to 5.1, stereo, or keep as is), bitrates for surround and for stereo, the languages in the order you want them, whether to keep the first track of each language or all of them, and whether to keep commentary. If no track matches your languages, the first audio track is kept and the log says so, so a film never ends up silent. Tracks with no language set count as a match.
+- **Subtitles:** all, forced only, or none, within the languages you list.
+
+Options the chosen engine and mode can't do are **greyed out**, with a short reason beside them. For example, hardware encoding has no speed, and copy mode greys out every video option.
+
+Every change redraws two **previews** (an example DVD and an example Blu-ray, each with a few audio and subtitle tracks). Each shows the exact command that would run, which tracks it keeps, and the estimate. The previews use the same code as real encodes, so the command shown is the one that runs.
+
+**Estimates** show size and time. A preset with no finished encodes shows a rough guess marked "(rough)". After a few encodes made with the same settings and disc type, it uses the average of the last five instead, and says how many ("from 4 encodes"). Changing a setting that affects the result starts the history again.
+
+**Editing** a preset applies to encodes that start afterwards, including ones already queued. Finished encodes keep the settings they were made with. Renaming doesn't rename old files.
+
+**Deleting** is refused while a queued or running encode, a drive's Encode with choice, a rip in progress, or After ripping uses the preset. At least one preset must always remain.
+
+A rip made before this update holds English tracks only. A preset asking for another language on it keeps the first audio track, and the Films page says so.
+
+### Testing the preset builder on the server
+
+1. Force Update the container.
+2. Open Presets and check the three seeds. Fast should show your old quality.
+3. Copy Standard as "Anime" with `jpn, eng` audio, and check the Blu-ray example preview keeps Japanese first.
+4. Rip a disc with a second language. The rip keeps it (check the log's track list).
+5. Encode with the new preset, and check the tracks in Jellyfin.
+6. Try a 720p cap preset, and check that Radarr imports a Blu-ray one as Bluray-720p (the cap applies to Blu-ray sources).
+7. Try crop auto on a 2.39:1 film.
+8. Try deleting a preset that's in use.
 
 ### Importing films
 
@@ -195,6 +229,8 @@ Encodes that finished before Radarr was set up aren't imported automatically. Us
 **Clean-up.** After an import, the ripper asks Jellyfin to refresh and checks every 5 minutes, for up to 24 hours, for the film. It counts as seen when Jellyfin has an item with the film's TMDb ID whose file name and size match the imported file (the name, not the whole path, because Jellyfin may mount the library elsewhere). Then the rip's downloads folder (raw, encodes and extras) is deleted and the Films page says "In Jellyfin; the rip's files were cleaned up." Without Jellyfin set up, the folder is deleted 24 hours after the import. Clean-up waits, and keeps the rip, if the library file is missing or still inside the rip folder: the page says "Check the library." The raw-file sweep leaves any rip that is being imported or was imported alone.
 
 ### Testing step 5 on the server
+
+(In this test the preset dropdown shows your preset names, such as Standard, rather than the old fixed three.)
 
 1. Open Radarr's Swagger page (`<radarr>/api/v3/…` docs) and check the endpoints in the design's Constraints.
 2. Check Radarr → Settings → Media Management → Recycling Bin is set to a folder under `/data`. Turn it on before replacing.

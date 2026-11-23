@@ -1,7 +1,7 @@
 import pytest
 
 from disc_ripper.filmid import (Candidate, clean_label, confident, folder_name, normalise,
-                                parse_ref, quality_name, score)
+                                parse_ref, score)
 
 
 def cand(title, runtime, tmdb_id=1, year=2014, folder=""):
@@ -59,14 +59,6 @@ def test_parse_ref():
     assert parse_ref("https://www.themoviedb.org/movie/10719-elf") == ("tmdb", "10719")
     assert parse_ref("elf") is None
     assert parse_ref("") is None
-
-
-def test_quality_name():
-    assert quality_name("dvd", "standard") == "DVD"
-    assert quality_name("dvd", "copy") == "DVD"
-    assert quality_name("bluray", "standard") == "Bluray-1080p"
-    assert quality_name("bluray", "fast") == "Bluray-1080p"
-    assert quality_name("bluray", "copy") == "Remux-1080p"
 
 
 def test_folder_name():

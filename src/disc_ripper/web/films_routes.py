@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
-from .. import db, encodes, encoding, film_imports, filmid, filmimport, filmundo, joblog, settings
+from .. import db, encodes, encoding, film_imports, filmid, filmimport, filmundo, joblog, presets, settings
 from ..clock import utc_now
 from ..radarr import RadarrError, to_candidate
 from .deps import templates
@@ -66,14 +66,13 @@ def _active_rows(conn: sqlite3.Connection) -> list[dict]:
     for row in [*encodes.running(conn), *encodes.queued(conn)]:
         item = dict(row)
         item["name"] = Path(row["source"]).name
-        item["preset_label"] = encoding.PRESET_LABEL.get(row["preset"], row["preset"])
+        item["preset_label"] = row["preset_name"]
         item["percent"] = int(round((row["progress"] or 0) * 100))
         if row["state"] == "queued":
-            seconds, rough = encoding.estimate_seconds(
-                row["source_seconds"], row["preset"], row["disc_type"],
-                encodes.recent_speeds(conn, row["preset"], row["disc_type"]))
-            item["estimate"] = encoding._hours_minutes(seconds)
-            item["rough"] = rough
+            est = encodes.estimate_for(conn, row)
+            if est is not None:
+                item["estimate"] = encoding._hours_minutes(est.seconds)
+                item["rough"] = est.rough_time
         rows.append(item)
     return rows
 
@@ -98,7 +97,7 @@ def _file_view(key: str, entry: dict, scan_titles: dict, rows: list[sqlite3.Row]
             size = None
     mine = [dict(r) for r in rows if str(r["title"]) == key]
     for r in mine:
-        r["preset_label"] = encoding.PRESET_LABEL.get(r["preset"], r["preset"])
+        r["preset_label"] = r["preset_name"]
         r["percent"] = int(round((r["progress"] or 0) * 100))
         r["output_name"] = Path(r["output"]).name if r["output"] else ""
         r["superseded"] = any(o["id"] > r["id"] for o in mine)  # a later attempt exists: no Retry
@@ -149,14 +148,13 @@ def _radarr_set_up(conn: sqlite3.Connection) -> bool:
     return bool(settings.get(conn, "radarr_url") and settings.get(conn, "radarr_api_key"))
 
 
-CHOICE_NAMES = {"standard": "Standard", "fast": "Fast", "copy": "Copy only", "off": "not encoded automatically"}
-
 
 def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, error: str | None = None,
                   notice: str | None = None, oob: bool = False) -> dict:
     now = now or datetime.now(timezone.utc)
     keep_hours = settings.get(conn, "raw_keep_hours")
-    default_choice = settings.get(conn, "encode_after_rip")
+    default_choice = presets.default_choice(conn)
+    choice_names = {**dict(presets.choices(conn)), "off": "not encoded automatically"}
     rips = []
     imports = {r["rip_id"]: _import_view(r) for r in conn.execute("SELECT * FROM film_imports")}
     for rip in conn.execute("SELECT * FROM video_rips ORDER BY rip_id DESC").fetchall():
@@ -182,11 +180,11 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
             "imp": imports.get(rip["rip_id"]), "starting": rip["rip_id"] in _STARTING,
             "can_encode_all": any(not f["deleted"] for f in views),
             # A rip with no choice of its own follows the setting only while it's still ripping.
-            "encode_with": CHOICE_NAMES.get(
+            "encode_with": choice_names.get(
                 rip["encode_preset"] or (default_choice if rip["state"] == "ripping" else ""), ""),
         })
     recent = [imports[r["rip_id"]] for r in film_imports.recent(conn)]
-    return {"active": _active_rows(conn), "rips": rips, "presets": encoding.PRESET_LABEL,
+    return {"active": _active_rows(conn), "rips": rips, "presets": [c for c in presets.choices(conn) if c[0] != "off"],
             "recent": recent, "radarr_set_up": _radarr_set_up(conn), "no_radarr": filmimport.NO_RADARR,
             "error": error, "notice": notice, "oob": oob}
 
@@ -247,8 +245,8 @@ async def _respond(request: Request, *, error: str | None = None, notice: str | 
     return HTMLResponse(html, status_code=status_code)
 
 
-def _preset_error(preset: str) -> str | None:
-    return None if preset in encoding.PRESETS else "Unknown preset."
+def _preset_error(conn, preset: str) -> str | None:
+    return presets.parse_choice(conn, preset, allow_off=False)
 
 
 # -- pages and actions ---------------------------------------------------------
@@ -263,7 +261,7 @@ async def films_page(request: Request):
 
 @router.post("/films/encode")
 async def encode_one(request: Request, rip_id: int = Form(...), title: int = Form(...), preset: str = Form(...)):
-    if (bad := _preset_error(preset)):
+    if (bad := await asyncio.to_thread(_with_conn, request, _preset_error, preset)):
         return await _respond(request, error=bad, status_code=400)
     encode_id, reason = await _services(request).queue_encode_result(rip_id, title, preset)
     if encode_id is None:
@@ -279,7 +277,7 @@ def _rip_titles(conn, rip_id: int) -> list[int]:
 
 @router.post("/films/encode-all")
 async def encode_all(request: Request, rip_id: int = Form(...), preset: str = Form(...)):
-    if (bad := _preset_error(preset)):
+    if (bad := await asyncio.to_thread(_with_conn, request, _preset_error, preset)):
         return await _respond(request, error=bad, status_code=400)
     numbers = await asyncio.to_thread(_with_conn, request, _rip_titles, rip_id)
     queued, reasons = 0, []
