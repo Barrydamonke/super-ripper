@@ -108,3 +108,27 @@ def test_delete_unused(client, conn):
 def test_after_ripping_default(client, conn):
     client.post("/presets/default", data={"choice": "off"})
     assert presets.default_choice(conn) == "off"
+
+
+def test_edit_form_wiring_and_ids(client):
+    import re
+    html = client.get("/presets/1").text
+    assert 'hx-post="/presets/preview"' in html and 'hx-trigger="change"' in html and 'hx-sync="this:replace"' in html
+    form = html.split('id="preset-form"')[1].split("</form>")[0]
+    controls = re.findall(r"<(?:input|select)\b[^>]*>", form)
+    visible = [c for c in controls if 'type="hidden"' not in c]
+    assert visible and all(re.search(r'\bid="f-\w+"', c) for c in visible)
+
+
+def test_speed_control_itself_is_disabled(client):
+    import re
+    r = client.post("/presets/preview", data=fast_form())
+    speed = re.search(r'<select[^>]*name="speed"[^>]*>', r.text).group(0)
+    assert "disabled" in speed
+
+
+def test_name_is_escaped_on_list(client, conn):
+    presets.create_preset(conn, "A(b)", presets.STANDARD, "2026-01-01T00:00:00+00:00")
+    conn.execute("UPDATE presets SET name = '<b>x</b>' WHERE name = 'A(b)'"); conn.commit()
+    t = client.get("/presets").text
+    assert "<b>x</b>" not in t and "&lt;b&gt;x&lt;/b&gt;" in t
