@@ -91,7 +91,7 @@ class PresetSettings:
             if key in off:
                 continue
             if key in ("quality_dvd", "quality_bluray"):
-                _int(key, v[key], 0, 51)
+                _int(key, v[key], 1 if v["mode"] == "hardware" else 0, 51)
             elif key in ("bitrate_surround", "bitrate_stereo"):
                 top = 640 if key == "bitrate_surround" and v["audio_codec"] == "ac3" else 1536
                 _int(key, v[key], 64, top)
@@ -185,10 +185,11 @@ def validate_name(name: str) -> str:
 
 
 def fingerprint(s: PresetSettings) -> str:
-    """A short hash of the settings that matter; greyed-out fields don't count."""
-    off = disabled_fields(s)
-    payload = {k: v for k, v in s.to_dict().items() if k not in off}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
+    """A short hash of the settings that matter; greyed-out fields are reset to Standard's values first."""
+    standard = STANDARD.to_dict()
+    payload = {k: (standard[k] if k in disabled_fields(s) else v) for k, v in s.to_dict().items()}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
 
 def language_name(code: str) -> str:
@@ -248,18 +249,20 @@ def _form_int(field: str, raw: str) -> int:
         raise PresetError(field, "Must be a whole number") from None
 
 
-_SEED_AUDIO = {"audio_codec": "eac3", "audio_channels": "max51", "bitrate_surround": 640, "bitrate_stereo": 224,
-               "audio_languages": ["eng"], "audio_tracks": "first_per_language", "keep_commentary": False,
-               "subtitles": "all", "subtitle_languages": ["eng"]}
-_STANDARD_SEED = {"engine": "handbrake", "mode": "software", "codec": "x265_10bit", "quality_dvd": 18,
+def _seed_audio() -> dict:
+    return {"audio_codec": "eac3", "audio_channels": "max51", "bitrate_surround": 640,
+            "bitrate_stereo": 224, "audio_languages": ["eng"], "audio_tracks": "first_per_language",
+            "keep_commentary": False, "subtitles": "all", "subtitle_languages": ["eng"]}
+def _standard_seed() -> dict:
+    return {"engine": "handbrake", "mode": "software", "codec": "x265_10bit", "quality_dvd": 18,
                   "quality_bluray": 20, "speed": "slow", "max_height": None, "deinterlace": "auto",
-                  "crop": "off", **_SEED_AUDIO}
+                  "crop": "off", **_seed_audio()}
 
 SEEDS: dict[int, tuple[str, dict]] = {
-    1: ("Standard", _STANDARD_SEED),
-    2: ("Fast", {**_STANDARD_SEED, "engine": "ffmpeg", "mode": "hardware", "codec": "hevc_vaapi",
+    1: ("Standard", _standard_seed()),
+    2: ("Fast", {**_standard_seed(), "engine": "ffmpeg", "mode": "hardware", "codec": "hevc_vaapi",
                  "quality_dvd": 24, "quality_bluray": 24}),
-    3: ("Copy only", {**_STANDARD_SEED, "engine": "ffmpeg", "mode": "copy", "audio_codec": "copy",
+    3: ("Copy only", {**_standard_seed(), "engine": "ffmpeg", "mode": "copy", "audio_codec": "copy",
                       "audio_tracks": "all"}),
 }
 

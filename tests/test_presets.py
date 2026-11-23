@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 import pytest
 
 from disc_ripper.presets import (HARDWARE_CODECS, SEEDS, PresetError, PresetSettings, disabled_choices,
@@ -34,6 +37,7 @@ def test_seeds_round_trip():
     ({"audio_languages": ["english"]}, "audio_languages"),
     ({"subtitles": "all", "subtitle_languages": []}, "subtitle_languages"),
     ({"bogus": 1}, "bogus"),
+    ({"engine": "ffmpeg", "mode": "hardware", "codec": "hevc_vaapi", "quality_dvd": 0}, "quality_dvd"),
 ])
 def test_bad_combinations_rejected(change, field):
     d = {**SEEDS[1][1], **change}
@@ -88,3 +92,13 @@ def test_from_form_keeps_omitted_disabled_fields():
 
 def test_language_name():
     assert language_name("jpn") == "Japanese" and language_name("und") == "unlabelled" and language_name("xho") == "xho"
+
+
+def test_fingerprint_follows_the_rule():
+    copy = PresetSettings.from_dict(SEEDS[3][1])
+    d = {**PresetSettings.from_dict(SEEDS[1][1]).to_dict(), **{k: v for k, v in copy.to_dict().items()
+                                                              if k not in disabled_fields(copy)}}
+    expected = hashlib.sha256(json.dumps(d, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
+    assert fingerprint(copy) == expected
+    other = PresetSettings.from_dict({**SEEDS[3][1], "quality_bluray": 30, "speed": "fast"})
+    assert fingerprint(other) == expected
