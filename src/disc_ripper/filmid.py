@@ -6,6 +6,8 @@ import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
+from .presets import PresetSettings
+
 _DROP_TOKENS = {"ws", "fs", "pal", "ntsc", "r2", "uk", "us"}
 _DISC_TOKEN = re.compile(r"^(disc_?\d+|d\d)$", re.IGNORECASE)
 _TITLE_OK = 0.9
@@ -99,6 +101,15 @@ def quality_name(disc_type: str, preset: str) -> str:
     if disc_type == "dvd":
         return "DVD"
     return "Remux-1080p" if preset == "copy" else "Bluray-1080p"
+
+
+def quality_for(disc_type: str, s: PresetSettings) -> str:
+    """The Radarr quality name for what this preset produces."""
+    if disc_type == "dvd":
+        return "DVD"
+    if s.mode == "copy":
+        return "Remux-1080p"
+    return f"Bluray-{s.max_height or 1080}p"
 
 
 def folder_name(candidate: Candidate) -> str:

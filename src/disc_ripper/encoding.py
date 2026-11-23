@@ -464,6 +464,63 @@ def estimate_size(source_bytes: int, preset: str) -> int:
     return int(source_bytes * SIZE_FACTOR[preset])
 
 
+# Defaults used until there is history. Speed is seconds of film per second.
+BASE_SPEED = {"software": (1.0, 0.4), "hardware": (6.0, 2.0), "copy": (30.0, 15.0)}  # (DVD, Blu-ray)
+SPEED_FACTOR = {"ultrafast": 6, "superfast": 5, "veryfast": 4, "faster": 3, "fast": 2.2,
+                "medium": 1.6, "slow": 1, "slower": 0.5, "veryslow": 0.25}
+CODEC_SPEED = {"x264": 2.5, "x265": 1.1, "x265_10bit": 1.0}
+# Output bytes / source bytes at the reference quality: (factor, DVD quality, Blu-ray quality).
+BASE_SIZE = {"software": (0.35, 18, 20), "hardware": (0.5, 24, 24)}
+H264_SIZE = 1.5
+SMALL_CAP_HEIGHT = 720
+SMALL_CAP_SPEED = 2.0
+SMALL_CAP_SIZE = 0.5
+
+
+@dataclass(frozen=True)
+class Estimate:
+    seconds: float
+    bytes: int
+    rough_time: bool
+    rough_size: bool
+
+
+def _small_cap(s: PresetSettings, disc_type: str) -> bool:
+    return disc_type != "dvd" and s.max_height is not None and s.max_height <= SMALL_CAP_HEIGHT
+
+
+def _default_speed(s: PresetSettings, disc_type: str) -> float:
+    dvd, bluray = BASE_SPEED[s.mode]
+    speed = dvd if disc_type == "dvd" else bluray
+    if s.mode == "software":
+        speed *= SPEED_FACTOR[s.speed] * CODEC_SPEED[s.codec]
+    if s.mode != "copy" and _small_cap(s, disc_type):
+        speed *= SMALL_CAP_SPEED
+    return speed
+
+
+def _default_size_factor(s: PresetSettings, disc_type: str) -> float:
+    if s.mode == "copy":
+        return 1.0
+    factor, ref_dvd, ref_bluray = BASE_SIZE[s.mode]
+    ref, q = (ref_dvd, s.quality_dvd) if disc_type == "dvd" else (ref_bluray, s.quality_bluray)
+    factor *= 2 ** ((ref - q) / 6)
+    if s.codec in ("x264", "h264_vaapi"):
+        factor *= H264_SIZE
+    if _small_cap(s, disc_type):
+        factor *= SMALL_CAP_SIZE
+    return min(factor, 1.0)
+
+
+def estimate(s: PresetSettings, disc_type: str, source_seconds: float, source_bytes: int,
+             speeds: list[float], sizes: list[float]) -> Estimate:
+    """Time and size for one encode: from history when there is any, else from the settings."""
+    speed = sum(speeds) / len(speeds) if speeds else _default_speed(s, disc_type)
+    size = (int(source_seconds * sum(sizes) / len(sizes)) if sizes
+            else int(source_bytes * _default_size_factor(s, disc_type)))
+    return Estimate(source_seconds / speed, size, not speeds, not sizes)
+
+
 def _hours_minutes(seconds: float) -> str:
     minutes = int(round(seconds / 60))
     hours, minutes = divmod(minutes, 60)
