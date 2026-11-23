@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Presets - Disc Ripper{% endblock %}
+{% block content %}
+<h1>Presets</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post" action="/presets/default" class="inline">
+  <label>After ripping
+    <select name="choice">
+      {% for value, label in choices %}<option value="{{ value }}"{% if value == default %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <button type="submit">Save</button>
+</form>
+<p class="hint">What happens to a film as soon as it has been ripped. A drive's own Encode dropdown overrides this.</p>
+<p><a href="/presets/new">New preset</a></p>
+{% for c in cards %}
+<div class="film-rip preset-card">
+  <h2>{{ c.preset.name }}</h2>
+  <div>{{ c.video }}</div>
+  <div>{{ c.audio }}</div>
+  {% for label, text in c.estimates %}<div class="hint">{{ label }}, 2-hour film: {{ text }}</div>{% endfor %}
+  <div>
+    <a href="/presets/{{ c.preset.id }}">Edit</a> ·
+    <a href="/presets/new?from={{ c.preset.id }}">Copy</a>
+    <form method="post" action="/presets/{{ c.preset.id }}/delete" class="inline"><button type="submit">Delete</button></form>
+    {# Test on a rip... goes here #}
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

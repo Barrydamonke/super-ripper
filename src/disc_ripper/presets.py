@@ -270,6 +270,108 @@ SEEDS: dict[int, tuple[str, dict]] = {
 STANDARD = PresetSettings.from_dict(SEEDS[1][1])
 
 
+# -- the preview on the Presets page ----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Example:
+    label: str
+    disc_type: str
+    seconds: int
+    bytes: int
+    width: int
+    height: int
+    sar: tuple[int, int]
+    dar: float
+    streams: tuple
+
+
+def _streams(*specs) -> tuple:
+    from .videofiles import Stream
+
+    counts = {"audio": 0, "subtitle": 0}
+    out = []
+    for kind, lang, *rest in specs:
+        extra = dict(rest[0]) if rest else {}
+        out.append(Stream(kind=kind, index=counts[kind], language=lang, **extra))
+        counts[kind] += 1
+    return tuple(out)
+
+
+DVD = Example("DVD", "dvd", 6600, 6_000_000_000, 720, 480, (32, 27), 720 * 32 / (480 * 27), _streams(
+    ("audio", "eng", {"channels": 6, "codec": "ac3"}), ("audio", "eng", {"channels": 2, "codec": "ac3"}),
+    ("audio", "fra", {"channels": 6, "codec": "ac3"}),
+    ("audio", "eng", {"channels": 2, "codec": "ac3", "title": "Commentary", "comment": True}),
+    ("subtitle", "eng"), ("subtitle", "fra"), ("subtitle", "eng", {"forced": True})))
+BLURAY = Example("Blu-ray", "bluray", 7800, 30_000_000_000, 1920, 1080, (1, 1), 1920 / 1080, _streams(
+    ("audio", "eng", {"channels": 8, "codec": "truehd"}), ("audio", "eng", {"channels": 6, "codec": "ac3"}),
+    ("audio", "jpn", {"channels": 6, "codec": "dts"}),
+    ("audio", "eng", {"channels": 2, "codec": "ac3", "title": "Commentary", "comment": True}),
+    ("subtitle", "eng"), ("subtitle", "jpn")))
+EXAMPLES = (DVD, BLURAY)
+
+_PREVIEW_CROP = {"dvd": (704, 480, 8, 0), "bluray": (1920, 800, 0, 140)}
+_CHANNEL_LABEL = {1: "mono", 2: "stereo", 6: "5.1", 7: "6.1", 8: "7.1"}
+
+
+def _channels(n: int) -> str:
+    return _CHANNEL_LABEL.get(n, f"{n}ch")
+
+
+def estimate_text(conn: sqlite3.Connection, s: PresetSettings, disc_type: str, seconds: float, size: int) -> str:
+    """"≈ 6.1 GB, 3 h 40 min (rough)" for a film of this length and size, using the preset's history."""
+    from . import encodes, encoding
+
+    speeds, sizes = encodes.history(conn, fingerprint(s), disc_type)
+    est = encoding.estimate(s, disc_type, seconds, size, speeds, sizes)
+    basis = "rough" if est.rough_time or est.rough_size else f"from {len(speeds)} encodes"
+    return f"≈ {est.bytes / 1e9:.1f} GB, {encoding._hours_minutes(est.seconds)} ({basis})"
+
+
+def _keeps(plan, s: PresetSettings) -> str:
+    from . import encoding
+
+    parts = []
+    for t in plan.audio:
+        who = language_name(t.language) + (" commentary" if encoding._is_commentary(t) else "")
+        if s.mode == "copy" or s.audio_codec == "copy":
+            what = f"{_channels(t.channels)}, copied"
+        else:
+            out, kbps = encoding.audio_out(t.channels, s)
+            shown = f" {_channels(out)}" if out != t.channels else ""
+            what = f"{_channels(t.channels)} → {AUDIO_LABEL[s.audio_codec]}{shown} {kbps} kb/s"
+        parts.append(f"audio {t.index + 1} ({who}, {what})")
+    audio = ", ".join(parts) or "no audio"
+    subs = f"subtitles {', '.join(str(t.index + 1) for t in plan.subtitles)}" if plan.subtitles else "no subtitles"
+    return f"{audio}; {subs}"
+
+
+def preview(conn: sqlite3.Connection, s: PresetSettings, name: str) -> list[dict]:
+    """For each example disc: the command this preset would run, what it keeps, notes and an estimate."""
+    import shlex
+    from pathlib import PurePosixPath
+
+    from . import encoding
+
+    out = []
+    for ex in EXAMPLES:
+        plan = encoding.pick_tracks(ex.streams, s)
+        crop = _PREVIEW_CROP[ex.disc_type] if encoding.needs_cropdetect(s) else None
+        argv = encoding.build_argv(
+            s, PurePosixPath("/data/downloads/disc-ripper/1/title_t00.mkv"),
+            PurePosixPath(f"/work/encode-1/title_t00 - {name}.mkv"), disc_type=ex.disc_type, plan=plan,
+            source_height=ex.height, interlaced=False, crop=crop, sar=ex.sar)
+        notes = list(plan.notes)
+        if encoding.needs_idet(s, ex.disc_type):
+            notes.append("deinterlaced if the check finds interlacing")
+        if encoding.needs_cropdetect(s):
+            notes.append("crop found by cropdetect")
+        out.append({"label": ex.label, "command": shlex.join([*encoding.priority_prefix(), *argv]),
+                    "keeps": _keeps(plan, s), "notes": notes,
+                    "estimate": estimate_text(conn, s, ex.disc_type, ex.seconds, ex.bytes)})
+    return out
+
+
 # -- the presets table ------------------------------------------------------------------------------
 
 UNKNOWN = "Unknown preset."

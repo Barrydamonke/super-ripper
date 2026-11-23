@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Preset - Disc Ripper{% endblock %}
+{%- macro note(field) -%}
+  {%- if field in disabled %} <small class="hint">{{ disabled[field] }}</small>{% endif -%}
+  {%- if errors.get(field) %} <span class="error">{{ errors[field] }}</span>{% endif -%}
+{%- endmacro -%}
+{%- macro pick(field, label, options, names=none) -%}
+<label>{{ label }}
+  <select name="{{ field }}"{% if field in disabled %} disabled{% endif %}>
+    {% for o in options %}{% set val = "none" if o is none else o|string %}
+    {% set why = blocked.get(field, {}).get(val) %}
+    <option value="{{ val }}"{% if v[field] == val %} selected{% endif %}{% if why %} disabled{% endif %}>
+      {{- (names[o] if names and o in names else ("No limit" if o is none else val)) }}{% if why %} ({{ why }}){% endif -%}
+    </option>
+    {% endfor %}
+  </select>{{ note(field) }}
+</label>
+{%- endmacro -%}
+{%- macro num(field, label, low, high) -%}
+<label>{{ label }}
+  <input type="number" name="{{ field }}" value="{{ v[field] }}" min="{{ low }}" max="{{ high }}"{% if field in disabled %} disabled{% endif %}>{{ note(field) }}
+</label>
+{%- endmacro -%}
+{% block content %}
+<h1>{% if preset_id %}Edit preset{% else %}New preset{% endif %}</h1>
+<p><a href="/presets">Back to presets</a></p>
+<form id="preset-form" method="post" action="/presets/save"
+      hx-post="/presets/preview" hx-trigger="change" hx-target="#preset-body" hx-select="#preset-body" hx-swap="outerHTML">
+  <div id="preset-body">
+    {% if preset_id %}<input type="hidden" name="id" value="{{ preset_id }}">{% endif %}
+    {% if from_id %}<input type="hidden" name="from" value="{{ from_id }}">{% endif %}
+    {% if errors %}<p class="error">Nothing was saved. Fix the field marked below.</p>{% endif %}
+    <label>Name <input type="text" name="name" value="{{ v.name }}" maxlength="40" required>{{ note("name") }}</label>
+
+    <h2>Video</h2>
+    {{ pick("engine", "Encoder program", ENGINES, {"handbrake": "HandBrake", "ffmpeg": "ffmpeg"}) }}
+    {{ pick("mode", "Mode", MODES, {"software": "Software", "hardware": "Hardware (VAAPI)", "copy": "Copy, no re-encode"}) }}
+    {{ pick("codec", "Codec", CODECS, CODEC_LABEL) }}
+    {{ num("quality_dvd", "Quality for DVDs (lower is better)", 0, 51) }}
+    {{ num("quality_bluray", "Quality for Blu-rays (lower is better)", 0, 51) }}
+    {{ pick("speed", "Speed", SPEEDS) }}
+    {{ pick("max_height", "Largest picture height", MAX_HEIGHTS) }}
+    {{ pick("deinterlace", "Deinterlace", DEINTERLACE) }}
+    {{ pick("crop", "Crop black bars", CROP) }}
+
+    <h2>Audio</h2>
+    {{ pick("audio_codec", "Audio codec", AUDIO_CODECS, AUDIO_LABEL) }}
+    {{ pick("audio_channels", "Channels", AUDIO_CHANNELS, {"max51": "Up to 5.1", "stereo": "Stereo", "keep": "Keep as is"}) }}
+    {{ num("bitrate_surround", "Surround bitrate (kb/s)", 64, 1536) }}
+    {{ num("bitrate_stereo", "Stereo bitrate (kb/s)", 64, 1536) }}
+    <label>Audio languages <input type="text" name="audio_languages" value="{{ v.audio_languages }}">{{ note("audio_languages") }}</label>
+    <div class="hint">Three-letter codes in order of preference, such as eng, jpn.</div>
+    {{ pick("audio_tracks", "Tracks to keep", AUDIO_TRACKS, {"first_per_language": "First of each language", "all": "All"}) }}
+    <label><input type="checkbox" name="keep_commentary"{% if v.keep_commentary %} checked{% endif %}> Keep commentary tracks</label>
+
+    <h2>Subtitles</h2>
+    {{ pick("subtitles", "Subtitles", SUBTITLES, {"all": "All", "forced_only": "Forced only", "none": "None"}) }}
+    <label>Subtitle languages <input type="text" name="subtitle_languages" value="{{ v.subtitle_languages }}">{{ note("subtitle_languages") }}</label>
+
+    <h2>Preview</h2>
+    {% include "_preset_preview.html" %}
+  </div>
+  <button type="submit">Save preset</button>
+</form>
+{% endblock %}

@@ -19,6 +19,7 @@
       {%- set music_count = request.app.state.services.music_waiting() %}
       <a href="/music">Music{% if music_count %} ({{ music_count }}){% endif %}</a>
       <a href="/films">Films</a>
+      <a href="/presets">Presets</a>
       <a href="/drives">Drives</a>
       <a href="/settings">Settings</a>
       <form method="post" action="/logout" class="inline"><button type="submit">Log out</button></form>
