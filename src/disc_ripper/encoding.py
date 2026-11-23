@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -161,6 +162,161 @@ def encode_argv(preset: str, source: Path, output: Path, *, disc_type: str, audi
         return [*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-y", "-i", src, "-map", "0", "-c", "copy",
                 "-disposition:s", "-default", "-progress", "pipe:1", "-nostats", out]
     raise ValueError(f"unknown preset {preset!r}")
+
+
+_HB_AUDIO = {"eac3": "eac3", "ac3": "ac3", "aac": "av_aac", "opus": "opus", "copy": "copy"}
+_FF_AUDIO = {"eac3": "eac3", "ac3": "ac3", "aac": "aac", "opus": "libopus", "copy": "copy"}
+_HB_MIXDOWN = {1: "mono", 2: "stereo", 6: "5point1", 7: "6point1", 8: "7point1"}
+_FF_SOFT = {"x265_10bit": "libx265", "x265": "libx265", "x264": "libx264"}
+
+
+def _hb_argv(s: PresetSettings, src: str, out: str, disc_type: str, plan: TrackPlan,
+             window: tuple[float, float] | None) -> list[str]:
+    dvd = disc_type == "dvd"
+    quality = s.quality_dvd if dvd else s.quality_bluray
+    argv = [*handbrake_prefix(), "-i", src, "-o", out, "--format", "av_mkv", "--markers",
+            "--encoder", s.codec, "--encoder-preset", s.speed, "--quality", str(quality),
+            "--crop-mode", "auto" if s.crop == "auto" else "none", "--auto-anamorphic"]
+    if s.deinterlace == "always":
+        argv += ["--decomb"]
+    elif s.deinterlace == "auto" and dvd:
+        argv += ["--comb-detect", "--decomb", "--detelecine"]
+    if s.max_height:
+        argv += ["--maxHeight", str(s.max_height)]
+    if not plan.audio:
+        argv += ["--audio", "none"]
+    else:
+        argv += ["--audio", ",".join(str(t.index + 1) for t in plan.audio),
+                 "--aencoder", ",".join([_HB_AUDIO[s.audio_codec]] * len(plan.audio))]
+        if s.audio_codec != "copy":
+            outs = [audio_out(t.channels, s) for t in plan.audio]
+            argv += ["--ab", ",".join(str(k) for _, k in outs),
+                     "--mixdown", ",".join(_HB_MIXDOWN.get(c, "5point1") for c, _ in outs)]
+    argv += ["--subtitle", ",".join(str(t.index + 1) for t in plan.subtitles) if plan.subtitles else "none",
+             "--subtitle-burned=none"]
+    if window:
+        argv += ["--start-at", f"seconds:{window[0]:g}", "--stop-at", f"seconds:{window[1]:g}"]
+    return argv + ["--json"]
+
+
+def _ff_video(s: PresetSettings, disc_type: str, source_height: int, interlaced: bool,
+              crop: tuple[int, int, int, int] | None) -> list[str]:
+    vaapi = s.mode == "hardware"
+    quality = s.quality_dvd if disc_type == "dvd" else s.quality_bluray
+    deint = s.deinterlace == "always" or (s.deinterlace == "auto" and interlaced)
+    cap = s.max_height if s.max_height and source_height > s.max_height else None
+    cropf = f"crop={crop[0]}:{crop[1]}:{crop[2]}:{crop[3]}" if crop else None
+    if vaapi:
+        chain = [cropf, "format=nv12,hwupload", "deinterlace_vaapi" if deint else None,
+                 f"scale_vaapi=w=-2:h={cap}" if cap else None]
+    else:
+        chain = ["bwdif" if deint else None, cropf, f"scale=-2:{cap}" if cap else None]
+    vf = ",".join(c for c in chain if c)
+    argv = ["-vf", vf] if vf else []
+    if vaapi:
+        return argv + ["-c:v", s.codec, "-rc_mode", "CQP", "-qp", str(quality)]
+    argv += ["-c:v", _FF_SOFT[s.codec], "-preset", s.speed, "-crf", str(quality)]
+    if s.codec == "x265_10bit":
+        argv += ["-pix_fmt", "yuv420p10le"]
+    if s.codec != "x264":
+        argv += ["-x265-params", "log-level=error"]
+    return argv
+
+
+def _ff_argv(s: PresetSettings, src: str, out: str, disc_type: str, plan: TrackPlan, source_height: int,
+             interlaced: bool, crop: tuple[int, int, int, int] | None, sar: tuple[int, int],
+             window: tuple[float, float] | None) -> list[str]:
+    copy = s.mode == "copy"
+    vaapi = s.mode == "hardware"
+    argv = [*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-y"]
+    if vaapi:
+        argv += ["-vaapi_device", RENDER_NODE]
+    if window:
+        argv += ["-ss", f"{window[0]:g}", "-t", f"{window[1]:g}"]
+    argv += ["-i", src, "-map", "0:v:0"]
+    for t in plan.audio:
+        argv += ["-map", f"0:a:{t.index}"]
+    for t in plan.subtitles:
+        argv += ["-map", f"0:s:{t.index}"]
+    argv += ["-map_chapters", "0"]
+    argv += ["-c", "copy"] if copy else _ff_video(s, disc_type, source_height, interlaced, crop)
+    if not plan.audio:
+        argv += ["-an"]
+    elif not copy:
+        argv += ["-c:a", _FF_AUDIO[s.audio_codec]]
+        if s.audio_codec != "copy":
+            for i, t in enumerate(plan.audio):
+                channels, kbps = audio_out(t.channels, s)
+                argv += [f"-b:a:{i}", f"{kbps}k", f"-ac:a:{i}", str(channels)]
+    for i in range(len(plan.audio)):
+        argv += [f"-disposition:a:{i}", "default" if i == 0 else "0"]
+    if not plan.subtitles:
+        argv += ["-sn"]
+    else:
+        if not copy:
+            argv += ["-c:s", "copy"]
+        argv += ["-disposition:s", "-default"]  # keep "forced", drop "default"
+    if vaapi and sar != (1, 1):  # VAAPI encoders can drop the aspect ratio (FFmpeg tickets #8376, #6276)
+        kind = "h264" if s.codec == "h264_vaapi" else "hevc"
+        argv += ["-bsf:v", f"{kind}_metadata=sample_aspect_ratio={sar[0]}/{sar[1]}"]
+    return argv + ["-progress", "pipe:1", "-nostats", out]
+
+
+def build_argv(s: PresetSettings, source: Path, output: Path, *, disc_type: str, plan: TrackPlan,
+               source_height: int, interlaced: bool = False, crop: tuple[int, int, int, int] | None = None,
+               sar: tuple[int, int] = (1, 1), window: tuple[float, float] | None = None) -> list[str]:
+    """The command for a preset's settings, without the priority prefix."""
+    src, out = str(source), str(output)
+    if s.engine == "handbrake":
+        return _hb_argv(s, src, out, disc_type, plan, window)
+    return _ff_argv(s, src, out, disc_type, plan, source_height, interlaced, crop, sar, window)
+
+
+def needs_idet(s: PresetSettings, disc_type: str) -> bool:
+    return s.engine == "ffmpeg" and s.mode != "copy" and s.deinterlace == "auto" and disc_type == "dvd"
+
+
+def forced_interlaced(s: PresetSettings) -> bool:
+    return s.deinterlace == "always"
+
+
+def needs_cropdetect(s: PresetSettings) -> bool:
+    return s.engine == "ffmpeg" and s.mode != "copy" and s.crop == "auto"
+
+
+def cropdetect_argv(source: Path, start_seconds: float, seconds: float = 20) -> list[str]:
+    return [*ffmpeg_prefix(), "-hide_banner", "-nostdin", "-ss", f"{start_seconds:.0f}", "-t", f"{seconds:.0f}",
+            "-i", str(source), "-map", "0:v:0", "-vf", "cropdetect=round=2", "-f", "null", "-"]
+
+
+_CROP = re.compile(r"crop=(\d+):(\d+):(\d+):(\d+)")
+
+
+def parse_cropdetect(text: str) -> tuple[int, int, int, int] | None:
+    found = _CROP.findall(text)
+    return tuple(int(n) for n in found[-1]) if found else None  # type: ignore[return-value]
+
+
+def pick_crop(found: list[tuple | None], width: int, height: int) -> tuple | None:
+    """The box the samples agree on (within 8 px), or None when they disagree or it is the full frame."""
+    if not found or any(f is None for f in found):
+        return None
+    for a in found:
+        for b in found:
+            if any(abs(x - y) > 8 for x, y in zip(a, b)):
+                return None
+    winner = Counter(found).most_common(1)[0][0]
+    return None if winner == (width, height, 0, 0) else winner
+
+
+def expected_dar(source_dar: float, width: int, height: int, crop: tuple | None) -> float:
+    if not crop:
+        return source_dar
+    return source_dar * (crop[0] / crop[1]) / (width / height)
+
+
+def progress_parser(s: PresetSettings, source_seconds: float):
+    return HandBrakeProgress() if s.engine == "handbrake" else FfmpegProgress(source_seconds)
 
 
 def clear_default_subtitles_argv(source: Path, output: Path) -> list[str]:
