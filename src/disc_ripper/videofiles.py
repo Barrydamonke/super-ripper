@@ -19,6 +19,18 @@ class MoveCancelled(Exception):
     """The copy was stopped by a cancel; src is untouched and nothing is left in downloads."""
 
 
+@dataclass(frozen=True)
+class Stream:
+    kind: str  # "audio" or "subtitle"
+    index: int  # 0-based within its kind, in file order
+    language: str  # lower-case; "und" when missing
+    title: str = ""
+    comment: bool = False
+    forced: bool = False
+    channels: int = 0
+    codec: str = ""
+
+
 @dataclass
 class MkvInfo:
     seconds: float
@@ -31,6 +43,7 @@ class MkvInfo:
     height: int = 0
     video_codec: str = ""
     audio_codec: str = ""
+    streams: tuple[Stream, ...] = ()
 
 
 def _ratio(text) -> tuple[int, int] | None:
@@ -39,6 +52,22 @@ def _ratio(text) -> tuple[int, int] | None:
     except ValueError:
         return None
     return (n, d) if n > 0 and d > 0 else None
+
+
+def _streams(raw: list[dict]) -> tuple[Stream, ...]:
+    counts = {"audio": 0, "subtitle": 0}
+    out = []
+    for s in raw:
+        kind = s.get("codec_type")
+        if kind not in counts:
+            continue
+        tags, disp = s.get("tags") or {}, s.get("disposition") or {}
+        out.append(Stream(
+            kind, counts[kind], str(tags.get("language") or "und").lower(), str(tags.get("title") or ""),
+            bool(disp.get("comment")), bool(disp.get("forced")),
+            int(s.get("channels") or 0) if kind == "audio" else 0, str(s.get("codec_name") or "")))
+        counts[kind] += 1
+    return tuple(out)
 
 
 def parse_ffprobe(text: str) -> MkvInfo:
@@ -58,6 +87,7 @@ def parse_ffprobe(text: str) -> MkvInfo:
         height=int(video[0].get("height") or 0) if video else 0,
         video_codec=str(video[0].get("codec_name") or "") if video else "",
         audio_codec=str(audio[0].get("codec_name") or "") if audio else "",
+        streams=_streams(streams),
     )
 
 
