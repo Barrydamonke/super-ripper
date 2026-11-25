@@ -42,10 +42,10 @@ def setup(config, add_sg, monkeypatch):
     conn.close()
 
 
-def scan_job(conn, from_insert=True):
+def scan_job(conn, from_insert=True, disc_type="dvd"):
     return jobs.enqueue(
         conn, "serial:A", "scan_video",
-        {"sr_name": "sr0", "disc_type": "dvd", "label": "FILM_LABEL", "from_insert": from_insert},
+        {"sr_name": "sr0", "disc_type": disc_type, "label": "FILM_LABEL", "from_insert": from_insert},
         uses_drive=True, now="t",
     )
 
@@ -93,10 +93,61 @@ def test_scan_saves_titles_and_autostarts(config, setup):
 
 def test_scan_decoy_is_held(config, setup, monkeypatch):
     monkeypatch.setenv("FAKE_MAKEMKV_INFO", "info_bluray_decoy.txt")
-    j = scan_job(setup)
-    run(config, Services(config), finished(setup, j))
+    j = scan_job(setup, disc_type="bluray")
+    services = Services(config)
+    services.dvd_decoy_wait = 0.05
+    run(config, services, finished(setup, j))
     disc = video_rips.disc_in_drive(setup, "serial:A")
-    assert any("same length" in r for r in json.loads(disc["held"]))
+    [reason] = json.loads(disc["held"])
+    assert "same length" in reason and "rips at" not in reason
+    assert not services._dvd_waits and rip_jobs(setup) == []  # a Blu-ray waits for the owner
+
+
+def _dvd_decoy(config, setup, monkeypatch, during_wait=None):
+    """A DVD whose two long titles are within 3%: held, then the longest rips after the wait."""
+    monkeypatch.setenv("FAKE_MAKEMKV_INFO", "info_bluray_decoy.txt")
+    j = scan_job(setup, disc_type="dvd")
+    services = Services(config)
+    services.dvd_decoy_wait = 0.3
+    seen = {}
+
+    def until():
+        if jobs.get(setup, j)["state"] not in ("done", "failed", "cancelled"):
+            return False
+        if "disc" not in seen:
+            seen["disc"] = video_rips.disc_in_drive(setup, "serial:A")
+            assert services._dvd_waits, "no wait was scheduled"
+            if during_wait:
+                during_wait()
+        return not services._dvd_waits
+
+    run(config, services, until)
+    disc = seen["disc"]
+    [reason] = json.loads(disc["held"])
+    assert "same length" in reason and "rips at" in reason
+    return disc
+
+
+def test_dvd_decoy_rips_longest_after_wait(config, setup, monkeypatch):
+    disc = _dvd_decoy(config, setup, monkeypatch)
+    [rip] = rip_jobs(setup)
+    longest = max(json.loads(disc["scan"])["titles"], key=lambda t: (t["seconds"], t["size"]))
+    params = json.loads(rip["params"])
+    assert (params["role"], params["title"]) == ("main", longest["number"])
+
+
+def test_dvd_decoy_wait_respects_hold(config, setup, monkeypatch):
+    def hold():
+        setup.execute("UPDATE drives SET video_hold = 1")
+        setup.commit()
+    _dvd_decoy(config, setup, monkeypatch, during_wait=hold)
+    assert rip_jobs(setup) == []
+
+
+def test_dvd_decoy_wait_respects_eject(config, setup, monkeypatch):
+    def eject():
+        drives.set_media(setup, "serial:A", "empty", None, "", "t2")
+    _dvd_decoy(config, setup, monkeypatch, during_wait=eject)
     assert rip_jobs(setup) == []
 
 

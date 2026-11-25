@@ -59,6 +59,9 @@ def _configure_logging() -> None:
         logger.setLevel(logging.INFO)
 
 
+DVD_DECOY_WAIT_SECONDS = 300  # a DVD held only for two same-length titles rips its longest after this
+
+
 def _encode_preset_for(conn, rip_id: int) -> str:
     """The rip's own encode choice (a preset id or "off"), else the after-rip default."""
     row = conn.execute("SELECT encode_preset FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
@@ -95,6 +98,8 @@ class Services:
         self._schedule_error: str | None = None
         self._import_locks: dict[int, asyncio.Lock] = {}
         self._import_tasks: set[asyncio.Task] = set()
+        self.dvd_decoy_wait: float = DVD_DECOY_WAIT_SECONDS
+        self._dvd_waits: set[asyncio.Task] = set()
         self._films_push: asyncio.Task | None = None
         self._films_dirty = False
 
@@ -292,15 +297,22 @@ class Services:
 
     def _start_video_rip(self, conn, drive_id: str, fingerprint: str, main: int | None,
                          scan_job_id: int | None = None, extras: list[int] | None = None,
-                         again: bool = False) -> int | None:
+                         again: bool = False, after_wait: bool = False) -> int | None:
         conn.execute("BEGIN IMMEDIATE")
         try:
             disc = conn.execute("SELECT * FROM video_discs WHERE fingerprint = ?", (fingerprint,)).fetchone()
-            drive = conn.execute("SELECT sr_name, video_hold, encode_choice FROM drives WHERE id = ?",
-                                 (drive_id,)).fetchone()
+            drive = conn.execute(
+                "SELECT sr_name, video_hold, encode_choice, media_state FROM drives WHERE id = ?",
+                (drive_id,)).fetchone()
             if disc is None or drive is None:
                 conn.rollback()
                 return None
+            if after_wait:  # the DVD wait is over: only if the same disc is still in and not held
+                current = video_rips.disc_in_drive(conn, drive_id)
+                if (drive["video_hold"] or drive["media_state"] != "disc" or current is None
+                        or current["fingerprint"] != fingerprint):
+                    conn.rollback()
+                    return None
             by_number = {t["number"]: t for t in json.loads(disc["scan"])["titles"]}
             wanted = [] if main is None else [main]
             if main is not None and main in (extras or []):
@@ -333,7 +345,7 @@ class Services:
             conn.execute(
                 "INSERT INTO video_rips (rip_id, fingerprint, state, main_title, encode_preset, created_at, updated_at) "
                 "VALUES (?, ?, 'ripping', ?, ?, ?, ?)", (rip_id, fingerprint, main, drive["encode_choice"], now, now))
-            if scan_job_id is None:  # a manual start lifts the hold
+            if scan_job_id is None and not after_wait:  # a manual start lifts the hold
                 conn.execute("UPDATE drives SET video_hold = 0 WHERE id = ?", (drive_id,))
             conn.commit()
         except BaseException:
@@ -341,13 +353,27 @@ class Services:
             raise
         return rip_id
 
+    def rip_dvd_later(self, drive_id: str, fingerprint: str, main: int) -> None:
+        """After dvd_decoy_wait, rip the main title of a DVD held only for same-length titles,
+        unless the owner started a rip, pressed Hold or took the disc out in the meantime."""
+        async def later():
+            await asyncio.sleep(self.dvd_decoy_wait)
+            rip_id = await self.start_video_rip(drive_id, fingerprint, main=main, extras=[], again=False,
+                                                after_wait=True)
+            outcome = f"queued rip #{rip_id}" if rip_id else "nothing started (held, ejected or already ripping)"
+            log.info("video: DVD wait over on %s: %s", drive_id, outcome)
+
+        task = asyncio.get_running_loop().create_task(later())
+        self._dvd_waits.add(task)
+        task.add_done_callback(self._dvd_waits.discard)
+
     async def start_video_rip(self, drive_id: str, fingerprint: str, *, main: int | None, extras: list[int],
-                              again: bool, scan_job_id: int | None = None) -> int | None:
+                              again: bool, scan_job_id: int | None = None, after_wait: bool = False) -> int | None:
         """Queue the main title then the extras (or every ticked title as a peer when there is no
         main). None when refused: a rip is active, the disc is already ripped (without again),
         or a title isn't on the disc."""
         rip_id = await asyncio.to_thread(self._db, self._start_video_rip, drive_id, fingerprint, main,
-                                         scan_job_id, extras, again)
+                                         scan_job_id, extras, again, after_wait)
         if rip_id is None:
             return None
         log.info("video: queued rip #%s on %s", rip_id, drive_id)
