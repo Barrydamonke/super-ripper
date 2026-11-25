@@ -59,7 +59,14 @@ def _read(conn):
     return key, selection, minlength, settings.get(conn, "makemkv_stall_minutes")
 
 
-def _decide(conn, drive_id, disc_type, label, scan, minlength, from_insert, downloads_dir, work_dir, now):
+def dvd_waits_out(disc_type: str, reasons: list[str]) -> bool:
+    """A DVD held only because two titles are about the same length rips its longest title after a
+    wait: on a DVD that is usually two cuts of the film rather than a decoy (the owner's rule)."""
+    return disc_type == "dvd" and reasons == [titles.DECOY_REASON]
+
+
+def _decide(conn, drive_id, disc_type, label, scan, minlength, from_insert, downloads_dir, work_dir, now,
+            dvd_wait_seconds: float = 0):
     fp = makemkv.fingerprint(disc_type, label, scan.titles)
     blocking = video_rips.blocking_rip(conn, fp, downloads_dir, work_dir)
     hold = conn.execute("SELECT video_hold FROM drives WHERE id = ?", (drive_id,)).fetchone()
@@ -70,6 +77,11 @@ def _decide(conn, drive_id, disc_type, label, scan, minlength, from_insert, down
         already_ripped=f"downloads/{blocking['rip_id']}/" if blocking is not None else None,
         from_insert=from_insert,
     )
+    if dvd_waits_out(disc_type, reasons):
+        main = titles.main_title(scan.titles)
+        at = (datetime.now().astimezone() + timedelta(seconds=dvd_wait_seconds)).strftime("%H:%M")
+        reasons = [f"{titles.DECOY_REASON}: the longest title (#{main.number}) rips at {at} "
+                   "unless you choose or press Hold"]
     payload = {"label": scan.label, "titles": [dataclasses.asdict(t) for t in scan.titles]}
     video_rips.save_scan(conn, fp, disc_type, label, payload, minlength, reasons, drive_id, now)
     return fp, reasons
@@ -98,15 +110,18 @@ async def run_scan_video(ctx: runner.JobContext) -> None:
         hint = makemkv.update_hint(scan.messages)
         raise RuntimeError(last + (" " + hint if hint else ""))
 
+    wait = getattr(ctx.services, "dvd_decoy_wait", 0)
     fp, reasons = await ctx.db(
         _decide, ctx.drive_id, disc_type, label, scan, minlength, bool(params.get("from_insert")),
-        ctx.config.downloads_dir, ctx.config.work_dir, utc_now(),
+        ctx.config.downloads_dir, ctx.config.work_dir, utc_now(), wait,
     )
     log.info("video: scanned %r on %s: %d titles, held=%s", label, ctx.drive_id, len(scan.titles), reasons)
     main = titles.main_title(scan.titles)
     if not reasons:
         await ctx.services.start_video_rip(ctx.drive_id, fp, main=main.number, extras=[], again=False,
                                           scan_job_id=ctx.job_id)
+    elif len(reasons) == 1 and reasons[0].startswith(titles.DECOY_REASON + ":"):
+        ctx.services.rip_dvd_later(ctx.drive_id, fp, main.number)
     await ctx.report(1.0, "Scanned")
     drive_changed = getattr(ctx.services, "drive_changed", None)
     if drive_changed is not None:

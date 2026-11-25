@@ -15,6 +15,7 @@ PLAY_ALL_TOLERANCE = 0.10
 MIN_EPISODES = 3
 
 _ACTIVE = {"queued", "waiting_space", "running"}
+DECOY_REASON = "two titles of about the same length (decoy playlists?)"
 
 
 def main_title(titles: list[Title]) -> Title | None:
@@ -63,7 +64,7 @@ def hold_reasons(
     reasons: list[str] = []
     main = main_title(titles)
     if main is not None and is_unclear(titles, main):
-        reasons.append("two titles of about the same length (decoy playlists?)")
+        reasons.append(DECOY_REASON)
     if looks_like_tv(titles):
         reasons.append("looks like a TV disc")
     if hold_pressed:

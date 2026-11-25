@@ -85,7 +85,7 @@ Settings has a **DVD and Blu-ray** group:
 - **Track selection:** MakeMKV's default selection string (`app_DefaultSelectionString`). The default keeps every audio and subtitle track in every language, so a preset can pick any of them later. An upgrade changes the old English-only default to this one; a selection you edited by hand is left alone. Change it only if you know the MakeMKV syntax.
 
 What happens on insert: the disc is scanned and the **longest title** is taken as the main one. It rips straight away and the disc ejects when done, unless the disc is **held** for you to choose. A disc is held when:
-- the main title is unclear, or the disc looks like TV (several titles of similar length);
+- the main title is unclear, or the disc looks like TV (several titles of similar length). A **DVD** held only because two titles are about the same length (usually two cuts of the film) waits 5 minutes, then rips the longest one. The card shows the time. Pick a title, press Hold or eject before then to stop it. A container restart during the wait leaves the disc held. A Blu-ray stays held until you choose, because decoy playlists are common there;
 - you pressed **Hold** during the scan, or while the main-title rip was still queued;
 - **auto-start** is off in Settings;
 - it was already ripped (the card says "Already ripped" and offers Rip again);
