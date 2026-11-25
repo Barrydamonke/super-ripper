@@ -238,3 +238,42 @@ def test_disc_leaving_fires_on_remove(config, setup):
     asyncio.run(m.poll_once())  # sr0's disc came out
     asyncio.run(m.poll_once())
     assert removed == ["serial:A"]
+
+
+def _removals(config, statuses):
+    fakes = {"sr0": FakeDrive(statuses), "sr1": FakeDrive(["empty"])}
+    removed = []
+
+    async def on_remove(drive_id):
+        removed.append(drive_id)
+
+    m = media.MediaMonitor(config, RecordingNotifier(), drive_factory=lambda p: fakes[p.name], on_remove=on_remove)
+    m.probe = lambda drive: drive.probe_result
+    asyncio.run(m.poll_once(first=True))
+    for _ in range(len(statuses) - 1):
+        asyncio.run(m.poll_once())
+    return removed
+
+
+def test_read_glitch_does_not_count_as_removal(config, setup):
+    # A drive that briefly can't report (a failed status call) still has the same disc in.
+    assert _removals(config, ["disc", "unknown", "disc", "disc"]) == []
+
+
+def test_glitch_keeps_disc_state_and_no_second_insert(config, setup):
+    fakes = {"sr0": FakeDrive(["disc", "unknown", "disc"]), "sr1": FakeDrive(["empty"])}
+    inserts = []
+    m = monitor(config, fakes, RecordingNotifier(), inserts)
+    asyncio.run(m.poll_once(first=True))
+    asyncio.run(m.poll_once())
+    assert row(setup, "serial:A")["media_state"] == "disc"
+    asyncio.run(m.poll_once())
+    assert inserts == [] and fakes["sr0"].status_calls == 3
+
+
+def test_removal_after_glitch_still_fires(config, setup):
+    assert _removals(config, ["disc", "unknown", "tray_open", "empty"]) == ["serial:A"]
+
+
+def test_timeout_does_not_count_as_removal(config, setup):
+    assert _removals(config, ["disc", TimeoutError(), "disc"]) == []

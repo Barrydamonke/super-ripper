@@ -113,6 +113,11 @@ class MediaMonitor:
             state = "unknown"
         if state is _BUSY:
             return  # someone else is using the drive; look again next round
+        if state == "unknown" and target.previous == "disc" and not first:
+            # A timeout or a failed status call says nothing about the disc: it is almost always
+            # still in. Treating it as a removal cancelled the drive's queued rips.
+            log.info("media: %s did not report a state; keeping 'disc'", target.drive_id)
+            return
         disc_type: str | None = None
         label = ""
         inserted = state == "disc" and (first or target.previous != "disc")
