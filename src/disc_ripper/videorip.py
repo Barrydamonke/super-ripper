@@ -37,8 +37,11 @@ def scan_env(config) -> dict:
 STALL_UNIT_SECONDS = 60  # the stall setting is in minutes; tests shrink this
 
 
+STALLED_PREFIX = "MakeMKV stopped responding"
+
+
 def stalled_message(minutes: int) -> str:
-    return (f"MakeMKV stopped responding: it printed nothing for {minutes} minutes, so it was stopped. "
+    return (f"{STALLED_PREFIX}: it printed nothing for {minutes} minutes, so it was stopped. "
             "This is a known MakeMKV problem with some drives on Linux. Press Retry; if it happens again, "
             "eject and re-insert the disc. The job's log has MakeMKV's last messages.")
 
