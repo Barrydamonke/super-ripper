@@ -59,6 +59,8 @@ def _configure_logging() -> None:
         logger.setLevel(logging.INFO)
 
 
+AUTO_RETRY_SECONDS = 180  # a stalled MakeMKV job is tried again after this…
+AUTO_RETRY_MAX = 2  # …this many times, before it waits for the owner's Retry
 DVD_DECOY_WAIT_SECONDS = 300  # a DVD held only for two same-length titles rips its longest after this
 
 
@@ -100,6 +102,8 @@ class Services:
         self._import_tasks: set[asyncio.Task] = set()
         self.dvd_decoy_wait: float = DVD_DECOY_WAIT_SECONDS
         self._dvd_waits: set[asyncio.Task] = set()
+        self.auto_retry_wait: float = AUTO_RETRY_SECONDS
+        self._auto_retries: set[asyncio.Task] = set()
         self._films_push: asyncio.Task | None = None
         self._films_dirty = False
 
@@ -740,6 +744,71 @@ class Services:
         """The runner's hook: a job finished, or a queued one was cancelled. A rip_title job
         settles its rip once nothing of it is pending (ripped, move_failed or failed)."""
         await asyncio.to_thread(self._db, self._settle_for_job, job_id)
+        await self._maybe_auto_retry(job_id)
+
+    def _plan_auto_retry(self, conn, job_id: int) -> bool:
+        """A scan or rip that failed because MakeMKV went silent gets another go (up to
+        AUTO_RETRY_MAX): note it on the failed job so the card says when."""
+        row = jobs.get(conn, job_id)
+        if row is None or row["state"] != "failed" or row["kind"] not in ("scan_video", "rip_title"):
+            return False
+        if not (row["error"] or "").startswith(videorip.STALLED_PREFIX):
+            return False
+        tries = int(json.loads(row["params"]).get("auto_retry", 0))
+        if tries >= AUTO_RETRY_MAX:
+            return False
+        at = (datetime.now().astimezone() + timedelta(seconds=self.auto_retry_wait)).strftime("%H:%M")
+        note = f" Retrying automatically at {at} (try {tries + 2} of {AUTO_RETRY_MAX + 1})."
+        with conn:
+            conn.execute("UPDATE jobs SET error = error || ? WHERE id = ?", (note, job_id))
+        return True
+
+    def _do_auto_retry(self, conn, job_id: int) -> int | None:
+        """Queue the retry, unless the owner acted on the drive meanwhile or the disc came out."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = jobs.get(conn, job_id)
+            params = json.loads(row["params"])
+            # Anything queued on the drive since the failure (Retry pressed, another disc): leave it.
+            newer = conn.execute("SELECT 1 FROM jobs WHERE drive_id = ? AND id > ? AND created_at > ?",
+                                 (row["drive_id"], job_id, row["finished_at"])).fetchone()
+            drive = conn.execute("SELECT media_state, disc_label FROM drives WHERE id = ?",
+                                 (row["drive_id"],)).fetchone()
+            same_disc = drive is not None and drive["media_state"] == "disc"
+            if same_disc and row["kind"] == "rip_title":
+                current = video_rips.disc_in_drive(conn, row["drive_id"])
+                same_disc = current is not None and current["fingerprint"] == params.get("fingerprint")
+            elif same_disc:
+                same_disc = drive["disc_label"] == params.get("label", "")
+            if newer or not same_disc:
+                conn.rollback()
+                return None
+            params["auto_retry"] = int(params.get("auto_retry", 0)) + 1
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return jobs.enqueue(conn, row["drive_id"], row["kind"], params, needs_bytes=row["needs_bytes"],
+                            uses_drive=bool(row["uses_drive"]), now=utc_now())
+
+    async def _maybe_auto_retry(self, job_id: int) -> None:
+        if not await asyncio.to_thread(self._db, self._plan_auto_retry, job_id):
+            return
+        row = await asyncio.to_thread(self._db, jobs.get, job_id)
+        await self.drive_changed(row["drive_id"])
+
+        async def later():
+            await asyncio.sleep(self.auto_retry_wait)
+            new_id = await asyncio.to_thread(self._db, self._do_auto_retry, job_id)
+            log.info("jobs: automatic retry of #%s: %s", job_id,
+                     f"queued #{new_id}" if new_id else "skipped (the drive was used or the disc came out)")
+            if new_id is not None:
+                self.wake(row["drive_id"])
+                await self.drive_changed(row["drive_id"])
+
+        task = asyncio.get_running_loop().create_task(later())
+        self._auto_retries.add(task)
+        task.add_done_callback(self._auto_retries.discard)
 
     def _eject_target(self, conn, job_id: int) -> tuple[str, str] | None:
         """(drive_id, sr_name) if cancelling this job left its disc's rip finished: eject then."""

@@ -97,7 +97,7 @@ Where rips land: `/data/downloads/disc-ripper/<rip_id>/`, with extras in `extras
 
 When the beta key or version expires, rips fail with an "Update MakeMKV" message. Paste the new beta key in Settings, or rebuild the image with a newer version (below).
 
-- **Stop a silent MakeMKV after** (default 10 minutes): MakeMKV 2.0 on Linux sometimes stalls with LG drives, using a full CPU core and printing nothing. If it is silent this long, the app stops it and the job fails with "MakeMKV stopped responding". Press **Retry**; if it happens again, eject and re-insert the disc. MakeMKV prints progress all the way through a rip, so a working rip is never stopped by this.
+- **Stop a silent MakeMKV after** (default 10 minutes): MakeMKV 2.0 on Linux sometimes stalls with LG drives, using a full CPU core and printing nothing. If it is silent this long, the app stops it and the job fails with "MakeMKV stopped responding". The app retries it by itself 3 minutes later, up to 2 more times, and the failed job's box says when. It skips the retry if you have pressed Retry, queued something else on that drive, or taken the disc out. After that, press **Retry** yourself, or eject and re-insert the disc. Only one MakeMKV at a time does its start-up drive scan, because two discs inserted together could hang one of them. MakeMKV prints progress all the way through a rip, so a working rip is never stopped by this.
 
 ### Job logs
 

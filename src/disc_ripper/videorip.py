@@ -37,19 +37,71 @@ def scan_env(config) -> dict:
 STALL_UNIT_SECONDS = 60  # the stall setting is in minutes; tests shrink this
 
 
+STALLED_PREFIX = "MakeMKV stopped responding"
+
+
 def stalled_message(minutes: int) -> str:
-    return (f"MakeMKV stopped responding: it printed nothing for {minutes} minutes, so it was stopped. "
+    return (f"{STALLED_PREFIX}: it printed nothing for {minutes} minutes, so it was stopped. "
             "This is a known MakeMKV problem with some drives on Linux. Press Retry; if it happens again, "
             "eject and re-insert the disc. The job's log has MakeMKV's last messages.")
 
 
+STARTUP_GATE_SECONDS = 120  # longest one MakeMKV may keep the other drive's MakeMKV waiting
+
+
+def _startup_lock(services) -> asyncio.Lock:
+    """One lock per Services (and so per event loop) for MakeMKV's start-up drive scan."""
+    lock = getattr(services, "_makemkv_startup_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        services._makemkv_startup_lock = lock
+    return lock
+
+
+class _StartupGate:
+    """Every makemkvcon first scans all the drives ("Scanning CD-ROM devices"). Two doing that at
+    once (discs inserted together) can leave one silent for good, so only one at a time may: the
+    gate opens for the next when this one lists the drives (a DRV: line), exits, or after
+    STARTUP_GATE_SECONDS."""
+
+    def __init__(self, lock: asyncio.Lock):
+        self.lock = lock
+        self.held = False
+        self.timer: asyncio.TimerHandle | None = None
+
+    async def acquire(self, log) -> None:
+        if self.lock.locked():
+            log.write("waiting for the other drive's MakeMKV to finish scanning the drives")
+        await self.lock.acquire()
+        self.held = True
+        self.timer = asyncio.get_running_loop().call_later(STARTUP_GATE_SECONDS, self.release)
+
+    def release(self) -> None:
+        if self.timer is not None:
+            self.timer.cancel()
+            self.timer = None
+        if self.held:
+            self.held = False
+            self.lock.release()
+
+
 async def _run_makemkv(ctx, argv: list[str], on_line, stall_minutes: int) -> int:
     """Run makemkvcon for a job, giving up if it goes silent (see makemkv_stall_minutes)."""
+    gate = _StartupGate(_startup_lock(ctx.services))
+
+    async def line(text: str) -> None:
+        if gate.held and text.startswith("DRV:"):
+            gate.release()
+        await on_line(text)
+
+    await gate.acquire(ctx.log)
     try:
-        return await ctx.run_process(argv, cwd=ctx.config.work_dir, on_line=on_line, env=scan_env(ctx.config),
+        return await ctx.run_process(argv, cwd=ctx.config.work_dir, on_line=line, env=scan_env(ctx.config),
                                      idle_timeout=stall_minutes * STALL_UNIT_SECONDS)
     except runner.ProcessStalled:
         raise RuntimeError(stalled_message(stall_minutes)) from None
+    finally:
+        gate.release()
 
 
 def _read(conn):
