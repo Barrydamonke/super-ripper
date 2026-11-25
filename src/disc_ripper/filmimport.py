@@ -278,16 +278,41 @@ class Flow:
     async def _step_extras(self) -> None:
         row = self.row()
         folder = Path(row["new_path"]).parent / "extras"
-        copied = []
+        copied = json.loads(row["extras"] or "[]")  # a resumed step keeps what it already copied
         for src in self._extra_sources():
-            dest = folder / src.name
-            if dest.exists():
-                self.log.write(f"extras: {dest.name} already exists, skipped")
+            if self._already_copied(src, copied):
+                self.log.write(f"extras: {src.name} was already copied")
                 continue
+            dest = self._free_name(folder, src.name)
+            if dest.name != src.name:
+                self.log.write(f"extras: {src.name} is already taken in the folder; using {dest.name}")
             await asyncio.to_thread(self._copy, src, dest)
             self.log.write(f"extras: copied {src} -> {dest}")
             copied.append(str(dest))
+            self.set(extras=copied)  # after each file, so Undo and a resume know about it
         self.set(extras=copied)
+
+    @staticmethod
+    def _free_name(folder: Path, name: str) -> Path:
+        """name, or "<stem> (2).mkv", "(3)"… if a file of that name is already there."""
+        dest = folder / name
+        n = 2
+        while dest.exists():
+            dest = folder / f"{Path(name).stem} ({n}){Path(name).suffix}"
+            n += 1
+        return dest
+
+    @staticmethod
+    def _already_copied(src: Path, copied: list[str]) -> bool:
+        """One of our earlier copies is this file: the same name (or a " (n)" of it) and size."""
+        size = src.stat().st_size
+        stem, suffix = src.stem, src.suffix
+        for done in map(Path, copied):
+            same_name = done.name == src.name or (
+                done.suffix == suffix and done.stem.startswith(f"{stem} (") and done.stem.endswith(")"))
+            if same_name and done.is_file() and done.stat().st_size == size:
+                return True
+        return False
 
     @staticmethod
     def _copy(src: Path, dest: Path) -> None:

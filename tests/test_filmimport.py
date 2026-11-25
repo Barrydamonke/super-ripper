@@ -248,11 +248,25 @@ def test_extras_copied_into_extras_folder(config, setup, tmp_path):
     row = row_of(setup, rip)
     assert row["state"] == "imported", row["error"]
     assert (existing / "title_t01.mkv").read_bytes() == b"keep"  # never overwritten
+    renamed = existing / "title_t01 (2).mkv"
+    assert renamed.read_bytes() == (folder / "title_t01.mkv").read_bytes()  # a clashing name gets " (2)"
     assert (existing / "bonus.mkv").read_bytes() == b"e" * 200  # the extra's encode, not its raw
     assert not (existing / "title_t02.mkv").exists()
     assert (folder / "title_t01.mkv").exists()  # copied: the source stays
-    assert json.loads(row["extras"]) == [str(existing / "bonus.mkv")]  # the skipped name is not ours
-    assert "already exists" in import_log(config, rip)
+    assert json.loads(row["extras"]) == [str(renamed), str(existing / "bonus.mkv")]  # only ours
+    assert "already taken" in import_log(config, rip)
+
+
+def test_extras_step_resumes_without_copying_twice(config, setup, tmp_path):
+    rip, _ = make_rip(setup, config, extras=[(1, "title_t01.mkv"), (2, "title_t02.mkv")])
+    services, fake = services_with(config, tmp_path)
+    asyncio.run(filmimport.run_import(services, rip))
+    extras_dir = fake.root / "The Lego Movie (2014)" / "extras"
+    first = sorted(p.name for p in extras_dir.iterdir())
+    # As if the step had been interrupted after copying and runs again on resume.
+    film_imports.update(setup, rip, NOW, state="failed", step="extras")
+    assert asyncio.run(filmimport.retry_import(services, rip)) is None
+    assert sorted(p.name for p in extras_dir.iterdir()) == first == ["title_t01.mkv", "title_t02.mkv"]
 
 
 def test_encode_done_triggers_import(config, setup, tmp_path):
