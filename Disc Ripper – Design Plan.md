@@ -1,6 +1,45 @@
 # Disc Ripper – Design Plan
 
-Nov 13, 2026 · @Joseph · updated Nov 16, 2026
+Nov 13, 2026 · @Joseph · updated Nov 26, 2026
+
+## Where the project is now (Nov 26, 2026)
+
+This plan was written before any code. The sections below still describe the full vision. Where the built app differs, a **Built:** note in that section says how. Each step's detailed design is in `docs/superpowers/specs/`, and `README.md` describes the app as it works today.
+
+| Step | Status |
+| --- | --- |
+| 1. Skeleton | Done |
+| 2. Detection, queues, shutdown guard | Done |
+| 3. Audio CD rip | Done |
+| 4. DVD and Blu-ray rip | Done |
+| 5. Identification and import | **Films only** (Radarr). Sonarr, TV and a duplicate check at insert are not built. |
+| 6. Encoding | Done: both engines, encode pool, guard estimates, and a **preset builder** with greying, command preview and history estimates. **Test encodes on samples** are not built yet. |
+| 7. Replace and second versions | **Replace is done** (built in step 5, with its safeguards and folder normalisation). Second versions and keep lossless are not built. |
+| 8. Audio CD burning | Not started |
+| 9. Polish | Extras are done (copied into the film's `extras` folder). TV episode mapping is not built. |
+| Data discs to ISO (ddrescue) | Not started |
+
+**Order changed:** encoding (6) was built before identification and import (5), because the owner wanted every rip encoded before anything went into the library.
+
+**Main ways the built app differs from this plan** (details in the sections below):
+
+- **When identification happens.** Films are identified after the disc is ripped and encoded, not at insert. Discs are never held for a duplicate. When Radarr already has the film, the import waits for the owner's OK before replacing it (setting "Ask before replacing").
+- **Where rips go.**
+  - DVD and Blu-ray rips are written straight into `/data/downloads/disc-ripper/<rip>/.partial/<job>/` and renamed into place, so a Blu-ray needs its size on the cache once, not twice. CD rips and encodes still use `/work`.
+  - Raw rips are deleted as soon as an encode of them passes its check (setting "Keep raw rips for", default 0 hours).
+  - A film's whole rip folder is deleted once Jellyfin shows the imported file.
+- **Choosing the main title.**
+  - The longest title is the main one; Radarr's runtime is not used.
+  - A disc is held when another title is within 3% of the longest one. On a **DVD** held only for that reason, the longest title rips by itself after 5 minutes.
+- **MakeMKV robustness.**
+  - A MakeMKV that prints nothing for 10 minutes is stopped, and retried by itself after 3 minutes, up to twice.
+  - Only one MakeMKV at a time does its start-up drive scan, because two together could hang.
+  - A drive's brief "unknown" reading no longer cancels its queue.
+- **Presets.**
+  - Presets are rows in the database, edited on the Presets page. The seeds are Standard, Fast and Copy only, with today's defaults.
+  - Rips keep every audio and subtitle language, and each preset chooses which go into the encode.
+  - HandBrake QSV is not offered; the hardware path is VAAPI through ffmpeg.
+- **Import timing.** A film is imported only when its whole disc is ripped and no encode of it is queued or running, so every extra is included.
 
 ## Goals and scope
 
@@ -86,6 +125,13 @@ Two rules shape the layout: the cache-only work share holds only jobs in progres
 
 Moving from `/work` to `/data` crosses two mounts, so it is a copy and then a delete, not a rename. Both are on the cache SSD, so an encode moves in seconds and a kept lossless file in a few minutes.
 
+**Built:**
+- **Rip folders** are `downloads/disc-ripper/<rip_id>/`, where the rip ID is the main title's job ID, with extras in `extras/`.
+- **DVD and Blu-ray rips** are written into the rip's hidden `.partial/<job>/` folder and renamed into place, so there is no copy. If a rename fails, it falls back to a copy, with **Move again** if that copy fails.
+- **Encodes** are written in `/work/encode-<id>/` and copied into the rip folder.
+- **Raw rips** are deleted as soon as an encode of them passes its check. The setting is "Keep raw rips for", in hours, default 0.
+- **Imported films:** the whole rip folder is deleted once Jellyfin shows the imported file, or 24 hours after the import without Jellyfin.
+
 **Cache budget.** Two settings: the work-area budget (default 60 GB) and a minimum free space on the cache pool (default 20 GB, read from the pool itself). Before a rip starts, the size MakeMKV reports for the selected titles must fit both. If it doesn't, the disc waits in its drive as "waiting for cache space" and starts when encodes finish and raw files are deleted. The free-space floor matters because `Barry-server` writes also land on the cache until the mover runs.
 
 **Mover schedule.** The mover runs daily at 21:00, inside the usual power-on window. On a day when the server isn't on at 21:00 the mover doesn't run, so finished files stay on the cache until the next run. The free-space floor covers this. The mover never touches the work share, so its 21:00 run can't disturb a running job.
@@ -109,6 +155,11 @@ There is no fixed cooldown. A disc starts ripping as soon as it is probed and sc
    - you pressed "Hold" on that drive, or turned off the "Auto-start rips" setting
 
    Otherwise the main title starts ripping immediately.
+
+**Built:**
+- **Identify and Duplicate check** run after encoding, not at insert, so they never hold a disc.
+- **The main title** is the longest. The "unclear" rule is another title within 3% of it. On a DVD held only for that reason, the longest title rips after 5 minutes unless you choose, press Hold or eject.
+- **A disc is also held** when it was already ripped, or was already in the drive when the container started.
 6. **Rip.** While it rips, you can tick extra titles; they queue on the same drive after the main title. You can also tick "keep lossless" for this disc.
 7. **Eject.** The drive ejects when its queue for that disc is empty. A "force eject now" button is always available.
 8. **Encode, identify if still needed, import, clean up** (see the sections below).
@@ -153,6 +204,13 @@ Every tool is a command-line program; the backend runs it as a subprocess and pa
 
 **Extras.** Not ripped by default. When ticked, they are kept in the film's `extras` folder for Jellyfin, which Radarr's import does not do for you. Radarr should ignore an `extras` subfolder when it scans; confirm on your version.
 
+**Built:**
+- **Title choice** takes the longest title, not a Radarr runtime match.
+- **Extras** are encoded too, and copied into the film's `extras` folder after the import. A clashing name gets " (2)".
+- **MakeMKV stalls:** a stalled MakeMKV is stopped after 10 silent minutes and retried by itself after 3 minutes, up to twice.
+- **Start-up drive scan:** only one MakeMKV at a time does it.
+- **Not built:** ddrescue (data discs) and the type override in the UI.
+
 **Auto detection order.** Audio tracks present: audio CD. `VIDEO_TS` present: DVD-Video. `BDMV` present: Blu-ray. Anything else with a filesystem: data disc. You can override the guess in the UI.
 
 **MakeMKV licence.** It needs the beta key (changes periodically) or a purchased licence, stored in config, not baked into the image.
@@ -180,12 +238,25 @@ All encodes are driven by presets you build on a preset-builder page. Each prese
 
 **Preset builder options.** Engine and mode; codec; quality value (RF, CRF or QP); resolution cap; audio codec, bitrate and channel layout; audio and subtitle languages to keep; deinterlacing; crop detection; and the copy-only mode. There are no file-size targets and no two-pass. Options an engine does not support are greyed out, and the page shows the exact command each preset produces.
 
+**Built:**
+- **Presets** are database rows on the **Presets** page: create, copy, edit and delete, with deletion refused while a preset is in use. The "After ripping" default preset is chosen there.
+- **Seeded presets:** Standard (HandBrake x265 10-bit, slow, RF 18 DVD / 20 Blu-ray), Fast (ffmpeg `hevc_vaapi`, QP 24, still to be tuned on the box) and Copy only.
+- **Tracks:**
+  - Rips keep every language, and each preset lists the audio and subtitle languages to keep. The seeds keep English only.
+  - Commentary is dropped unless the preset keeps it.
+  - If a preset's languages match no audio track, the first audio track is kept and the Films page says so.
+- **Options:** HandBrake QSV is not offered. Codecs are x265 10-bit, x265 and x264 in software, and `hevc_vaapi` and `h264_vaapi` in hardware.
+- **Live preview:** the page shows the exact command, and the tracks kept, for an example DVD and Blu-ray.
+- **Snapshots:** each encode keeps a snapshot of the preset it used.
+
 **Estimates.** The preset builder shows an estimated file size and encode time per preset. Estimates come from two sources:
 
 - **History:** the average megabytes per minute of source, and frames per second, for past encodes with that preset, split by DVD and Blu-ray.
 - **Test on a sample:** encodes three 30-second clips from a ripped file you choose, and extrapolates.
 
 Until a preset has history, it uses a conservative default speed (a setting) and the estimate is marked as rough. The same estimate is shown on each queued encode and used by the shutdown guard.
+
+**Built:** history estimates (the last 5 encodes with the preset's current settings, split by DVD and Blu-ray), with rough defaults from a table in code, not a setting. **Test on a sample is not built yet.** Room is left for it: a source window in the command builder, and a `kind` column on encodes.
 
 **What the ffmpeg path must cover itself** (HandBrake does these already):
 
@@ -195,6 +266,8 @@ Until a preset has history, it uses a conservative default speed (a setting) and
 **Music.** CDs rip to FLAC only. No MP3 copies are made; Jellyfin transcodes audio when a client needs it.
 
 **Concurrency and priority.** Encodes run in a global pool, separate from the per-drive rip queues. One encode at a time by default; a setting allows two (useful only to pair one hardware with one software encode), and queued encodes can be re-ordered. Every encode runs at `nice 19` and `ionice` idle, so Jellyfin and the rest of the server always come first. There is no pause-while-Jellyfin-transcodes throttle. Progress comes from ffmpeg's `-progress` output and HandBrakeCLI's `--json` output.
+
+**Built:** as described, except that queued encodes can't be re-ordered. Every encode is checked after it finishes: its length, its aspect ratio (allowing for any crop), and that it has the tracks the preset asked for. HandBrake dropping a subtitle is only noted, not treated as a failure. Interrupted encodes are re-queued at the next boot.
 
 ## Scheduling and the shutdown guard
 
@@ -254,6 +327,15 @@ Radarr and Sonarr own naming and the final library folders; the service identifi
 4. Set the film to unmonitored in Radarr. This stops Radarr (through qBittorrent) from grabbing a download to "upgrade" your rip, for example because the quality profile's cutoff is higher or a custom format scores x265 low.
 5. Wait until Jellyfin shows the new file, then delete the raw rip from `/work`, unless "keep lossless" was ticked (then add it as a second version).
 
+**Built (films only):**
+- **Identification:** the label is cleaned and searched in Radarr. A confident match imports on its own; otherwise the Films page offers a search box and candidate list.
+- **Quality:** DVD, Bluray-1080p, Bluray-720p and the others follow the resolution cap, and Copy only on a Blu-ray imports as Remux-1080p.
+- **Root folder:** new films go to the Movies root folder.
+- **Duplicates:** one import per film at a time; a second rip of the same film waits.
+- **Jellyfin "seen":** an item with the film's TMDb ID whose file name and size match the imported file.
+- **Undo:** each import has stepwise Undo, which uses Radarr's recycle bin for a replace.
+- **Not built:** Sonarr.
+
 **Path rule.** The path in the command must be the path inside Radarr's container. Since all containers mount the share as `/data`, one path works for everyone; confirm each container's mapping before building.
 
 **Jellyfin refresh.** Turn on Radarr's and Sonarr's Connect notification for Jellyfin, so imports refresh the library with no code here. The service calls `POST /Library/Refresh` itself only for music and second versions, because Radarr and Sonarr never see those files.
@@ -273,6 +355,8 @@ Second versions come up in two ways: the duplicate check finds a film you alread
 **Keep lossless.** The encode is imported through Radarr as the main file, which Radarr tracks. The lossless MKV is then added beside it as a second version labelled with its source, for example `Movie (2010) - Blu-ray Remux.mkv`. Movies only; TV episodes never keep a lossless copy.
 
 **Safeguards for Replace**
+
+**Built:** Replace, with these safeguards and the folder normalisation step. Before replacing, the import waits for the owner's OK when "Ask before replacing" is on, or when any check fails: the length differs from the old file's by more than max(2%, 5 min), the recycle bin isn't set, or the resolution is lower. Without a recycle bin, the owner must type `REPLACE`. Skip and second versions are not built yet.
 
 - Before anything is touched, show old and new side by side: resolution, codec, size, duration, audio tracks and subtitles. The old file's details come from Radarr's file record.
 - Act only after the new file has finished and passed an ffprobe check: its duration must be within a set tolerance of the old file's (tolerance is a setting).
@@ -341,7 +425,7 @@ The container can drive your optical drives and run shell tools, so a compromise
 
 ## Suggested build order
 
-Each step gives something usable on its own, so you can test on real discs early.
+Each step gives something usable on its own, so you can test on real discs early. Status by step is in "Where the project is now" at the top.
 
 1. **Skeleton.** Container image, FastAPI backend, SQLite in WAL mode, login, settings page, drive discovery by serial, a basic htmx UI shell.
 2. **Detection, queues and the shutdown guard.** Insert polling, disc probing, one queue per drive, progress over SSE, cache budget checks, schedule reading, `/api/busy`, and the unraid-backend change. This comes early because every later step creates jobs that a shutdown could interrupt.
@@ -360,19 +444,25 @@ Each step gives something usable on its own, so you can test on real discs early
 - [x] **Optical drives.** Two drives, `sr0` and `sr1`; only two SATA ports are free.
 - [x] **Radarr's movie format** changed to `{Movie Title} ({Release Year}) - {Quality Full}`.
 
-**Defaults chosen in this plan; change any that are wrong**
+**Defaults chosen in this plan** (confirmed or changed while building)
 
-- [ ] **HandBrake and ffmpeg.** Read as "each preset chooses either engine, in software or hardware". HandBrake's hardware path is QSV only.
-- [ ] **Audio and subtitles.** English plus original-language audio, main track to E-AC-3 5.1 at 640 kb/s, commentary dropped, English and forced subtitles kept.
-- [ ] **Quality.** x265 preset slow at RF 20 (Blu-ray) and RF 18 (DVD), roughly 4 to 8 GB per 1080p film.
-- [ ] **Unmonitor after import**, so Radarr never replaces a rip with a download.
-- [ ] **Raw-file clean-up.** Deleted once Jellyfin has the encode, or 24 hours after the encode passed its check if the job is still waiting.
-- [ ] **Cache budget.** 60 GB for the work area and at least 20 GB kept free on the pool.
+- [x] **HandBrake and ffmpeg.** Each preset chooses either engine. HandBrake QSV was dropped; the hardware path is VAAPI through ffmpeg.
+- [x] **Audio and subtitles.** The seeded presets keep English audio (main track to E-AC-3 5.1 at 640 kb/s) and English subtitles, and drop commentary. Other languages are set per preset.
+- [x] **Quality.** x265 preset slow at RF 20 (Blu-ray) and RF 18 (DVD).
+- [x] **Unmonitor after import.**
+- [x] **Raw-file clean-up.** Changed: a raw rip is deleted as soon as an encode of it passes its check, and a film's whole rip folder is deleted once Jellyfin shows it.
+- [x] **Cache budget.** 60 GB for the work area and 20 GB kept free on the pool. DVD and Blu-ray rips no longer count against the work budget, because they are written into downloads.
 
 **To test on the real box**
 
-- [ ] **VAAPI.** Hardware encoding on the new build, and the quality value for the Fast preset.
-- [ ] **HandBrake QSV on the UHD 630,** treated as experimental after the earlier kernel crashes.
-- [ ] **Path mappings.** Confirm `/data` maps to the same share in the service, Radarr, Sonarr and Jellyfin.
-- [ ] **Jellyfin.** Which version it plays by default; whether watch history survives a Replace; which `/Items` filters your version supports.
-- [ ] **Radarr Swagger.** ManualImport fields (quality, replace or overwrite), and moving a film's folder on update.
+- [ ] **VAAPI.** The quality value for the Fast preset (24 is a starting guess).
+- [x] **HandBrake QSV.** Dropped.
+- [x] **Path mappings.** `/data` is the same share in the service, Radarr and Jellyfin. Confirmed by real imports.
+- [ ] **Jellyfin.** Whether watch history survives a Replace.
+- [x] **Radarr Swagger.** ManualImport with an explicit quality, and moving a film's folder with `moveFiles=true`. Confirmed on Radarr 7.0.3.
+- [ ] **HandBrake with non-English tracks.** How it labels them on a real disc. The track check is tolerant meanwhile.
+
+**Known issues before the mass rip** (Nov 26)
+
+- [ ] **MakeMKV 2.0 stalls on the LG BH10LS38** on Linux. It is mitigated by the stall watchdog and automatic retry, and by the start-up gate (two discs inserted together were one cause). If stalls continue on single discs, try MakeMKV's `sdf_Stop` setting.
+- [ ] **A container exited with code 139** (a segmentation fault) once, right after an update. Add `--restart unless-stopped` to the container's Extra Parameters, and check the log if it happens again.
