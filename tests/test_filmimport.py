@@ -630,3 +630,14 @@ def test_cleanup_guard_ignores_queued_jobs_without_a_disc(config, setup, tmp_pat
     with setup:
         setup.execute("UPDATE jobs SET state = 'running'")
     assert filmimport._disc_has_work(setup, rip)
+
+
+def test_import_with_invalid_preset_fails_clearly(config, setup, tmp_path):
+    rip, eid = make_rip(setup, config)
+    with setup:
+        setup.execute("UPDATE encodes SET preset_settings = ? WHERE id = ?", ('{"engine": "nope"}', eid))
+    services, fake = services_with(config, tmp_path)
+    asyncio.run(filmimport.run_import(services, rip))
+    row = row_of(setup, rip)
+    assert row["state"] == "failed"
+    assert "The encode's preset settings are no longer valid:" in row["error"]

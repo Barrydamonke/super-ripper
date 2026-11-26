@@ -696,7 +696,7 @@ class Services:
             rows = encodes.for_rip(conn, p["rip_id"])
             if encodes.lost_subtitles([r for r in rows if r["title"] == p["title"]]):
                 continue  # the raw has the subtitles the encode lost: only Delete raw now lets it go
-            if film_imports.raw_waits_for_jellyfin(conn, p["rip_id"]):
+            if film_imports.jellyfin_hold(conn, p["rip_id"]) is not None:
                 continue  # the Jellyfin clean-up removes the whole folder once the film shows
             # refusals are normal (not yet, or already gone)
             removed += self.delete_raw_sync(conn, p["rip_id"], p["title"], now=now, keep_hours=keep) is None

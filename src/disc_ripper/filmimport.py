@@ -181,7 +181,11 @@ class Flow:
         if seen is None:
             raise RadarrError("Radarr can't see the encoded file in its folder.")
         definitions = await self.call("quality_definitions")
-        found = presets.for_encode(self.conn, enc)
+        try:
+            found = presets.for_encode(self.conn, enc)
+        except ValueError as exc:  # PresetError too: the saved settings don't validate any more
+            raise RadarrError(f"The encode's preset settings are no longer valid: "
+                              f"{(getattr(exc, 'message', None) or str(exc)).rstrip('.')}.") from None
         if found is None:
             raise RadarrError("The encode's preset is unknown, so its Radarr quality can't be chosen.")
         wanted = filmid.quality_for(enc["disc_type"], found[1])

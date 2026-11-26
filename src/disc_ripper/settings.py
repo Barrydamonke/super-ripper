@@ -122,8 +122,9 @@ SETTINGS: tuple[SettingDef, ...] = (
     ),
     SettingDef(
         "raw_keep_until", "Keep raw rips", "choice", "hours",
-        help="Films that are imported are cleaned up once Jellyfin has them. TV-like rips, and films that "
-             "can't be imported (no Radarr), use the hours below instead. A disc can always be ripped again.",
+        help="Until in Jellyfin: a film's raws stay until the Jellyfin clean-up, including while it waits for you "
+             "(identify, replace OK, retry). Undone, skipped and TV rips, and films without Radarr, use the hours "
+             "below instead. A disc can always be ripped again.",
         choices=(("hours", "for the hours below after a good encode"), ("jellyfin", "until the film is in Jellyfin")),
         group="Encoding",
     ),

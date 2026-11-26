@@ -358,3 +358,36 @@ def test_subtitle_shortfall_keeps_raw(filed, setup):
     assert services._sweep_raw(setup) == 0 and raw.exists()
     assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=None) is None  # Delete raw now stays
     assert not raw.exists()
+
+
+def _hold_case(filed, setup, state=None, step="", hours=0):
+    services, rip, raw, out, enc = filed
+    set_setting(setup, "raw_keep_until", "jellyfin")
+    set_setting(setup, "raw_keep_hours", hours)
+    _make_film(setup, rip)
+    if state:
+        with setup:
+            setup.execute("INSERT INTO film_imports (rip_id, state, step, created_at, updated_at) "
+                          "VALUES (?, ?, ?, 't', 't')", (rip, state, step))
+    return services, raw
+
+
+@pytest.mark.parametrize("state", ["needs_identify", "failed", "imported", "needs_replace_ok", "importing"])
+def test_jellyfin_mode_keeps_raw_while_film_is_headed_for_library(filed, setup, state):
+    services, raw = _hold_case(filed, setup, state)
+    assert services._sweep_raw(setup) == 0 and raw.exists()
+
+
+def test_jellyfin_mode_keeps_raw_with_no_import_row_and_failed_title(filed, setup):
+    services, raw = _hold_case(filed, setup)  # no film_imports row (e.g. waiting on a failed title)
+    assert services._sweep_raw(setup) == 0 and raw.exists()
+
+
+def test_jellyfin_mode_undone_and_skipped_fall_back_to_hours(filed, setup):
+    services, raw = _hold_case(filed, setup, "needs_identify", step="undone")
+    assert services._sweep_raw(setup) == 1 and not raw.exists()
+
+
+def test_jellyfin_mode_skipped_falls_back_to_hours(filed, setup):
+    services, raw = _hold_case(filed, setup, "skipped")
+    assert services._sweep_raw(setup) == 1 and not raw.exists()

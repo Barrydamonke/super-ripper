@@ -78,18 +78,32 @@ def active_rip_ids(conn: sqlite3.Connection) -> set[int]:
         "SELECT rip_id FROM film_imports WHERE state IN ('importing', 'imported')")}
 
 
-def raw_waits_for_jellyfin(conn: sqlite3.Connection, rip_id: int) -> bool:
-    """Raws are kept until the film is in Jellyfin, and this rip is a film that will get there:
-    it has a main title, Radarr is set up, and the import wasn't skipped as TV."""
+_JELLYFIN_NOTES = {"needs_identify": "waiting for you to identify it", "needs_replace_ok": "waiting for your OK to replace",
+                   "failed": "import failed; Retry", "imported": "waiting for Jellyfin to show it"}
+UNDONE_STEP = "undone"  # filmundo leaves this in `step` when it puts a film back to needs_identify
+
+
+def jellyfin_hold(conn: sqlite3.Connection, rip_id: int) -> str | None:
+    """None when this rip's raws follow the keep-hours setting. Otherwise raws are kept until the film
+    is in Jellyfin, and this is what the film is waiting for ("" when there is nothing to add).
+
+    That is the case in "until in Jellyfin" mode for a film (main title, Radarr set up) still headed for the
+    library, including one waiting for the owner. Undone, skipped and TV rips use the hours."""
     if settings.get(conn, "raw_keep_until") != "jellyfin":
-        return False
+        return None
     if not (settings.get(conn, "radarr_url") and settings.get(conn, "radarr_api_key")):
-        return False
+        return None
     rip = conn.execute("SELECT main_title FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
     if rip is None or rip["main_title"] is None:
-        return False
+        return None
     row = get(conn, rip_id)
-    return row is None or row["state"] != "tv_skipped"
+    if row is None:
+        return ""
+    if row["state"] in ("skipped", "tv_skipped", "undone"):
+        return None
+    if row["state"] == "needs_identify" and row["step"] == UNDONE_STEP:
+        return None
+    return _JELLYFIN_NOTES.get(row["state"], "")
 
 
 def fail_interrupted(conn: sqlite3.Connection, now: str) -> int:

@@ -86,7 +86,7 @@ def _raw_countdown(done: list[sqlite3.Row], keep_hours: float, now: datetime) ->
 
 
 def _file_view(key: str, entry: dict, scan_titles: dict, rows: list[sqlite3.Row],
-               keep_hours: float, now: datetime, until_jellyfin: bool = False) -> dict:
+               keep_hours: float, now: datetime, until_jellyfin: str | None = None) -> dict:
     path = Path(entry.get("path", ""))
     deleted = bool(entry.get("raw_deleted_at"))
     size = None
@@ -113,8 +113,9 @@ def _file_view(key: str, entry: dict, scan_titles: dict, rows: list[sqlite3.Row]
         "seconds": scan_titles.get(int(key), {}).get("seconds"),
         "size": size, "deleted": deleted, "encodes": mine,
         "lost_subs": lost_subs,
-        "until_jellyfin": waiting and not lost_subs and until_jellyfin,
-        "countdown": None if not waiting or lost_subs or until_jellyfin else _raw_countdown(good, keep_hours, now),
+        "until_jellyfin": waiting and not lost_subs and until_jellyfin is not None,
+        "jellyfin_note": until_jellyfin or "",
+        "countdown": None if not waiting or lost_subs or until_jellyfin is not None else _raw_countdown(good, keep_hours, now),
         "no_intact": bool(done) and not good and not deleted and not busy,
         "can_delete": bool(good) and not deleted and not busy,
     }
@@ -185,7 +186,12 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
                 scan_titles = {}
         rows = encodes.for_rip(conn, rip["rip_id"])
         files = json.loads(rip["files"] or "{}")
-        until_jellyfin = film_imports.raw_waits_for_jellyfin(conn, rip["rip_id"])
+        hold = film_imports.jellyfin_hold(conn, rip["rip_id"])
+        if hold is not None and not hold and rip["rip_id"] not in imports:
+            failed = _failed_title(conn, rip, imports)
+            if failed:
+                hold = f"Title {failed[0]} failed; Retry or Import anyway"
+        until_jellyfin = None if hold is None else hold
         views = [_file_view(key, files[key], scan_titles, rows, keep_hours, now, until_jellyfin)
                  for key in sorted(files, key=int)]
         logs = [r[0] for r in conn.execute(
