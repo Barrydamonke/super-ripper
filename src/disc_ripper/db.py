@@ -35,8 +35,36 @@ def _migrations() -> list[tuple[int, str]]:
     return sorted(found)
 
 
+BACKUPS_KEPT = 5
+
+
+def _backup_before_upgrade(conn: sqlite3.Connection, version: int) -> None:
+    """Copy the database to <config>/backups/disc-ripper-v<version>.db, keeping the newest few."""
+    row = next((r for r in conn.execute("PRAGMA database_list") if r[1] == "main"), None)
+    if row is None or not row[2]:  # in-memory: no file
+        return
+    path = Path(row[2])
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    folder = path.parent / "backups"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"disc-ripper-v{version}.db"
+    target.unlink(missing_ok=True)
+
+    dest = sqlite3.connect(target)
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
+    old = sorted(folder.glob("disc-ripper-v*.db"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    for stale in old[BACKUPS_KEPT:]:
+        stale.unlink(missing_ok=True)
+
+
 def migrate(conn: sqlite3.Connection) -> int:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > 0 and any(number > version for number, _sql in _migrations()):
+        _backup_before_upgrade(conn, version)
     for number, sql in _migrations():
         if number <= version:
             continue

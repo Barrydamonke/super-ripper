@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from pathlib import Path
 
@@ -173,3 +174,55 @@ def test_migration_0005(config):
                 "preset_id, state, created_at) VALUES (1, 1, 'main', 'x', 'bluray', 1, 1, 1, 'bogus', 't')")
     finally:
         conn.close()
+
+
+def _old_db(config, version=1):
+    from importlib import resources
+
+    conn = db.connect(config.db_path)
+    sql = (resources.files("disc_ripper") / "migrations" / "0001_initial.sql").read_text(encoding="utf-8")
+    conn.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = {version};\nCOMMIT;")
+    return conn
+
+
+def test_migrate_backs_up_before_upgrading(config):
+    conn = _old_db(config)
+    try:
+        db.migrate(conn)
+    finally:
+        conn.close()
+    backup = config.config_dir / "backups" / "disc-ripper-v1.db"
+    assert backup.exists()
+    old = sqlite3.connect(backup)
+    try:
+        assert old.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        old.close()
+
+
+def test_migrate_keeps_five_backups(config):
+    folder = config.config_dir / "backups"
+    folder.mkdir(parents=True)
+    for v in range(1, 8):
+        stamp = folder / f"disc-ripper-v{v}.db"
+        stamp.write_bytes(b"x")
+        os.utime(stamp, (1_000_000 + v, 1_000_000 + v))
+    conn = _old_db(config)
+    try:
+        db.migrate(conn)
+    finally:
+        conn.close()
+    names = sorted(p.name for p in folder.iterdir())
+    assert len(names) == 5
+    assert "disc-ripper-v1.db" in names  # the one just made is the newest
+    assert "disc-ripper-v7.db" in names and "disc-ripper-v2.db" not in names
+
+
+def test_migrate_no_backup_when_up_to_date(config):
+    conn = db.connect(config.db_path)
+    try:
+        db.migrate(conn)
+        db.migrate(conn)
+    finally:
+        conn.close()
+    assert not (config.config_dir / "backups").exists()

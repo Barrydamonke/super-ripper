@@ -11,8 +11,10 @@ import hashlib
 import json
 import logging
 import math
+import os
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from . import cd_rips, cdrip, coverart, db, drives, encodes, film_imports, filmimport, joblog, jobs, presets, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
@@ -50,13 +52,39 @@ def _parse_utc(value: str) -> datetime:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
-def _configure_logging() -> None:
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+_APP_LOG = "app.log"
+
+
+def _configure_logging(config_dir: Path | None = None) -> None:
     logger = logging.getLogger("disc_ripper")
-    if not logger.handlers:
+    if not any(type(h) is logging.StreamHandler for h in logger.handlers):
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        handler.setFormatter(logging.Formatter(_LOG_FORMAT))
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
+    if config_dir is None:
+        return
+    path = Path(config_dir) / "logs" / _APP_LOG
+    for h in list(logger.handlers):  # one app log at a time (a restart in-process swaps it)
+        if isinstance(h, RotatingFileHandler):
+            logger.removeHandler(h)
+            h.close()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(path, maxBytes=2 * 1024 * 1024, backupCount=4, encoding="utf-8")
+    except OSError as exc:
+        log.warning("could not open the app log %s: %s; carrying on without it", path, exc)
+        return
+    file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    logger.addHandler(file_handler)
+
+
+def _app_version() -> str:
+    from . import __version__
+
+    sha = os.environ.get("GIT_SHA", "").strip()
+    return f"{__version__} ({sha[:12]})" if sha else __version__
 
 
 AUTO_RETRY_SECONDS = 180  # a stalled MakeMKV job is tried again after this…
@@ -1095,20 +1123,32 @@ class Services:
             await self._guard_changed_safely()
 
     async def start(self) -> None:
-        _configure_logging()
+        _configure_logging(self.config.config_dir)
+        log.info("disc-ripper %s starting", _app_version())
         self._loop = asyncio.get_running_loop()
+        count = 0
         conn = db.connect(self.config.db_path)
         try:
-            count = jobs.mark_interrupted(conn, utc_now())
-            encodes.mark_interrupted(conn, utc_now())  # a stale running row can survive a stop race
-            encodes.requeue_interrupted(conn, utc_now())
-            presets.fill_fingerprints(conn)
-            cd_rips.reconcile(conn, self.config.work_dir)
-            for rip_id in video_rips.unsettled(conn):  # rips whose last job ended in the last run
-                video_rips.settle(conn, rip_id, self.config.work_dir, utc_now(), downloads_dir=self.config.downloads_dir)
-            self._cancel_orphaned_disc_jobs(conn)
-            self._sweep_partials(conn)
-            cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc))
+            def guard(label, fn):
+                try:
+                    return fn()
+                except Exception:  # one bad step must not keep the app from starting
+                    log.exception("start-up: %s failed; carrying on", label)
+
+            count = guard("marking interrupted jobs", lambda: jobs.mark_interrupted(conn, utc_now())) or 0
+            # a stale running row can survive a stop race
+            guard("marking interrupted encodes", lambda: encodes.mark_interrupted(conn, utc_now()))
+            guard("requeueing interrupted encodes", lambda: encodes.requeue_interrupted(conn, utc_now()))
+            guard("filling preset fingerprints", lambda: presets.fill_fingerprints(conn))
+            guard("reconciling CD rips", lambda: cd_rips.reconcile(conn, self.config.work_dir))
+            unsettled = guard("listing unsettled rips", lambda: list(video_rips.unsettled(conn))) or []
+            for rip_id in unsettled:  # rips whose last job ended in the last run
+                guard(f"settling rip #{rip_id}", lambda rip_id=rip_id: video_rips.settle(
+                    conn, rip_id, self.config.work_dir, utc_now(), downloads_dir=self.config.downloads_dir))
+            guard("cancelling orphaned disc jobs", lambda: self._cancel_orphaned_disc_jobs(conn))
+            guard("sweeping partial files", lambda: self._sweep_partials(conn))
+            guard("sweeping old work folders",
+                  lambda: cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc)))
         finally:
             conn.close()
         if count:

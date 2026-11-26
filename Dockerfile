@@ -46,6 +46,7 @@ COPY --from=makemkv-build /staging/usr/ /usr/
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONFAULTHANDLER=1 \
     CONFIG_DIR=/config \
     PUID=99 \
     PGID=100 \
@@ -53,10 +54,14 @@ ENV PYTHONUNBUFFERED=1 \
     PORT=8580 \
     LIBVA_DRIVER_NAME=iHD
 
+# The commit the image was built from, shown in the start-up log line.
+ARG GIT_SHA=
+ENV GIT_SHA=${GIT_SHA}
+
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml constraints.txt README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir --root-user-action=ignore . && rm -rf /app/src
+RUN pip install --no-cache-dir --root-user-action=ignore -c constraints.txt . && rm -rf /app/src
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod 0755 /entrypoint.sh

@@ -47,7 +47,7 @@ set -- uvicorn disc_ripper.app:create_app --factory --host 0.0.0.0 --port "$PORT
     --timeout-graceful-shutdown 10
 
 if [ "$(id -u)" = "0" ]; then
-    python -m disc_ripper.devnodes
+    python -m disc_ripper.devnodes || echo "entrypoint: device setup failed; continuing without optical drives" >&2
     mkdir -p "$CONFIG_DIR"
     chown "$PUID:$PGID" "$CONFIG_DIR"
     umask "$UMASK"

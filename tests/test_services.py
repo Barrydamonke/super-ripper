@@ -263,3 +263,51 @@ def test_startup_keeps_queued_jobs_when_the_stored_media_state_is_unclear(config
         asyncio.run(main())
         assert jobs.get(conn, rip)["state"] == "queued"
     conn.close()
+
+
+def test_startup_survives_a_failing_step(config, add_sg, monkeypatch):
+    import asyncio
+
+    from disc_ripper import cd_rips
+
+    _prepare(config, add_sg).close()
+
+    def boom(conn, work_dir):
+        raise RuntimeError("reconcile exploded")
+
+    monkeypatch.setattr(cd_rips, "reconcile", boom)
+    svc = services.Services(config)
+
+    async def main():
+        await svc.start()
+        started = len(svc._tasks)
+        await svc.stop()
+        return started
+
+    assert asyncio.run(main()) >= 4
+
+
+def test_app_log_file_written(config):
+    import logging
+
+    logger = logging.getLogger("disc_ripper")
+    try:
+        services._configure_logging(config.config_dir)
+        logging.getLogger("disc_ripper.test").info("hello app log")
+        for h in logger.handlers:
+            h.flush()
+        text = (config.config_dir / "logs" / "app.log").read_text(encoding="utf-8")
+        assert "hello app log" in text
+    finally:
+        for h in list(logger.handlers):
+            if isinstance(h, services.RotatingFileHandler):
+                logger.removeHandler(h)
+                h.close()
+
+
+def test_no_websockets_import():
+    from pathlib import Path
+
+    src = Path(services.__file__).parent
+    for path in src.rglob("*.py"):
+        assert "websockets" not in path.read_text(encoding="utf-8"), path

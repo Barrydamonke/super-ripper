@@ -250,6 +250,16 @@ Encodes that finished before Radarr was set up aren't imported automatically. Us
 
 Docker tab → the container → Check for updates (or Force update). Settings and the database live in `/config`, so they survive updates.
 
+The template sets `--restart=unless-stopped` in Extra Parameters so the container comes back after a crash or a reboot. On an install made before that was added, add it by hand: Docker tab → the container → Edit → Advanced View → Extra Parameters, append `--restart=unless-stopped`, Apply.
+
+The app's own log is `/config/logs/app.log` (5 files of 2 MB); its first line at each start says which version and commit is running. Before an update changes the database, the app copies it to `/config/backups/disc-ripper-v<old>.db` (the newest 5 are kept).
+
+### Going back to an older version
+
+1. Set the template's Repository to `ghcr.io/<owner>/disc-ripper:sha-<commit>` (the commit's image tag; `app.log` names the commit that was running) and stop the container.
+2. In `/config`, copy the matching backup from `backups/` over `disc-ripper.db`. The backup `disc-ripper-v<N>.db` is the database as it was before the upgrade from schema version N. Delete `disc-ripper.db-wal` and `disc-ripper.db-shm` too.
+3. Apply and start the container.
+
 ### Updating MakeMKV
 
 MakeMKV is compiled from makemkv.com source at a pinned version. To bump it, edit the three `ARG` lines at the top of the `Dockerfile` (`MAKEMKV_VERSION`, `MAKEMKV_OSS_SHA256`, `MAKEMKV_BIN_SHA256`). Take the version from https://www.makemkv.com/download/ and the checksums from its `makemkv-sha-<version>.txt`, and check them by hand. The build fails if a checksum does not match. Then rebuild and redeploy the image. A new beta key (Settings) is enough when only the key has expired.
