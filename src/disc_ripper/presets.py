@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 
 from . import settings
+
+log = logging.getLogger(__name__)
 
 ENGINES = ("handbrake", "ffmpeg")
 MODES = ("software", "hardware", "copy")
@@ -415,7 +418,13 @@ def _preset(row) -> Preset:
 
 
 def list_presets(conn: sqlite3.Connection) -> list[Preset]:
-    return [_preset(r) for r in conn.execute("SELECT * FROM presets ORDER BY id")]
+    found = []
+    for r in conn.execute("SELECT * FROM presets ORDER BY id").fetchall():
+        try:
+            found.append(_preset(r))
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:  # PresetError is a ValueError
+            log.warning("presets: skipping preset #%s (%s): its settings are not valid: %s", r["id"], r["name"], exc)
+    return found
 
 
 def get_preset(conn: sqlite3.Connection, preset_id: int) -> Preset | None:

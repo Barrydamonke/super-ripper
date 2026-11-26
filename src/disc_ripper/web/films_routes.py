@@ -69,7 +69,7 @@ def _active_rows(conn: sqlite3.Connection) -> list[dict]:
         item["preset_label"] = row["preset_name"]
         item["percent"] = int(round((row["progress"] or 0) * 100))
         if row["state"] == "queued":
-            est = encodes.estimate_for(conn, row)
+            est = encodes.try_estimate(conn, row)
             if est is not None:
                 item["estimate"] = encoding._hours_minutes(est.seconds)
                 item["rough"] = est.rough_time
@@ -86,7 +86,7 @@ def _raw_countdown(done: list[sqlite3.Row], keep_hours: float, now: datetime) ->
 
 
 def _file_view(key: str, entry: dict, scan_titles: dict, rows: list[sqlite3.Row],
-               keep_hours: float, now: datetime) -> dict:
+               keep_hours: float, now: datetime, until_jellyfin: bool = False) -> dict:
     path = Path(entry.get("path", ""))
     deleted = bool(entry.get("raw_deleted_at"))
     size = None
@@ -105,12 +105,16 @@ def _file_view(key: str, entry: dict, scan_titles: dict, rows: list[sqlite3.Row]
     done = [r for r in theirs if r["state"] == "done"]
     good = encodes.good_encodes(theirs, path)  # the same rule the raw sweep and Delete use
     busy = any(r["state"] in ("queued", "running") for r in mine)
+    waiting = not (deleted or busy or not good)  # a raw the sweep may be holding or counting down for
+    lost_subs = waiting and encodes.lost_subtitles(theirs)
     name = f"{path.parent.name}/{path.name}" if path.parent.name == "extras" else path.name
     return {
         "title": int(key), "name": name, "role": entry.get("role", ""),
         "seconds": scan_titles.get(int(key), {}).get("seconds"),
         "size": size, "deleted": deleted, "encodes": mine,
-        "countdown": None if deleted or busy or not good else _raw_countdown(good, keep_hours, now),
+        "lost_subs": lost_subs,
+        "until_jellyfin": waiting and not lost_subs and until_jellyfin,
+        "countdown": None if not waiting or lost_subs or until_jellyfin else _raw_countdown(good, keep_hours, now),
         "no_intact": bool(done) and not good and not deleted and not busy,
         "can_delete": bool(good) and not deleted and not busy,
     }
@@ -181,7 +185,8 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
                 scan_titles = {}
         rows = encodes.for_rip(conn, rip["rip_id"])
         files = json.loads(rip["files"] or "{}")
-        views = [_file_view(key, files[key], scan_titles, rows, keep_hours, now)
+        until_jellyfin = film_imports.raw_waits_for_jellyfin(conn, rip["rip_id"])
+        views = [_file_view(key, files[key], scan_titles, rows, keep_hours, now, until_jellyfin)
                  for key in sorted(files, key=int)]
         logs = [r[0] for r in conn.execute(
             "SELECT id FROM jobs WHERE kind = 'rip_title' AND json_extract(params, '$.rip_id') = ? ORDER BY id",

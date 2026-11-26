@@ -467,14 +467,17 @@ def guard_decision(guard: GuardState, now: datetime, estimate_s: float, rough: b
         return "start", ""
     if rough:
         estimate_s *= 1.25
-    if guard.window_start is not None:
+    hours = int(round(estimate_s / 3600))
+    if not rough and guard.window_start is not None:
         session = (guard.grace_ends_at - guard.window_start).total_seconds()
-        if estimate_s > session:
-            hours = int(round(estimate_s / 3600))
-            return "too_long", (f"Too long to finish in one session (about {hours} h); use Fast, "
+        if estimate_s > session:  # a measured time that can never fit: don't wait forever
+            return "too_long", (f"Too long to finish in one session (about {hours} h). Choose a faster preset, "
                                 "or run it with the server on outside the schedule")
     if now + timedelta(seconds=estimate_s) <= guard.grace_ends_at:
         return "start", ""
+    if rough:  # a guess never fails an encode: it waits, and the first run gives a real number
+        return "wait", (f"Waiting for the next session: probably needs about {hours} h "
+                        "(a rough guess until this preset has history)")
     ends = guard.grace_ends_at.astimezone(now.tzinfo).strftime("%H:%M")
     return "wait", (f"Waiting for the next session: needs about {_hours_minutes(estimate_s)}, "
                     f"the grace period ends at {ends}")

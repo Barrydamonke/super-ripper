@@ -691,8 +691,16 @@ class Services:
         keep = settings.get(conn, "raw_keep_hours")
         now = datetime.now(timezone.utc)
         pairs = conn.execute("SELECT DISTINCT rip_id, title FROM encodes WHERE state = 'done'").fetchall()
-        return sum(self.delete_raw_sync(conn, p["rip_id"], p["title"], now=now, keep_hours=keep) is None
-                   for p in pairs)  # refusals are normal (not yet, or already gone)
+        removed = 0
+        for p in pairs:
+            rows = encodes.for_rip(conn, p["rip_id"])
+            if encodes.lost_subtitles([r for r in rows if r["title"] == p["title"]]):
+                continue  # the raw has the subtitles the encode lost: only Delete raw now lets it go
+            if film_imports.raw_waits_for_jellyfin(conn, p["rip_id"]):
+                continue  # the Jellyfin clean-up removes the whole folder once the film shows
+            # refusals are normal (not yet, or already gone)
+            removed += self.delete_raw_sync(conn, p["rip_id"], p["title"], now=now, keep_hours=keep) is None
+        return removed
 
     def _cancel_orphaned_disc_jobs(self, conn) -> None:
         """Start-up: queued disc jobs whose disc was taken out while the app was off can never run."""

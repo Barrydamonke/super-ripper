@@ -281,3 +281,23 @@ def test_films_page_shows_the_encodes_preset_name(films):
     rip = make_rip(conn, config)
     queue(conn, rip, preset=3)
     assert "queued (Copy only)" in client.get("/films").text
+
+
+def test_films_page_raw_kept_notes(films):
+    client, conn, config = films
+    rip = make_rip(conn, config)
+    out = config.downloads_dir / str(rip) / "film_t01-out.mkv"
+    out.write_bytes(b"y" * 500)
+    eid = queue(conn, rip, state="done", output=str(out))
+    with conn:
+        conn.execute("UPDATE video_rips SET main_title = 0 WHERE rip_id = ?", (rip,))
+        for key, value in (("raw_keep_until", "jellyfin"), ("radarr_url", "http://r:7878"), ("radarr_api_key", "k")):
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, json.dumps(value)))
+    page = client.get("/films").text
+    assert "raw kept until the film is in Jellyfin" in page
+    assert "raw deleted in" not in page and "Delete raw now" in page
+    with conn:
+        conn.execute("UPDATE encodes SET message = 'HandBrake kept 1 of 2 subtitle tracks' WHERE id = ?", (eid,))
+    page = client.get("/films").text
+    assert "raw kept: the encode lost subtitles" in page and "Delete raw now" in page
+    assert "raw kept until the film is in Jellyfin" not in page

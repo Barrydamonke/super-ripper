@@ -152,3 +152,12 @@ def test_retry_with_deleted_preset_refused(conn):
 
 def test_parse_choice_rejects_huge_ids(conn):
     assert presets.parse_choice(conn, "9" * 30) == "Unknown preset."
+
+
+def test_list_presets_skips_invalid_row(conn):
+    before = [p.name for p in presets.list_presets(conn)]
+    with conn:
+        conn.execute("UPDATE presets SET settings = ? WHERE id = 2", ('{"engine": "nope"}',))
+    after = [p.name for p in presets.list_presets(conn)]
+    assert after == [n for i, n in enumerate(before) if i != 1]
+    assert ("2", "Fast") not in presets.choices(conn)

@@ -15,6 +15,7 @@ VALID = {
     "cd_approval": "odd_ones",
     "cd_cover_art": "on",
     "encode_slots": "1",
+    "raw_keep_until": "hours",
     "raw_keep_hours": "24",
     "encode_stall_minutes": "10",
     "radarr_url": "",

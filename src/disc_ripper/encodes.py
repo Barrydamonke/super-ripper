@@ -73,7 +73,8 @@ def start(conn: sqlite3.Connection, encode_id: int, now: str) -> bool:
     """Mark a queued encode running. False if it was cancelled meanwhile."""
     with conn:
         cur = conn.execute(
-            "UPDATE encodes SET state = 'running', started_at = ?, message = '' WHERE id = ? AND state = 'queued'",
+            "UPDATE encodes SET state = 'running', started_at = ?, message = '', attempts = attempts + 1 "
+            "WHERE id = ? AND state = 'queued'",
             (now, encode_id))
     return cur.rowcount == 1
 
@@ -132,6 +133,8 @@ def retry(conn: sqlite3.Connection, encode_id: int, now: str) -> int | None:
     return _insert_unless_active(conn, {**{k: row[k] for k in _SOURCE_FIELDS}, "preset_name": live.name}, now)
 
 
+MAX_ATTEMPTS = 2  # starts before a restart stops re-queueing an encode
+GAVE_UP = "Interrupted twice; press Retry to try again"
 MIN_SPEED_PROGRESS = 0.05  # an interrupted encode this far along has told us how fast the machine is
 
 
@@ -162,11 +165,12 @@ def mark_interrupted(conn: sqlite3.Connection, now: str) -> int:
 def requeue_interrupted(conn: sqlite3.Connection, now: str) -> int:
     """Interrupted encodes go back in the queue (the same rows, started afresh).
 
-    One that has an active sibling (a newer encode of the same file) is cancelled instead."""
+    One that has an active sibling (a newer encode of the same file) is cancelled instead, and one that
+    has already been started twice (it keeps crashing the container) stays interrupted until Retry."""
     n = 0
     conn.execute("BEGIN IMMEDIATE")
     try:
-        rows = conn.execute("SELECT id, rip_id, title FROM encodes WHERE state = 'interrupted' ORDER BY id").fetchall()
+        rows = conn.execute("SELECT id, rip_id, title, attempts FROM encodes WHERE state = 'interrupted' ORDER BY id").fetchall()
         for row in rows:
             busy = conn.execute(
                 f"SELECT 1 FROM encodes WHERE rip_id = ? AND title = ? AND state IN {_ACTIVE}",  # noqa: S608
@@ -174,6 +178,9 @@ def requeue_interrupted(conn: sqlite3.Connection, now: str) -> int:
             if busy:
                 conn.execute("UPDATE encodes SET state = 'cancelled', message = ? WHERE id = ?",
                              ("Superseded by a newer encode of this file", row["id"]))
+                continue
+            if row["attempts"] >= MAX_ATTEMPTS:
+                conn.execute("UPDATE encodes SET message = ? WHERE id = ?", (GAVE_UP, row["id"]))
                 continue
             conn.execute(
                 "UPDATE encodes SET state = 'queued', progress = 0, message = '', error = NULL, "
@@ -226,9 +233,26 @@ def estimate_for(conn: sqlite3.Connection, row) -> encoding.Estimate | None:
     return encoding.estimate(s, row["disc_type"], row["source_seconds"], row["source_bytes"], speeds, sizes)
 
 
+def try_estimate(conn: sqlite3.Connection, row) -> encoding.Estimate | None:
+    """estimate_for, but a preset whose settings no longer validate counts as no estimate."""
+    try:
+        return estimate_for(conn, row)
+    except ValueError:  # PresetError, a bad JSON snapshot
+        return None
+
+
 def reserved_bytes(conn: sqlite3.Connection) -> int:
     """Disk the running encodes are expected to still write (estimated output sizes)."""
-    return sum(e.bytes for e in (estimate_for(conn, r) for r in running(conn)) if e is not None)
+    return sum(e.bytes for e in (try_estimate(conn, r) for r in running(conn)) if e is not None)
+
+
+SUBTITLE_SHORTFALL = "subtitle tracks"  # in the note HandBrake's encodes get when it dropped subtitles
+
+
+def lost_subtitles(rows) -> bool:
+    """The newest finished encode among these rows lost subtitles (its raw is the only complete copy)."""
+    done = [r for r in rows if r["state"] == "done"]
+    return bool(done) and SUBTITLE_SHORTFALL in (done[-1]["message"] or "")
 
 
 def same_file(a: Path, b: Path) -> bool:

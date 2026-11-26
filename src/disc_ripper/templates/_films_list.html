@@ -63,6 +63,8 @@
         {% endfor %}
         {% if not rip.in_library %}
         {% if f.no_intact %}<span class="hint">raw kept: no intact encode</span>{% endif %}
+        {% if f.lost_subs %}<span class="hint">raw kept: the encode lost subtitles</span>{% endif %}
+        {% if f.until_jellyfin %}<span class="hint">raw kept until the film is in Jellyfin</span>{% endif %}
         {% if f.countdown %}<span class="hint">raw deleted {{ f.countdown }}</span>{% endif %}
         {% if f.can_delete %}
           <button hx-post="/films/delete-raw" hx-vals='{"rip_id": {{ rip.rip_id }}, "title": {{ f.title }}}' hx-target="#films"

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from . import settings
+
 _COLUMNS = {
     "state", "step", "candidates", "tmdb_id", "movie_id", "title", "year", "root_folder", "encode_id", "replace",
     "old_path", "old_folder", "recycled_path", "new_path", "extras", "message", "error", "imported_at",
@@ -74,6 +76,20 @@ def waiting_for(conn: sqlite3.Connection, tmdb_id: int) -> list[sqlite3.Row]:
 def active_rip_ids(conn: sqlite3.Connection) -> set[int]:
     return {r[0] for r in conn.execute(
         "SELECT rip_id FROM film_imports WHERE state IN ('importing', 'imported')")}
+
+
+def raw_waits_for_jellyfin(conn: sqlite3.Connection, rip_id: int) -> bool:
+    """Raws are kept until the film is in Jellyfin, and this rip is a film that will get there:
+    it has a main title, Radarr is set up, and the import wasn't skipped as TV."""
+    if settings.get(conn, "raw_keep_until") != "jellyfin":
+        return False
+    if not (settings.get(conn, "radarr_url") and settings.get(conn, "radarr_api_key")):
+        return False
+    rip = conn.execute("SELECT main_title FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    if rip is None or rip["main_title"] is None:
+        return False
+    row = get(conn, rip_id)
+    return row is None or row["state"] != "tv_skipped"
 
 
 def fail_interrupted(conn: sqlite3.Connection, now: str) -> int:

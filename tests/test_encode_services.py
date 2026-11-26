@@ -303,3 +303,58 @@ def test_raw_deleted_as_soon_as_its_encode_is_done(filed, setup):
     set_enc_done(setup, enc, out, datetime.now(timezone.utc))
     asyncio.run(services.encode_done(enc))
     assert not raw.exists() and out.exists()
+
+
+def _make_film(setup, rip, *, radarr=True, import_state=None):
+    with setup:
+        setup.execute("UPDATE video_rips SET main_title = 0 WHERE rip_id = ?", (rip,))
+    if radarr:
+        set_setting(setup, "radarr_url", "http://radarr:7878")
+        set_setting(setup, "radarr_api_key", "k")
+    if import_state:
+        with setup:
+            setup.execute("INSERT INTO film_imports (rip_id, state, created_at, updated_at) VALUES (?, ?, 't', 't')",
+                          (rip, import_state))
+
+
+def test_jellyfin_mode_keeps_film_raws(filed, setup):
+    services, rip, raw, out, enc = filed
+    set_setting(setup, "raw_keep_until", "jellyfin")
+    set_setting(setup, "raw_keep_hours", 0)
+    _make_film(setup, rip)
+    assert services._sweep_raw(setup) == 0 and raw.exists()
+    assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=None) is None  # Delete raw now still works
+    assert not raw.exists()
+
+
+def test_jellyfin_mode_falls_back_to_hours_for_tv(filed, setup):
+    services, rip, raw, out, enc = filed
+    set_setting(setup, "raw_keep_until", "jellyfin")
+    set_setting(setup, "raw_keep_hours", 24)
+    assert services._sweep_raw(setup) == 1 and not raw.exists()  # TV-like: no main title
+
+
+def test_jellyfin_mode_falls_back_without_radarr(filed, setup):
+    services, rip, raw, out, enc = filed
+    set_setting(setup, "raw_keep_until", "jellyfin")
+    set_setting(setup, "raw_keep_hours", 24)
+    _make_film(setup, rip, radarr=False)
+    assert services._sweep_raw(setup) == 1 and not raw.exists()
+
+
+def test_jellyfin_mode_falls_back_when_import_tv_skipped(filed, setup):
+    services, rip, raw, out, enc = filed
+    set_setting(setup, "raw_keep_until", "jellyfin")
+    set_setting(setup, "raw_keep_hours", 24)
+    _make_film(setup, rip, import_state="tv_skipped")
+    assert services._sweep_raw(setup) == 1 and not raw.exists()
+
+
+def test_subtitle_shortfall_keeps_raw(filed, setup):
+    services, rip, raw, out, enc = filed
+    set_setting(setup, "raw_keep_hours", 0)
+    with setup:
+        setup.execute("UPDATE encodes SET message = 'HandBrake kept 1 of 2 subtitle tracks' WHERE id = ?", (enc,))
+    assert services._sweep_raw(setup) == 0 and raw.exists()
+    assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=None) is None  # Delete raw now stays
+    assert not raw.exists()

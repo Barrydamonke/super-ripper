@@ -49,7 +49,7 @@ def _other_reserved(conn, work_dir: Path, encode_id: int, downloads_dir: Path | 
     for other in encodes.running(conn):
         if other["id"] != encode_id:
             written = space_mod.tree_size(work_dir / f"encode-{other['id']}")
-            est = encodes.estimate_for(conn, other)
+            est = encodes.try_estimate(conn, other)
             total += max((est.bytes if est else 0) - written, 0)
     return total
 
@@ -410,7 +410,14 @@ class EncodePool:
         row = encodes.next_queued(conn)
         if row is None:
             return None, "idle", ""
-        verdict, message = self._decide(conn, row)
+        try:
+            verdict, message = self._decide(conn, row)
+        except ValueError as exc:  # a preset row that no longer validates must not hold up the queue
+            text = getattr(exc, "message", None) or str(exc) or type(exc).__name__
+            message = (f"Its preset settings are no longer valid: {text.rstrip('.')}. "
+                       "Edit the preset, then Retry.")
+            log.warning("encodes: #%s: %s", row["id"], message)
+            verdict = "too_long"  # the same ending: failed at once, the queue moves on
         if verdict == "start":
             if not encodes.start(conn, row["id"], utc_now()):
                 return None, "retry", ""  # cancelled while we were checking
@@ -435,6 +442,7 @@ class EncodePool:
         elif outcome == "too_long":
             joblog.JobLog(self._log_path(row["id"])).write(f"finished: failed — {message}")
             await self.notify()
+            await self._tell_done(row["id"])
         elif outcome in ("wait", "wait_changed"):
             if outcome == "wait_changed":
                 await self.notify()
