@@ -773,8 +773,11 @@ def _disc_has_work(conn, rip_id: int, retry_pending=None) -> bool:
     rip = conn.execute("SELECT state FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
     if rip is not None and rip["state"] in ("ripping", "move_failed"):
         return True
-    if conn.execute("SELECT 1 FROM jobs WHERE kind = 'rip_title' AND state IN ('queued', 'running', 'waiting_space') "
-                    "AND json_extract(params, '$.rip_id') = ? LIMIT 1", (rip_id,)).fetchone():
+    # A queued job whose drive no longer has its disc can never run: it mustn't hold clean-up forever.
+    if conn.execute("SELECT 1 FROM jobs LEFT JOIN drives ON drives.id = jobs.drive_id "
+                    "WHERE jobs.kind = 'rip_title' AND json_extract(jobs.params, '$.rip_id') = ? "
+                    "AND (jobs.state = 'running' OR (jobs.state IN ('queued', 'waiting_space') "
+                    "AND drives.media_state = 'disc')) LIMIT 1", (rip_id,)).fetchone():
         return True
     return conn.execute("SELECT 1 FROM encodes WHERE rip_id = ? AND state IN ('queued', 'running') LIMIT 1",
                         (rip_id,)).fetchone() is not None

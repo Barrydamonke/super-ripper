@@ -180,3 +180,67 @@ def test_start_reconciles_interrupted_cd_rips(config, add_sg):
     row = cd_rips.get(conn, ident_job)
     assert row["state"] == "needs_look" and "interrupted" in row["reasons"]
     conn.close()
+
+
+def test_startup_sweeps_leftover_partials(config, add_sg):
+    import asyncio
+
+    from disc_ripper import video_rips
+
+    conn = _prepare(config, add_sg)
+    drives.set_media(conn, "serial:A", "disc", "dvd", "X", "t")
+    ids = {}
+    for name, state in (("running", "running"), ("queued", "queued"), ("waiting", "waiting_space"),
+                        ("failed", "failed"), ("cancelled", "cancelled"), ("done", "done"),
+                        ("moved", "done")):
+        job = jobs.enqueue(conn, "serial:A", "rip_title", {"rip_id": 50}, uses_drive=True, now="t")
+        with conn:
+            conn.execute("UPDATE jobs SET state = ? WHERE id = ?", (state, job))
+        ids[name] = job
+    # "moved" belongs to a move_failed rip of its own, and its file is what Move again needs
+    with conn:
+        conn.execute("INSERT INTO video_rips (rip_id, fingerprint, state, created_at, updated_at) "
+                     "VALUES (?, 'fp', 'move_failed', 't', 't')", (ids["moved"],))
+        conn.execute("UPDATE jobs SET params = json_set(params, '$.rip_id', ?) WHERE id = ?",
+                     (ids["moved"], ids["moved"]))
+    for name, job in ids.items():
+        rip = ids["moved"] if name == "moved" else 50
+        folder = video_rips.partial_dir(config.downloads_dir, rip, job)
+        folder.mkdir(parents=True)
+        (folder / "t.mkv").write_bytes(b"x")
+    orphan = video_rips.partial_dir(config.downloads_dir, 51, 9999)  # a job that no longer exists
+    orphan.mkdir(parents=True)
+    svc = services.Services(config)
+
+    async def main():
+        await svc.start()
+        await svc.stop()
+
+    asyncio.run(main())
+    kept = {n for n, j in ids.items()
+            if video_rips.partial_dir(config.downloads_dir, ids["moved"] if n == "moved" else 50, j).is_dir()}
+    assert kept == {"queued", "waiting", "moved"}  # the running one was interrupted by the restart
+    assert not orphan.exists() and not (config.downloads_dir / "51").exists()
+    conn.close()
+
+
+def test_startup_cancels_queued_disc_jobs_without_a_disc(config, add_sg):
+    import asyncio
+
+    conn = _prepare(config, add_sg)
+    drives.set_media(conn, "serial:A", "empty", None, "", "t")
+    rip = jobs.enqueue(conn, "serial:A", "rip_title", {"rip_id": 1, "title": 0}, uses_drive=True, now="t")
+    scan = jobs.enqueue(conn, "serial:A", "scan_video", {"label": "X"}, uses_drive=True, now="t")
+    other = jobs.enqueue(conn, "serial:A", "test", {"duration_s": 1}, now="t")
+    svc = services.Services(config)
+
+    async def main():
+        await svc.start()
+        await svc.stop()
+
+    asyncio.run(main())
+    for job in (rip, scan):
+        row = jobs.get(conn, job)
+        assert row["state"] == "cancelled" and row["message"] == "The disc was taken out while the app was off."
+    assert jobs.get(conn, other)["state"] != "cancelled"
+    conn.close()

@@ -289,7 +289,17 @@ class JobRunner:
             pass
         event.clear()
 
-    def _space_check(self, conn, needs_bytes: int) -> str | None:
+    def _space_check(self, conn, needs_bytes: int, kind: str | None = None) -> str | None:
+        if kind == "rip_title":
+            # DVD/Blu-ray rips write into downloads: that disk's space, not the work-area budget.
+            from . import videorip
+
+            return self.space.check(
+                needs_bytes,
+                videorip.outstanding_bytes(conn, self.config.work_dir, None, self.config.downloads_dir),
+                0, settings.get(conn, "cache_min_free_gb"),
+                self.config.downloads_dir, False,
+            )
         return self.space.check(
             needs_bytes,
             jobs.running_bytes(conn) + encodes.reserved_bytes(conn),
@@ -314,7 +324,7 @@ class JobRunner:
             await self._wait(drive_id, None)
             return
         async with self._start_lock:
-            reason = await self.db(self._space_check, job["needs_bytes"])
+            reason = await self.db(self._space_check, job["needs_bytes"], job["kind"])
             started = reason is None and await self.db(jobs.start, job["id"], utc_now())
         if reason is not None:
             if job["state"] != "waiting_space" or job["message"] != reason:

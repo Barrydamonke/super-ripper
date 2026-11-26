@@ -618,3 +618,15 @@ def test_cancelled_rip_attempt_does_not_block(config, setup, tmp_path):
     rip, _ = make_rip(setup, config)
     _rip_attempt(setup, rip, 1, "cancelled")
     assert filmimport.ready_to_import(setup, rip)
+
+
+def test_cleanup_guard_ignores_queued_jobs_without_a_disc(config, setup, tmp_path):
+    rip, _ = make_rip(setup, config)
+    _rip_attempt(setup, rip, 1, "queued")
+    assert filmimport._disc_has_work(setup, rip)  # serial:A still holds its disc
+    from disc_ripper import drives
+    drives.set_media(setup, "serial:A", "empty", None, "", "t9")
+    assert not filmimport._disc_has_work(setup, rip)  # taken out while the app was down
+    with setup:
+        setup.execute("UPDATE jobs SET state = 'running'")
+    assert filmimport._disc_has_work(setup, rip)

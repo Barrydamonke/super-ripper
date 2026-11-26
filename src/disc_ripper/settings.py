@@ -37,11 +37,11 @@ class SettingDef:
 SETTINGS: tuple[SettingDef, ...] = (
     SettingDef(
         "work_budget_gb", "Work area budget", "int", 60, "GB", 1, 10000,
-        "Space the in-progress work area may use on the cache.",
+        "Space the in-progress work area may use on the cache. It covers CD rips and encodes, not DVD and Blu-ray rips (those write to downloads).",
     ),
     SettingDef(
         "cache_min_free_gb", "Minimum free cache space", "int", 20, "GB", 0, 10000,
-        "A rip only starts if at least this much stays free on the cache pool.",
+        "A rip only starts if at least this much stays free on the cache pool (or the downloads disk, for DVD and Blu-ray rips).",
     ),
     SettingDef(
         "auto_start_rips", "Auto-start rips", "bool", True,

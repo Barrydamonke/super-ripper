@@ -134,3 +134,33 @@ def test_progress_after_finish_is_ignored(conn):
     jobs.set_progress(conn, j, 0.5, "Test job: 3m left", None)
     row = jobs.get(conn, j)
     assert (row["message"], row["progress"]) == (jobs.INTERRUPTED_MESSAGE, 0.0)
+
+
+def test_double_retry_queues_once(conn):
+    rip = {"rip_id": 5, "title": 1, "fingerprint": "fp"}
+    j = jobs.enqueue(conn, "serial:A", "rip_title", rip, uses_drive=True, now="t")
+    jobs.start(conn, j, "t")
+    jobs.finish(conn, j, "failed", "t", error="x")
+    first = jobs.retry(conn, j, "t2")
+    assert first is not None
+    assert jobs.retry(conn, j, "t3") is None  # the double-click
+    # The same for a scan, matched by label; another title's retry is separate.
+    scan = jobs.enqueue(conn, "serial:A", "scan_video", {"label": "X"}, uses_drive=True, now="t")
+    jobs.finish(conn, scan, "failed", "t")
+    assert jobs.retry(conn, scan, "t2") is not None
+    assert jobs.retry(conn, scan, "t3") is None
+    other = jobs.enqueue(conn, "serial:A", "rip_title", {**rip, "title": 2}, uses_drive=True, now="t")
+    jobs.finish(conn, other, "failed", "t")
+    assert jobs.retry(conn, other, "t2") is not None
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE state = 'queued'").fetchone()[0] == 3
+
+
+def test_retry_refused_when_newer_job_exists(conn):
+    rip = {"rip_id": 5, "title": 1}
+    old = jobs.enqueue(conn, "serial:A", "rip_title", rip, uses_drive=True, now="t")
+    jobs.finish(conn, old, "failed", "t")
+    newer = jobs.enqueue(conn, "serial:A", "rip_title", rip, uses_drive=True, now="t")
+    jobs.start(conn, newer, "t")
+    jobs.finish(conn, newer, "cancelled", "t")  # the newer attempt is over too: still not this one's to retry
+    assert jobs.retry(conn, old, "t2") is None
+    assert jobs.retry(conn, newer, "t2") is not None

@@ -63,6 +63,37 @@ def drop_partial(downloads_dir: Path, rip_id: int, job_id: int) -> None:
             break
 
 
+def sweep_partials(conn: sqlite3.Connection, downloads_dir: Path) -> list[tuple[int, int]]:
+    """Remove every downloads/<rip>/.partial/<job>/ whose job is not queued, running or waiting_space,
+    except a done job of a move_failed rip (its file is what Move again needs).
+    Returns the (rip id, job id) pairs removed."""
+    removed = []
+    try:
+        rip_folders = [p for p in downloads_dir.iterdir() if p.is_dir() and p.name.isdigit()]
+    except OSError:
+        return removed
+    for rip_folder in rip_folders:
+        partial = rip_folder / PARTIAL
+        try:
+            job_folders = [p for p in partial.iterdir() if p.is_dir() and p.name.isdigit()]
+        except OSError:
+            continue
+        rip_id = int(rip_folder.name)
+        for job_folder in job_folders:
+            job_id = int(job_folder.name)
+            job = conn.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            state = job["state"] if job is not None else None
+            if state in ("queued", "running", "waiting_space"):
+                continue
+            if state == "done":
+                rip = conn.execute("SELECT state FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+                if rip is not None and rip["state"] == "move_failed":
+                    continue
+            drop_partial(downloads_dir, rip_id, job_id)
+            removed.append((rip_id, job_id))
+    return removed
+
+
 def has_downloads(folder: Path) -> bool:
     """The rip's downloads folder holds something besides MakeMKV's partial files."""
     try:
@@ -90,7 +121,9 @@ def stuck_in_work(conn: sqlite3.Connection, work_dir: Path, rip_id: int, finishi
 def blocking_rip(conn: sqlite3.Connection, fingerprint: str, downloads_dir: Path,
                  work_dir: Path) -> dict | None:
     """A rip that means this disc shouldn't auto-start again: one in progress, one with a
-    folder in downloads, or one whose move failed and still has its file in /work.
+    folder in downloads, one whose move failed and still has its file in /work, one whose film
+    was imported (even once its folder is cleaned up: state "in_library", with the film's
+    "title"), or one the owner skipped.
 
     Returns {"rip_id", "state"}. A row still marked 'ripping' with nothing active (it wasn't
     settled, e.g. after a crash) is reported as what it has become, so "Rip again" is offered."""
@@ -106,8 +139,14 @@ def blocking_rip(conn: sqlite3.Connection, fingerprint: str, downloads_dir: Path
     if active is not None:
         return {"rip_id": active["rip_id"], "state": "ripping"}
     for row in conn.execute(
-        "SELECT * FROM video_rips WHERE fingerprint = ? AND state != 'failed' ORDER BY rip_id DESC", (fingerprint,)
+        "SELECT video_rips.*, film_imports.state AS import_state, film_imports.title AS film_title "
+        "FROM video_rips LEFT JOIN film_imports ON film_imports.rip_id = video_rips.rip_id "
+        "WHERE fingerprint = ? AND video_rips.state != 'failed' ORDER BY video_rips.rip_id DESC", (fingerprint,)
     ).fetchall():
+        if row["import_state"] in ("imported", "in_jellyfin"):
+            return {"rip_id": row["rip_id"], "state": "in_library", "title": row["film_title"] or ""}
+        if row["import_state"] == "skipped":
+            return {"rip_id": row["rip_id"], "state": "ripped"}
         stuck = stuck_in_work(conn, work_dir, row["rip_id"], downloads_dir=downloads_dir)
         if stuck or has_downloads(downloads_dir / str(row["rip_id"])):
             state = row["state"]

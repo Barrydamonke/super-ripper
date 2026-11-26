@@ -43,9 +43,9 @@ def _read_settings(conn):
     return settings.get(conn, "encode_stall_minutes"), settings.get(conn, "cache_min_free_gb")
 
 
-def _other_reserved(conn, work_dir: Path, encode_id: int) -> int:
+def _other_reserved(conn, work_dir: Path, encode_id: int, downloads_dir: Path | None = None) -> int:
     """What other running rips and encodes were admitted for but haven't written yet."""
-    total = videorip.outstanding_bytes(conn, work_dir, None)
+    total = videorip.outstanding_bytes(conn, work_dir, None, downloads_dir)
     for other in encodes.running(conn):
         if other["id"] != encode_id:
             written = space_mod.tree_size(work_dir / f"encode-{other['id']}")
@@ -249,7 +249,7 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
 
     await ctx.report(0.99, "Moving to downloads…")
     stop = threading.Event()
-    reserved = await ctx.db(_other_reserved, ctx.config.work_dir, ctx.job_id)
+    reserved = await ctx.db(_other_reserved, ctx.config.work_dir, ctx.job_id, ctx.config.downloads_dir)
     copying = asyncio.ensure_future(asyncio.to_thread(
         _move, ctx.config, row["rip_id"], row["role"], out, min_free, stop, reserved))
     try:

@@ -101,7 +101,7 @@ class Services:
         self._import_locks: dict[int, asyncio.Lock] = {}
         self._import_tasks: set[asyncio.Task] = set()
         self.dvd_decoy_wait: float = DVD_DECOY_WAIT_SECONDS
-        self._dvd_waits: set[asyncio.Task] = set()
+        self._dvd_waits: dict[str, asyncio.Task] = {}  # drive id -> its pending DVD wait
         self.auto_retry_wait: float = AUTO_RETRY_SECONDS
         self._auto_retries: set[asyncio.Task] = set()
         self._retry_rips: dict[int, int] = {}  # job id of a pending automatic retry -> its rip
@@ -379,8 +379,21 @@ class Services:
             log.info("video: DVD wait over on %s: %s", drive_id, outcome)
 
         task = asyncio.get_running_loop().create_task(later())
-        self._dvd_waits.add(task)
-        task.add_done_callback(self._dvd_waits.discard)
+        old = self._dvd_waits.get(drive_id)
+        if old is not None:
+            old.cancel()
+        self._dvd_waits[drive_id] = task
+
+        def forget(done, drive_id=drive_id):
+            if self._dvd_waits.get(drive_id) is done:
+                del self._dvd_waits[drive_id]
+
+        task.add_done_callback(forget)
+
+    def dvd_wait_pending(self, drive_id: str) -> bool:
+        """A DVD on this drive is waiting out its decoy delay before ripping by itself."""
+        task = self._dvd_waits.get(drive_id)
+        return task is not None and not task.done()
 
     async def start_video_rip(self, drive_id: str, fingerprint: str, *, main: int | None, extras: list[int],
                               again: bool, scan_job_id: int | None = None, after_wait: bool = False) -> int | None:
@@ -681,8 +694,34 @@ class Services:
         return sum(self.delete_raw_sync(conn, p["rip_id"], p["title"], now=now, keep_hours=keep) is None
                    for p in pairs)  # refusals are normal (not yet, or already gone)
 
+    def _cancel_orphaned_disc_jobs(self, conn) -> None:
+        """Start-up: queued disc jobs whose disc was taken out while the app was off can never run."""
+        ids = [r[0] for r in conn.execute(
+            "SELECT jobs.id FROM jobs JOIN drives ON drives.id = jobs.drive_id "
+            "WHERE jobs.kind IN ('rip_title', 'scan_video') AND jobs.state IN ('queued', 'waiting_space') "
+            "AND drives.media_state != 'disc'")]
+        if not ids:
+            return
+        with conn:
+            conn.executemany(
+                "UPDATE jobs SET state = 'cancelled', finished_at = ?, message = ? WHERE id = ?",
+                [(utc_now(), "The disc was taken out while the app was off.", i) for i in ids])
+        for job_id in ids:
+            self._settle_for_job(conn, job_id)
+        log.info("jobs: cancelled %d queued disc job(s): their disc was taken out while the app was off", len(ids))
+
+    def _sweep_partials(self, conn) -> int:
+        removed = video_rips.sweep_partials(conn, self.config.downloads_dir)
+        for rip_id, job_id in removed:
+            log.info("video: removed the leftover partial folder of job #%s (rip #%s)", job_id, rip_id)
+        return len(removed)
+
     async def _raw_sweep_loop(self) -> None:
         while True:
+            try:
+                await asyncio.to_thread(self._db, self._sweep_partials)
+            except Exception:
+                log.exception("video: removing leftover partial folders failed")
             try:
                 if await asyncio.to_thread(self._db, self._sweep_raw):
                     await self.encodes_changed()
@@ -812,10 +851,10 @@ class Services:
         if not await asyncio.to_thread(self._db, self._plan_auto_retry, job_id):
             return
         row = await asyncio.to_thread(self._db, jobs.get, job_id)
-        await self.drive_changed(row["drive_id"])
         rip_id = json.loads(row["params"]).get("rip_id") if row["kind"] == "rip_title" else None
-        if rip_id is not None:
+        if rip_id is not None:  # before any await: a concurrent readiness check must see the pending retry
             self._retry_rips[job_id] = rip_id
+        await self.drive_changed(row["drive_id"])
 
         async def later():
             try:
@@ -916,6 +955,13 @@ class Services:
         disc = video_rips.disc_in_drive(conn, drive_id)
         if disc is None:
             return []
+        held = json.loads(disc["held"])
+        if any(r.startswith(titles.DECOY_REASON + ":") for r in held):  # the wait is over: drop "rips at HH:MM"
+            held = [titles.DECOY_REASON if r.startswith(titles.DECOY_REASON + ":") else r for r in held]
+            held.append("Hold pressed")
+            with conn:
+                conn.execute("UPDATE video_discs SET held = ? WHERE fingerprint = ?",
+                             (json.dumps(held), disc["fingerprint"]))
         # One write transaction, so the worker can't start the main title or an extra in between.
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -938,6 +984,9 @@ class Services:
 
     async def hold_video(self, drive_id: str) -> None:
         """Hold the disc: no automatic rip, and a queued (not yet running) main rip is cancelled."""
+        task = self._dvd_waits.pop(drive_id, None)
+        if task is not None:  # Hold during the DVD's wait: it must not rip when the wait ends
+            task.cancel()
         await asyncio.to_thread(self._db, self._hold_video, drive_id)
         self.wake(drive_id)
         await self.drive_changed(drive_id)
@@ -952,7 +1001,8 @@ class Services:
             row = conn.execute("SELECT * FROM drives WHERE id = ?", (drive_id,)).fetchone()
             if row is None:
                 return None
-            return render_drive_card(conn, row, datetime.now().astimezone(), config=self.config)
+            return render_drive_card(conn, row, datetime.now().astimezone(), config=self.config,
+                                     dvd_wait_pending=self.dvd_wait_pending)
         finally:
             conn.close()
 
@@ -1048,6 +1098,8 @@ class Services:
             cd_rips.reconcile(conn, self.config.work_dir)
             for rip_id in video_rips.unsettled(conn):  # rips whose last job ended in the last run
                 video_rips.settle(conn, rip_id, self.config.work_dir, utc_now(), downloads_dir=self.config.downloads_dir)
+            self._cancel_orphaned_disc_jobs(conn)
+            self._sweep_partials(conn)
             cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc))
         finally:
             conn.close()

@@ -665,3 +665,38 @@ def test_encode_choice_needs_a_disc(dash):
     r = client.post("/dashboard/video/encode-choice", data={"drive_id": "serial:A", "preset": "2"})
     assert r.status_code == 400 and "No DVD or Blu-ray in the drive." in r.text
     assert conn.execute("SELECT encode_choice FROM drives WHERE id = 'serial:A'").fetchone()[0] is None
+
+
+def test_hold_during_dvd_wait_cancels_it(dash):
+    client, conn = dash
+    services_ = client.app.state.services
+    reason = ("two titles of about the same length (decoy playlists?): the longest title (#0) rips at 12:00 "
+              "unless you choose or press Hold")
+    _video_disc(conn, DECOY, held=[reason], disc_type="dvd")
+    services_.dvd_decoy_wait = 60
+
+    async def main():
+        services_.rip_dvd_later("serial:A", conn.execute("SELECT fingerprint FROM video_discs").fetchone()[0], 0)
+        task = services_._dvd_waits["serial:A"]
+        assert services_.dvd_wait_pending("serial:A")
+        html = await asyncio.to_thread(dashboard_routes._with_conn, type("R", (), {"app": client.app})(),
+                                       dashboard_routes._card_sync, client.app.state.config, "serial:A", None,
+                                       services_.dvd_wait_pending)
+        assert 'hx-post="/dashboard/video/hold"' in html
+        await services_.hold_video("serial:A")
+        await asyncio.sleep(0)
+        assert task.cancelled() and not services_.dvd_wait_pending("serial:A")
+
+    asyncio.run(main())
+    assert conn.execute("SELECT video_hold FROM drives").fetchone()[0] == 1
+    held = json.loads(conn.execute("SELECT held FROM video_discs").fetchone()[0])
+    assert held == ["two titles of about the same length (decoy playlists?)", "Hold pressed"]
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind = 'rip_title'").fetchone()[0] == 0
+    assert 'hx-post="/dashboard/video/hold"' not in _page(client)
+
+
+def test_retry_button_disables_itself(dash):
+    client, conn = dash
+    j = jobs.enqueue(conn, "serial:A", "rip_title", {"rip_id": 1}, now="t")
+    jobs.finish(conn, j, "failed", "t2", error="boom")
+    assert f'hx-post="/jobs/{j}/retry" hx-target="#drive-{KEY}" hx-disabled-elt="this"' in _page(client)

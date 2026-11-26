@@ -128,6 +128,8 @@ def _decide(conn, drive_id, disc_type, label, scan, minlength, from_insert, down
         hold_pressed=bool(hold and hold["video_hold"]),
         already_ripped=f"downloads/{blocking['rip_id']}/" if blocking is not None else None,
         from_insert=from_insert,
+        in_library=(blocking["title"] or f"rip #{blocking['rip_id']}")
+        if blocking is not None and blocking["state"] == "in_library" else None,
     )
     if dvd_waits_out(disc_type, reasons):
         main = titles.main_title(scan.titles)
