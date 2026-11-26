@@ -146,7 +146,7 @@ def blocking_rip(conn: sqlite3.Connection, fingerprint: str, downloads_dir: Path
         if row["import_state"] in ("imported", "in_jellyfin"):
             return {"rip_id": row["rip_id"], "state": "in_library", "title": row["film_title"] or ""}
         if row["import_state"] == "skipped":
-            return {"rip_id": row["rip_id"], "state": "ripped"}
+            return {"rip_id": row["rip_id"], "state": "ripped", "skipped": True}
         stuck = stuck_in_work(conn, work_dir, row["rip_id"], downloads_dir=downloads_dir)
         if stuck or has_downloads(downloads_dir / str(row["rip_id"])):
             state = row["state"]

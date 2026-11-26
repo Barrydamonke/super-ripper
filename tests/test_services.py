@@ -244,3 +244,22 @@ def test_startup_cancels_queued_disc_jobs_without_a_disc(config, add_sg):
         assert row["state"] == "cancelled" and row["message"] == "The disc was taken out while the app was off."
     assert jobs.get(conn, other)["state"] != "cancelled"
     conn.close()
+
+
+def test_startup_keeps_queued_jobs_when_the_stored_media_state_is_unclear(config, add_sg):
+    import asyncio
+
+    conn = _prepare(config, add_sg)
+    rip = jobs.enqueue(conn, "serial:A", "rip_title", {"rip_id": 1, "title": 0}, uses_drive=True, now="t")
+    for state in ("unknown", "not_ready"):  # the last reading before the stop says nothing about the disc
+        conn.execute("UPDATE drives SET media_state = ?", (state,))
+        conn.commit()
+        svc = services.Services(config)
+
+        async def main():
+            await svc.start()
+            await svc.stop()
+
+        asyncio.run(main())
+        assert jobs.get(conn, rip)["state"] == "queued"
+    conn.close()

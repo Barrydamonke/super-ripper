@@ -256,6 +256,9 @@ def test_reinsert_after_skip_counts_as_already_ripped(config, setup):
     rip = start(services, fp)
     _imported_and_cleaned(setup, config, rip, "skipped")
     assert video_rips.blocking_rip(setup, fp, config.downloads_dir, config.work_dir) == {
-        "rip_id": rip, "state": "ripped"}
+        "rip_id": rip, "state": "ripped", "skipped": True}
+    j = scan_job(setup, from_insert=True)
+    run(config, services, finished(setup, j))
+    assert "already ripped (skipped in Radarr)" in json.loads(video_rips.disc_in_drive(setup, "serial:A")["held"])
     assert start(services, fp, again=False) is None
     assert start(services, fp, again=True) is not None

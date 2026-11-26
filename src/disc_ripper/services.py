@@ -699,7 +699,7 @@ class Services:
         ids = [r[0] for r in conn.execute(
             "SELECT jobs.id FROM jobs JOIN drives ON drives.id = jobs.drive_id "
             "WHERE jobs.kind IN ('rip_title', 'scan_video') AND jobs.state IN ('queued', 'waiting_space') "
-            "AND drives.media_state != 'disc'")]
+            "AND drives.media_state IN ('empty', 'tray_open')")]
         if not ids:
             return
         with conn:
