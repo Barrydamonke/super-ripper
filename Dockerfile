@@ -54,10 +54,6 @@ ENV PYTHONUNBUFFERED=1 \
     PORT=8580 \
     LIBVA_DRIVER_NAME=iHD
 
-# The commit the image was built from, shown in the start-up log line.
-ARG GIT_SHA=
-ENV GIT_SHA=${GIT_SHA}
-
 WORKDIR /app
 COPY pyproject.toml constraints.txt README.md ./
 COPY src ./src
@@ -65,6 +61,11 @@ RUN pip install --no-cache-dir --root-user-action=ignore -c constraints.txt . &&
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod 0755 /entrypoint.sh
+
+# Last, so a new commit doesn't invalidate the dependency-install layer.
+# The commit the image was built from, shown in the start-up log line.
+ARG GIT_SHA=
+ENV GIT_SHA=${GIT_SHA}
 
 EXPOSE 8580
 VOLUME ["/config"]

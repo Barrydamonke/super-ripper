@@ -226,3 +226,18 @@ def test_migrate_no_backup_when_up_to_date(config):
     finally:
         conn.close()
     assert not (config.config_dir / "backups").exists()
+
+
+def test_failing_backup_blocks_migration(config, monkeypatch):
+    conn = _old_db(config)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(db, "_backup_before_upgrade", boom)
+    try:
+        with pytest.raises(OSError):
+            db.migrate(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        conn.close()

@@ -252,7 +252,7 @@ Docker tab → the container → Check for updates (or Force update). Settings a
 
 The template sets `--restart=unless-stopped` in Extra Parameters so the container comes back after a crash or a reboot. On an install made before that was added, add it by hand: Docker tab → the container → Edit → Advanced View → Extra Parameters, append `--restart=unless-stopped`, Apply.
 
-The app's own log is `/config/logs/app.log` (5 files of 2 MB); its first line at each start says which version and commit is running. Before an update changes the database, the app copies it to `/config/backups/disc-ripper-v<old>.db` (the newest 5 are kept).
+The app's own log is `/config/logs/app.log` (5 files of 2 MB); its first line at each start says which version and commit is running. Before an update changes the database, the app copies it to `/config/backups/disc-ripper-v<old>.db` (the newest 5 are kept). If the backup can't be written (for example `/config` is full), the upgrade doesn't run and the app won't start; free space and restart.
 
 ### Going back to an older version
 
