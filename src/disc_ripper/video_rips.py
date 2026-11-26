@@ -42,15 +42,49 @@ def disc_in_drive(conn: sqlite3.Connection, drive_id: str) -> sqlite3.Row | None
     ).fetchone()
 
 
-def stuck_in_work(conn: sqlite3.Connection, work_dir: Path, rip_id: int, finishing_job: int | None = None) -> bool:
-    """A finished title's file still sits in /work/<job>/ (its move to downloads failed).
+PARTIAL = ".partial"
+
+
+def partial_dir(downloads_dir: Path, rip_id: int, job_id: int) -> Path:
+    """Where a rip_title job's MakeMKV writes: inside the rip's own downloads folder, so the
+    finished file is renamed into place instead of copied (a Blu-ray needed its size twice)."""
+    return downloads_dir / str(rip_id) / PARTIAL / str(job_id)
+
+
+def drop_partial(downloads_dir: Path, rip_id: int, job_id: int) -> None:
+    """Remove a job's partial folder, then .partial and the rip folder if that left them empty."""
+    import shutil
+    folder = partial_dir(downloads_dir, rip_id, job_id)
+    shutil.rmtree(folder, ignore_errors=True)
+    for empty in (folder.parent, folder.parent.parent):
+        try:
+            empty.rmdir()
+        except OSError:
+            break
+
+
+def has_downloads(folder: Path) -> bool:
+    """The rip's downloads folder holds something besides MakeMKV's partial files."""
+    try:
+        return any(entry.name != PARTIAL for entry in folder.iterdir())
+    except OSError:
+        return False
+
+
+def stuck_in_work(conn: sqlite3.Connection, work_dir: Path, rip_id: int, finishing_job: int | None = None,
+                  downloads_dir: Path | None = None) -> bool:
+    """A finished title's file still sits where MakeMKV wrote it (its move to downloads failed):
+    downloads/<rip>/.partial/<job>/, or /work/<job>/ for rips from before that.
     finishing_job counts as finished (its handler is about to return)."""
     ids = [r[0] for r in conn.execute(
         "SELECT id FROM jobs WHERE kind = 'rip_title' AND state = 'done' AND json_extract(params, '$.rip_id') = ?",
         (rip_id,))]
     if finishing_job is not None:
         ids.append(finishing_job)
-    return any((work_dir / str(i)).is_dir() and any((work_dir / str(i)).glob("*.mkv")) for i in ids)
+    folders = [work_dir / str(i) for i in ids]
+    if downloads_dir is not None:
+        folders += [partial_dir(downloads_dir, rip_id, i) for i in ids]
+    return any(f.is_dir() and any(f.glob("*.mkv")) for f in folders)
 
 
 def blocking_rip(conn: sqlite3.Connection, fingerprint: str, downloads_dir: Path,
@@ -74,8 +108,8 @@ def blocking_rip(conn: sqlite3.Connection, fingerprint: str, downloads_dir: Path
     for row in conn.execute(
         "SELECT * FROM video_rips WHERE fingerprint = ? AND state != 'failed' ORDER BY rip_id DESC", (fingerprint,)
     ).fetchall():
-        stuck = stuck_in_work(conn, work_dir, row["rip_id"])
-        if stuck or (downloads_dir / str(row["rip_id"])).exists():
+        stuck = stuck_in_work(conn, work_dir, row["rip_id"], downloads_dir=downloads_dir)
+        if stuck or has_downloads(downloads_dir / str(row["rip_id"])):
             state = row["state"]
             if state == "ripping":
                 state = "move_failed" if stuck else "ripped"
@@ -141,7 +175,7 @@ _ENDED_WORDS = {"failed": "failed", "cancelled": "cancelled", "interrupted": "wa
 
 
 def settle(conn: sqlite3.Connection, rip_id: int, work_dir: Path, now: str,
-           finishing_job: int | None = None) -> str | None:
+           finishing_job: int | None = None, downloads_dir: Path | None = None) -> str | None:
     """Once nothing of a rip is pending, record what became of it. Returns the state.
 
     A file still in /work after a failed move makes it move_failed (Move again); otherwise any
@@ -158,7 +192,7 @@ def settle(conn: sqlite3.Connection, rip_id: int, work_dir: Path, now: str,
         if title not in latest or job_id > latest[title][0]:
             latest[title] = (job_id, state)
     files = json.loads(rip["files"] or "{}")
-    stuck = stuck_in_work(conn, work_dir, rip_id, finishing_job)
+    stuck = stuck_in_work(conn, work_dir, rip_id, finishing_job, downloads_dir)
     notes = []
     for title, (_job, state) in sorted(latest.items()):
         if str(title) in files:

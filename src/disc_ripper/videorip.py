@@ -214,26 +214,35 @@ def _label(conn, params: dict) -> str:
 
 
 def _after_move(conn, work_dir: Path, rip_id: int, job_id: int, title: int, path: Path | None, role: str,
-                message: str, now: str):
+                message: str, now: str, downloads_dir: Path | None = None):
     if path is None:
         video_rips.set_state(conn, rip_id, "move_failed", message, now)
     else:
         video_rips.record_file(conn, rip_id, title, path, role, now)
-    video_rips.settle(conn, rip_id, work_dir, now, finishing_job=job_id)
+    video_rips.settle(conn, rip_id, work_dir, now, finishing_job=job_id, downloads_dir=downloads_dir)
 
 
-def outstanding_bytes(conn, work_dir: Path, exclude_job: int | None) -> int:
-    """What other running jobs were admitted for but haven't written to /work/<job>/ yet."""
+def outstanding_bytes(conn, work_dir: Path, exclude_job: int | None, downloads_dir: Path | None = None) -> int:
+    """What other running jobs were admitted for but haven't written yet (to /work/<job>/, or a
+    rip's downloads/<rip>/.partial/<job>/)."""
     total = 0
-    for row in conn.execute("SELECT id, needs_bytes FROM jobs WHERE state = 'running' AND id IS NOT ?",
-                            (exclude_job,)):
+    for row in conn.execute(
+            "SELECT id, needs_bytes, json_extract(params, '$.rip_id') AS rip_id FROM jobs "
+            "WHERE state = 'running' AND id IS NOT ?", (exclude_job,)):
         written = space.tree_size(work_dir / str(row["id"]))
+        if downloads_dir is not None and row["rip_id"] is not None:
+            written += space.tree_size(video_rips.partial_dir(downloads_dir, row["rip_id"], row["id"]))
         total += max(row["needs_bytes"] - written, 0)
     return total
 
 
 def _move(config, rip_id: int, role: str, src: Path, min_free_gb: float,
           cancel: threading.Event | None = None, reserved_bytes: int = 0) -> tuple[Path | None, str]:
+    """Rename the finished file into downloads; copy it only if a rename can't be done."""
+    try:
+        return videofiles.place_in_downloads(config, rip_id, role, src), ""
+    except OSError as exc:
+        log.warning("video: renaming rip #%s into downloads failed (%s); copying instead", rip_id, exc)
     try:
         return videofiles.move_to_downloads(config, rip_id, role, src, min_free_gb=min_free_gb,
                                            cancel=cancel, reserved_bytes=reserved_bytes), ""
@@ -244,13 +253,14 @@ def _move(config, rip_id: int, role: str, src: Path, min_free_gb: float,
 
 async def run_rip_title(ctx: runner.JobContext) -> None:
     params = ctx.params
-    work = ctx.config.work_dir / str(ctx.job_id)
+    work = video_rips.partial_dir(ctx.config.downloads_dir, params["rip_id"], ctx.job_id)
     try:
         await _rip_title(ctx, params, work)
     except asyncio.CancelledError:
+        video_rips.drop_partial(ctx.config.downloads_dir, params["rip_id"], ctx.job_id)
         raise
     except Exception as exc:
-        shutil.rmtree(work, ignore_errors=True)
+        video_rips.drop_partial(ctx.config.downloads_dir, params["rip_id"], ctx.job_id)
         await ctx.db(video_rips.fail_if_nothing_done, params["rip_id"], ctx.job_id, str(exc), utc_now())
         raise
 
@@ -258,8 +268,9 @@ async def run_rip_title(ctx: runner.JobContext) -> None:
 async def _rip_title(ctx, params: dict, work: Path) -> None:
     rip_id, title, role = params["rip_id"], params["title"], params.get("role", "title")
     (key, selection, min_free, stall_minutes), old = await ctx.db(_prepare, params, ctx.job_id, utc_now())
-    for job in old:  # a cancelled or interrupted attempt's partial file would sit in the budget for a week
+    for job in old:  # a cancelled or interrupted attempt's partial file
         shutil.rmtree(ctx.config.work_dir / str(job), ignore_errors=True)
+        shutil.rmtree(video_rips.partial_dir(ctx.config.downloads_dir, rip_id, job), ignore_errors=True)
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     write_settings_conf(ctx.config.config_dir / "makemkv", key, selection)
@@ -289,7 +300,7 @@ async def _rip_title(ctx, params: dict, work: Path) -> None:
                                     params.get("expected_audio", -1))
     await ctx.report(0.99, "Moving to downloads…")
     stop = threading.Event()
-    reserved = await ctx.db(outstanding_bytes, ctx.config.work_dir, ctx.job_id)
+    reserved = await ctx.db(outstanding_bytes, ctx.config.work_dir, ctx.job_id, ctx.config.downloads_dir)
     copying = asyncio.ensure_future(asyncio.to_thread(_move, ctx.config, rip_id, role, src, min_free, stop, reserved))
     try:
         moved, message = await asyncio.shield(copying)
@@ -298,9 +309,10 @@ async def _rip_title(ctx, params: dict, work: Path) -> None:
         stop.set()
         await asyncio.gather(copying, return_exceptions=True)
         raise
-    await ctx.db(_after_move, ctx.config.work_dir, rip_id, ctx.job_id, title, moved, role, message, utc_now())
+    await ctx.db(_after_move, ctx.config.work_dir, rip_id, ctx.job_id, title, moved, role, message, utc_now(),
+                 ctx.config.downloads_dir)
     if moved is not None:
-        shutil.rmtree(work, ignore_errors=True)
+        video_rips.drop_partial(ctx.config.downloads_dir, rip_id, ctx.job_id)
         hook = getattr(ctx.services, "file_recorded", None)
         if hook is not None:
             await hook(rip_id, title)
@@ -325,24 +337,30 @@ def move_again_sync(conn, config, rip_id: int, on_recorded=None) -> str | None:
     error = None
     tried = False
     for title, job_id, state in video_rips.attempts(conn, rip_id):
-        folder = config.work_dir / str(job_id)
-        found = sorted(folder.glob("*.mkv")) if state == "done" and folder.is_dir() else []
+        found = []
+        for folder in (video_rips.partial_dir(config.downloads_dir, rip_id, job_id), config.work_dir / str(job_id)):
+            found = sorted(folder.glob("*.mkv")) if state == "done" and folder.is_dir() else []
+            if found:
+                break
         if not found:
             continue
         tried = True
         role = conn.execute("SELECT json_extract(params, '$.role') FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
         role = role or "title"
         moved, message = _move(config, rip_id, role, found[0], min_free,
-                               reserved_bytes=outstanding_bytes(conn, config.work_dir, None))
+                               reserved_bytes=outstanding_bytes(conn, config.work_dir, None, config.downloads_dir))
         if moved is None:
             error = message
             video_rips.set_state(conn, rip_id, "move_failed", message, utc_now())
             continue
-        shutil.rmtree(folder, ignore_errors=True)
+        if folder.parent.name == video_rips.PARTIAL:
+            video_rips.drop_partial(config.downloads_dir, rip_id, job_id)
+        else:
+            shutil.rmtree(folder, ignore_errors=True)
         video_rips.record_file(conn, rip_id, title, moved, role, utc_now())
         if on_recorded is not None:
             on_recorded(rip_id, title)
     if error is None:  # clear the old move message so settle writes the new outcome
         video_rips.set_state(conn, rip_id, "ripping", "", utc_now())
-    video_rips.settle(conn, rip_id, config.work_dir, utc_now())
+    video_rips.settle(conn, rip_id, config.work_dir, utc_now(), downloads_dir=config.downloads_dir)
     return error if tried else NOTHING_TO_MOVE

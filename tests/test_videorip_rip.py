@@ -153,8 +153,8 @@ def test_retry_removes_partial_work(config, setup):
     services, rip = scanned(config, setup)
     with setup:
         setup.execute("UPDATE jobs SET state = 'interrupted' WHERE id = ?", (rip,))
-    partial = config.work_dir / str(rip) / "title_t00.mkv"
-    partial.parent.mkdir()
+    partial = video_rips.partial_dir(config.downloads_dir, rip, rip) / "title_t00.mkv"
+    partial.parent.mkdir(parents=True)
     partial.write_text("partial")
     retry = jobs.retry(setup, rip, "t")
     run_until_done(config, setup, services, retry)
@@ -166,19 +166,44 @@ def shortfall(free_gb):
     return lambda path: types.SimpleNamespace(f_bavail=int(free_gb * 1024**3), f_frsize=1)
 
 
-def test_move_space_shortfall_is_move_failed(config, setup, monkeypatch):
+def test_low_cache_space_still_lands_because_it_is_a_rename(config, setup, monkeypatch):
+    """Project Hail Mary: a Blu-ray finished ripping but couldn't be copied for lack of space.
+    MakeMKV now writes inside the rip's downloads folder, so finishing is a rename."""
     services, rip = scanned(config, setup)
+    monkeypatch.setattr(videofiles, "STATVFS", shortfall(1))
+    row = run_until_done(config, setup, services, rip)
+    assert row["state"] == "done"
+    assert rip_state(setup, rip)["state"] == "ripped"
+    assert (config.downloads_dir / str(rip) / "title_t00.mkv").is_file()
+    assert not (config.downloads_dir / str(rip) / video_rips.PARTIAL).exists()
+    assert not (config.work_dir / str(rip)).exists()
+
+
+def test_without_rename_it_copies_and_move_again_works(config, setup, monkeypatch):
+    services, rip = scanned(config, setup)
+    monkeypatch.setattr(videofiles, "place_in_downloads", no_rename)
     monkeypatch.setattr(videofiles, "STATVFS", shortfall(1))
     row = run_until_done(config, setup, services, rip)
     assert row["state"] == "done"
     state = rip_state(setup, rip)
     assert state["state"] == "move_failed" and "Couldn't move to downloads" in state["message"]
-    assert (config.work_dir / str(rip) / "title_t00.mkv").is_file()
+    partial = video_rips.partial_dir(config.downloads_dir, rip, rip) / "title_t00.mkv"
+    assert partial.is_file()
+    assert blocking(config, setup, rip)["state"] == "move_failed"
     monkeypatch.setattr(videofiles, "STATVFS", shortfall(500))
     assert asyncio.run(services.move_again(rip)) is None
     assert rip_state(setup, rip)["state"] == "ripped"
     assert (config.downloads_dir / str(rip) / "title_t00.mkv").is_file()
-    assert not (config.work_dir / str(rip)).exists()
+    assert not (config.downloads_dir / str(rip) / video_rips.PARTIAL).exists()
+
+
+def test_cancelled_rip_leaves_no_folder_that_counts_as_ripped(config, setup):
+    services, rip = scanned(config, setup)
+    video_rips.partial_dir(config.downloads_dir, rip, rip).mkdir(parents=True)
+    video_rips.drop_partial(config.downloads_dir, rip, rip)
+    assert not (config.downloads_dir / str(rip)).exists()
+    (config.downloads_dir / str(rip) / video_rips.PARTIAL / "99").mkdir(parents=True)
+    assert not video_rips.has_downloads(config.downloads_dir / str(rip))
 
 
 def test_move_never_overwrites_and_ignores_part(config, tmp_path):
@@ -301,8 +326,13 @@ def test_cancel_mid_copy_stops_between_chunks(config, monkeypatch):
     assert src.exists() and not list((config.downloads_dir / "7").glob("*"))
 
 
-def test_handler_cancel_during_move_keeps_file_in_work(config, setup, monkeypatch):
+def no_rename(*args):
+    raise OSError(18, "Invalid cross-device link")
+
+
+def test_handler_cancel_during_copy_lands_nothing(config, setup, monkeypatch):
     services, rip = scanned(config, setup)
+    monkeypatch.setattr(videofiles, "place_in_downloads", no_rename)  # the copy fallback
     inside = threading.Event()
     real = videofiles.move_to_downloads
 
@@ -326,8 +356,7 @@ def test_handler_cancel_during_move_keeps_file_in_work(config, setup, monkeypatc
 
     asyncio.run(go())
     assert jobs.get(setup, rip)["state"] == "cancelled"
-    assert (config.work_dir / str(rip) / "title_t00.mkv").is_file()
-    assert not list((config.downloads_dir / str(rip)).glob("*"))
+    assert not (config.downloads_dir / str(rip)).exists()  # the cancelled rip's partial went too
     assert rip_state(setup, rip)["files"] == "{}"
 
 
@@ -428,6 +457,7 @@ def test_stale_ripping_row_with_downloads_blocks_as_ripped(config, setup):
     with setup:
         setup.execute("UPDATE jobs SET state = 'cancelled' WHERE id = ?", (rip,))
     (config.downloads_dir / str(rip)).mkdir(parents=True)
+    (config.downloads_dir / str(rip) / "title_t00.mkv").write_bytes(b"x")
     found = blocking(config, setup, rip)
     assert found is not None and found["state"] == "ripped" and found["rip_id"] == rip
 
@@ -503,6 +533,7 @@ def test_move_space_check_subtracts_other_running_rips(config, setup, monkeypatc
     from disc_ripper import settings
 
     services, rip = scanned(config, setup)
+    monkeypatch.setattr(videofiles, "place_in_downloads", no_rename)  # only a copy needs the space
     settings.save(setup, {"cache_min_free_gb": 1})
     other = jobs.enqueue(setup, "serial:A", "rip_title", {"rip_id": 999, "title": 0}, now="t",
                          needs_bytes=10 * 1024**3)
@@ -515,7 +546,7 @@ def test_move_space_check_subtracts_other_running_rips(config, setup, monkeypatc
     assert row["state"] == "done"
     state = rip_state(setup, rip)
     assert state["state"] == "move_failed" and "other rips" in state["message"]
-    assert (config.work_dir / str(rip) / "title_t00.mkv").is_file()
+    assert (video_rips.partial_dir(config.downloads_dir, rip, rip) / "title_t00.mkv").is_file()
     with setup:  # the other rip finished
         setup.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (other,))
     assert asyncio.run(services.move_again(rip)) is None

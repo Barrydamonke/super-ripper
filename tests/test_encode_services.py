@@ -80,6 +80,8 @@ def test_encode_refused_after_raw_deleted(config, setup):
 def test_move_again_queues_encode(config, setup, monkeypatch):
     services, rip = scanned(config, setup)
     monkeypatch.setattr(videofiles, "STATVFS", shortfall(1))
+    monkeypatch.setattr(videofiles, "place_in_downloads",  # no rename: the copy needs space
+                        lambda *a: (_ for _ in ()).throw(OSError(18, "Invalid cross-device link")))
     run_until_done(config, setup, services, rip)
     assert rip_state(setup, rip)["state"] == "move_failed"
     assert encodes_of(setup) == []

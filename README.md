@@ -56,7 +56,7 @@ Check the guard by hand: `curl -H "X-Shutdown-Secret: <secret>" http://<unraid-i
    - **retries** per bad sector;
    - **approval:** "only check the odd ones" files clean rips automatically; "always ask" sends every album to the Music page;
    - **cover art.**
-4. **Where files go.** Rips are made in `/work/<job>/` and then wait in `/data/downloads/disc-ripper/<job>/`. They're filed into `/data/MEDIA/Music`. Set `MUSIC_DIR` or `DOWNLOADS_DIR` on the container to change those two.
+4. **Where files go.** CD rips are made in `/work/<job>/`; DVD and Blu-ray rips are written straight into `/data/downloads/disc-ripper/<rip>/`. Both wait there in downloads. They're filed into `/data/MEDIA/Music`. Set `MUSIC_DIR` or `DOWNLOADS_DIR` on the container to change those two.
 
 Library layout:
 
@@ -93,7 +93,7 @@ What happens on insert: the disc is scanned and the **longest title** is taken a
 
 A held card lists the titles; pick one and press **Rip**. While a rip runs you can tick **extras** on the card; they are ripped after the main title, and the eject waits for them. Cancelling an unwanted extra still lets the disc eject; a failed title keeps the disc in for Retry. **Eject** also cancels anything still queued for that disc, as does taking the disc out.
 
-Where rips land: `/data/downloads/disc-ripper/<rip_id>/`, with extras in `extras/`. Files keep MakeMKV's own names and are never overwritten. Once a film is imported and Jellyfin shows it, its rip folder is cleaned up (see Importing films); otherwise delete a rip's folder to discard it. If the move out of the work area fails (for example the cache is short of space), the rip still counts as done and the disc ejects; the file stays in `/work/<job>/`, and the drive's card keeps the message and a **Move again** button, with or without a disc in. If the file is gone from the work area by then, Move again says there is nothing left to move.
+Where rips land: `/data/downloads/disc-ripper/<rip_id>/`, with extras in `extras/`. MakeMKV writes each title into a hidden `.partial/<job>/` folder inside the rip's folder, and the finished file is renamed into place. A rename needs no extra space, so a 40 GB Blu-ray needs 40 GB on the cache, not twice that. A failed or cancelled title's partial file is removed. Files keep MakeMKV's own names and are never overwritten. Once a film is imported and Jellyfin shows it, its rip folder is cleaned up (see Importing films); otherwise delete a rip's folder to discard it. If a rename isn't possible, the file is copied instead. If that copy fails (for example the cache is short of space), the rip still counts as done and the disc ejects. The file stays in `.partial/<job>/`, and the drive's card keeps the message and a **Move again** button, with or without a disc in. If the file is gone by then, Move again says there is nothing left to move.
 
 When the beta key or version expires, rips fail with an "Update MakeMKV" message. Paste the new beta key in Settings, or rebuild the image with a newer version (below).
 

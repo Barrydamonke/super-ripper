@@ -743,7 +743,7 @@ class Services:
         if row is None or row["kind"] != "rip_title":
             return None
         rip_id = json.loads(row["params"]).get("rip_id")
-        video_rips.settle(conn, rip_id, self.config.work_dir, utc_now())
+        video_rips.settle(conn, rip_id, self.config.work_dir, utc_now(), downloads_dir=self.config.downloads_dir)
         return rip_id
 
     async def job_ended(self, job_id: int) -> None:
@@ -1030,7 +1030,7 @@ class Services:
             presets.fill_fingerprints(conn)
             cd_rips.reconcile(conn, self.config.work_dir)
             for rip_id in video_rips.unsettled(conn):  # rips whose last job ended in the last run
-                video_rips.settle(conn, rip_id, self.config.work_dir, utc_now())
+                video_rips.settle(conn, rip_id, self.config.work_dir, utc_now(), downloads_dir=self.config.downloads_dir)
             cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc))
         finally:
             conn.close()
