@@ -583,37 +583,55 @@ async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROO
     return await _locked(services, rip_id, lambda: _run(services, rip_id, "claim", before))
 
 
-def ready_to_import(conn, rip_id: int) -> bool:
-    """The whole disc is done: nothing left to rip, no encode of it queued or running, and the
-    main title has a finished encode. Importing earlier missed extras still being ripped, and
-    the clean-up then deleted the folder under them."""
-    rip = conn.execute("SELECT state, main_title FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+def failed_title(conn, rip_id: int) -> int | None:
+    """The first title whose latest encode attempt failed (a cancelled one is the owner's choice), or None."""
+    latest: dict[int, str] = {}
+    for e in encodes.for_rip(conn, rip_id):  # oldest first: the last one per title wins
+        latest[e["title"]] = e["state"]
+    return next((t for t in sorted(latest) if latest[t] == "failed"), None)
+
+
+def ready_to_import(conn, rip_id: int, retry_pending=None, *, ignore_failed: bool = False) -> bool:
+    """The whole disc is done: nothing left to rip, no encode of it queued or running, no retry waiting
+    to happen, no failed title (unless the owner pressed Import anyway), and the main title has a
+    finished encode. Importing earlier missed extras still being ripped, and the clean-up then deleted
+    the folder under them."""
+    rip = conn.execute("SELECT state, main_title, import_anyway FROM video_rips WHERE rip_id = ?",
+                       (rip_id,)).fetchone()
     if rip is None or rip["state"] == "ripping":
         return False
     row = film_imports.get(conn, rip_id)
     if row is not None and row["state"] != "identifying":
         return False
+    if retry_pending is not None and retry_pending(rip_id):
+        return False
     rows = encodes.for_rip(conn, rip_id)
     if any(e["state"] in ("queued", "running") for e in rows):
+        return False
+    if not (ignore_failed or rip["import_anyway"]) and failed_title(conn, rip_id) is not None:
         return False
     if rip["main_title"] is None:  # TV-like: the flow marks it tv_skipped
         return any(e["state"] == "done" for e in rows)
     return any(e["state"] == "done" and e["title"] == rip["main_title"] for e in rows)
 
 
-def import_rip_for(conn, encode_id: int) -> int | None:
+def import_rip_for(conn, encode_id: int, retry_pending=None) -> int | None:
     """The rip whose import this finished encode may start, or None."""
     enc = encodes.get(conn, encode_id)
     if enc is None:
         return None
-    return enc["rip_id"] if ready_to_import(conn, enc["rip_id"]) else None
+    return enc["rip_id"] if ready_to_import(conn, enc["rip_id"], retry_pending) else None
+
+
+def _retry_pending(services):
+    return getattr(services, "retry_pending", None)
 
 
 async def maybe_start(services, rip_id: int) -> None:
     """Start the import of a rip in the background once it is ready (see ready_to_import)."""
     if services.radarr() is None or services.import_lock(rip_id).locked():
         return
-    if not await asyncio.to_thread(services._db, ready_to_import, rip_id):
+    if not await asyncio.to_thread(services._db, ready_to_import, rip_id, _retry_pending(services)):
         return
     _spawn(services, _background(services, rip_id), f"film import {rip_id}")
 
@@ -622,9 +640,36 @@ async def encode_done(services, encode_id: int) -> None:
     """A finished encode may complete its disc: start the import then."""
     if services.radarr() is None:
         return
-    rip_id = await asyncio.to_thread(services._db, import_rip_for, encode_id)
+    rip_id = await asyncio.to_thread(services._db, import_rip_for, encode_id, _retry_pending(services))
     if rip_id is not None:
         await maybe_start(services, rip_id)
+
+
+async def sweep_ready(services) -> None:
+    """Start the import of every film rip that is ready but has no import yet (a missed trigger: an
+    encode that failed, a restart, Radarr set up later). One query, then a readiness check each."""
+    if services.radarr() is None:
+        return
+
+    def find(conn):
+        pending = _retry_pending(services)
+        return [r["rip_id"] for r in conn.execute(
+            "SELECT rip_id FROM video_rips WHERE main_title IS NOT NULL "
+            "AND rip_id NOT IN (SELECT rip_id FROM film_imports) ORDER BY rip_id")
+            if ready_to_import(conn, r["rip_id"], pending)]
+
+    for rip_id in await asyncio.to_thread(services._db, find):
+        await maybe_start(services, rip_id)
+
+
+async def import_anyway(services, rip_id: int) -> None:
+    """The owner chose to import without the title that failed."""
+    def mark(conn):
+        with conn:
+            conn.execute("UPDATE video_rips SET import_anyway = 1 WHERE rip_id = ?", (rip_id,))
+
+    await asyncio.to_thread(services._db, mark)
+    await maybe_start(services, rip_id)
 
 
 async def _background(services, rip_id: int) -> None:
@@ -698,6 +743,9 @@ async def _confirm_one(services, rip_id: int, now: datetime) -> None:
                 return
         if not ready:
             return
+        if await asyncio.to_thread(_disc_has_work, conn, rip_id, getattr(services, "retry_pending", None)):
+            jlog.write("clean-up postponed: the disc still has work")
+            return
         try:
             await asyncio.to_thread(_remove, folder)
         except OSError as exc:
@@ -708,6 +756,20 @@ async def _confirm_one(services, rip_id: int, now: datetime) -> None:
         jlog.write(f"{'Jellyfin has the film' if client else '24 hours passed'}; deleted {folder}")
     finally:
         conn.close()
+
+
+def _disc_has_work(conn, rip_id: int, retry_pending=None) -> bool:
+    """Something of this disc is still to be ripped or encoded; its folder must stay."""
+    if retry_pending is not None and retry_pending(rip_id):
+        return True
+    rip = conn.execute("SELECT state FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    if rip is not None and rip["state"] in ("ripping", "move_failed"):
+        return True
+    if conn.execute("SELECT 1 FROM jobs WHERE kind = 'rip_title' AND state IN ('queued', 'running', 'waiting_space') "
+                    "AND json_extract(params, '$.rip_id') = ? LIMIT 1", (rip_id,)).fetchone():
+        return True
+    return conn.execute("SELECT 1 FROM encodes WHERE rip_id = ? AND state IN ('queued', 'running') LIMIT 1",
+                        (rip_id,)).fetchone() is not None
 
 
 def _library_file_safe(new: Path, folder: Path) -> bool:

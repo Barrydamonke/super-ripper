@@ -149,6 +149,16 @@ def _radarr_set_up(conn: sqlite3.Connection) -> bool:
 
 
 
+def _failed_title(conn: sqlite3.Connection, rip: sqlite3.Row, imports: dict) -> int | None:
+    """The failed title that alone keeps this film from importing (the owner can import without it)."""
+    if rip["main_title"] is None or rip["import_anyway"] or rip["rip_id"] in imports:
+        return None
+    title = filmimport.failed_title(conn, rip["rip_id"])
+    if title is None or not filmimport.ready_to_import(conn, rip["rip_id"], ignore_failed=True):
+        return None
+    return title
+
+
 def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, error: str | None = None,
                   notice: str | None = None, oob: bool = False) -> dict:
     now = now or datetime.now(timezone.utc)
@@ -182,6 +192,7 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
             "created_at": rip["created_at"], "files": views, "logs": logs,
             "imp": imports.get(rip["rip_id"]), "starting": rip["rip_id"] in _STARTING,
             "in_library": rip["rip_id"] in in_library,
+            "failed_title": _failed_title(conn, rip, imports),
             "can_encode_all": rip["rip_id"] not in in_library and any(not f["deleted"] for f in views),
             # A rip with no choice of its own follows the setting only while it's still ripping.
             "encode_with": choice_names.get(
@@ -521,6 +532,14 @@ async def import_retry(request: Request, rip_id: int = Form(...)):
     if refusal:
         return await _respond(request, error=refusal, status_code=409)
     _start(request, rip_id, lambda s: filmimport.retry_import(s, rip_id))
+    return await _respond(request)
+
+
+@router.post("/films/import-anyway")
+async def import_anyway(request: Request, rip_id: int = Form(...)):
+    services = _services(request)
+    await filmimport.import_anyway(services, rip_id)
+    services.films_changed()
     return await _respond(request)
 
 

@@ -344,6 +344,7 @@ class EncodePool:
         if result == "cancelled":
             await self.notify()
             self.wake()
+            await self._tell_done(encode_id)
             return True
         if result != "running":
             return False
@@ -491,7 +492,7 @@ class EncodePool:
         log.info("encodes: #%s %s%s", encode_id, state, f": {error}" if error else "")
         joblog.JobLog(self._log_path(encode_id)).write(f"finished: {state}" + (f" — {error}" if error else ""))
         await self.notify()
-        if state == "done":
+        if state in ("done", "failed", "cancelled"):  # any of them may be the disc's last encode
             await self._tell_done(encode_id)
 
     async def _tell_done(self, encode_id: int) -> None:

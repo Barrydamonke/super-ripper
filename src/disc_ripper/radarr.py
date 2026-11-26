@@ -16,6 +16,8 @@ from collections.abc import Callable
 from disc_ripper.filmid import Candidate
 
 TIMEOUT = 15.0
+LOOKUP_TIMEOUT = 60.0  # Radarr asks TMDb / Skyhook; slow when busy
+MANUAL_IMPORT_TIMEOUT = 180.0  # it probes every file in the folder
 
 Fetcher = Callable[[str, str, dict[str, str], "bytes | None", float], bytes]
 
@@ -76,29 +78,33 @@ class Radarr:
             except Exception:  # a logging hook must never break a call
                 pass
 
-    def _call(self, method: str, path: str, payload: object = None):
+    def _call(self, method: str, path: str, payload: object = None, timeout: float = TIMEOUT):
         try:
-            result = self._request(method, path, payload)
+            result = self._request(method, path, payload, timeout)
         except RadarrError as exc:
             self._note(method, path, str(exc))
             raise
         self._note(method, path, "ok")
         return result
 
-    def _request(self, method: str, path: str, payload: object = None):
+    def _request(self, method: str, path: str, payload: object = None, timeout: float = TIMEOUT):
         headers = dict(self._headers)
         body = None
         if payload is not None:
             body = json.dumps(payload).encode()
             headers["Content-Type"] = "application/json"
         try:
-            raw = self._fetch(method, self.base + path, headers, body, TIMEOUT)
+            raw = self._fetch(method, self.base + path, headers, body, timeout)
         except HttpStatusError as exc:
             if exc.status == 401:
                 raise RadarrError("Radarr refused the API key") from None
             detail = _body_message(exc.body)
             raise RadarrError(f"Radarr: {exc.status} {detail}".rstrip()) from None
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError, ValueError, http.client.HTTPException):
+        except (TimeoutError, urllib.error.URLError) as exc:
+            if isinstance(exc, TimeoutError) or isinstance(exc.reason, TimeoutError):
+                raise RadarrError(f"Radarr took too long to answer {path}. It may be busy; press Retry.") from None
+            raise RadarrError(f"Radarr didn't answer at {self._shown_url}") from None
+        except (ConnectionError, OSError, ValueError, http.client.HTTPException):
             raise RadarrError(f"Radarr didn't answer at {self._shown_url}") from None
         if not raw:
             return None
@@ -109,10 +115,11 @@ class Radarr:
 
     # lookups
     def lookup(self, term: str) -> list[dict]:
-        return self._call("GET", "/api/v3/movie/lookup?" + urllib.parse.urlencode({"term": term}))
+        return self._call("GET", "/api/v3/movie/lookup?" + urllib.parse.urlencode({"term": term}),
+                          timeout=LOOKUP_TIMEOUT)
 
     def lookup_tmdb(self, tmdb_id: int) -> dict:
-        return self._call("GET", f"/api/v3/movie/lookup/tmdb?tmdbId={int(tmdb_id)}")
+        return self._call("GET", f"/api/v3/movie/lookup/tmdb?tmdbId={int(tmdb_id)}", timeout=LOOKUP_TIMEOUT)
 
     def lookup_imdb(self, imdb_id: str) -> dict:
         return self._call("GET", "/api/v3/movie/lookup/imdb?" + urllib.parse.urlencode({"imdbId": imdb_id}))
@@ -160,7 +167,7 @@ class Radarr:
     # importing
     def manual_import_view(self, folder: str) -> list[dict]:
         query = urllib.parse.urlencode({"folder": folder, "filterExistingFiles": "false"})
-        return self._call("GET", "/api/v3/manualimport?" + query)
+        return self._call("GET", "/api/v3/manualimport?" + query, timeout=MANUAL_IMPORT_TIMEOUT)
 
     def command(self, name: str, **body) -> int:
         return int(self._call("POST", "/api/v3/command", {"name": name, **body})["id"])

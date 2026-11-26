@@ -104,6 +104,7 @@ class Services:
         self._dvd_waits: set[asyncio.Task] = set()
         self.auto_retry_wait: float = AUTO_RETRY_SECONDS
         self._auto_retries: set[asyncio.Task] = set()
+        self._retry_rips: dict[int, int] = {}  # job id of a pending automatic retry -> its rip
         self._films_push: asyncio.Task | None = None
         self._films_dirty = False
 
@@ -129,8 +130,12 @@ class Services:
         """The lock that lets one film-import flow at a time run for a rip."""
         return self._import_locks.setdefault(rip_id, asyncio.Lock())
 
+    def retry_pending(self, rip_id: int) -> bool:
+        """An automatic retry of one of this rip's titles is waiting to happen."""
+        return rip_id in self._retry_rips.values()
+
     async def encode_done(self, encode_id: int) -> None:
-        """An encode finished: delete raws that are due (straight away by default), and start the
+        """An encode ended (done, failed or cancelled): delete raws that are due (straight away by default), and start the
         film import once the whole disc is ripped and encoded."""
         try:
             if await asyncio.to_thread(self._db, self._sweep_raw):
@@ -691,6 +696,10 @@ class Services:
                 await filmimport.confirm_and_clean(self, datetime.now(timezone.utc))
             except Exception:  # never let the loop die
                 log.exception("film import: confirming imports failed")
+            try:
+                await filmimport.sweep_ready(self)
+            except Exception:
+                log.exception("film import: looking for rips ready to import failed")
             await asyncio.sleep(FILM_CONFIRM_SECONDS)
 
     def _render_films(self) -> str | None:
@@ -750,9 +759,9 @@ class Services:
         """The runner's hook: a job finished, or a queued one was cancelled. A rip_title job
         settles its rip once nothing of it is pending (ripped, move_failed or failed)."""
         rip_id = await asyncio.to_thread(self._db, self._settle_for_job, job_id)
+        await self._maybe_auto_retry(job_id)  # first: a pending retry keeps the import from starting
         if rip_id is not None:  # the disc may be complete now (its encodes finished before it)
             await filmimport.maybe_start(self, rip_id)
-        await self._maybe_auto_retry(job_id)
 
     def _plan_auto_retry(self, conn, job_id: int) -> bool:
         """A scan or rip that failed because MakeMKV went silent gets another go (up to
@@ -804,15 +813,23 @@ class Services:
             return
         row = await asyncio.to_thread(self._db, jobs.get, job_id)
         await self.drive_changed(row["drive_id"])
+        rip_id = json.loads(row["params"]).get("rip_id") if row["kind"] == "rip_title" else None
+        if rip_id is not None:
+            self._retry_rips[job_id] = rip_id
 
         async def later():
-            await asyncio.sleep(self.auto_retry_wait)
-            new_id = await asyncio.to_thread(self._db, self._do_auto_retry, job_id)
+            try:
+                await asyncio.sleep(self.auto_retry_wait)
+                new_id = await asyncio.to_thread(self._db, self._do_auto_retry, job_id)
+            finally:
+                self._retry_rips.pop(job_id, None)
             log.info("jobs: automatic retry of #%s: %s", job_id,
                      f"queued #{new_id}" if new_id else "skipped (the drive was used or the disc came out)")
             if new_id is not None:
                 self.wake(row["drive_id"])
                 await self.drive_changed(row["drive_id"])
+            elif rip_id is not None:  # the retry was dropped: the disc may be ready after all
+                await filmimport.maybe_start(self, rip_id)
 
         task = asyncio.get_running_loop().create_task(later())
         self._auto_retries.add(task)
@@ -1042,6 +1059,10 @@ class Services:
             await filmimport.resume_after_restart(self)
         except Exception:  # the loops must still start
             log.exception("film import: resuming after the restart failed")
+        try:
+            await filmimport.sweep_ready(self)
+        except Exception:
+            log.exception("film import: looking for rips ready to import failed")
         for coro, name in (
             (self._raw_sweep_loop(), "raw sweep"),
             (self._film_confirm_loop(), "film import confirm"),

@@ -50,6 +50,11 @@
 {% set imp = rip.imp %}
 {% if rip.starting %}
   <p class="hint import-state">Working on it...</p>
+{% elif not imp and rip.failed_title is not none %}
+  <div class="import-state import-blocked">
+    <p class="error">Title {{ rip.failed_title }} failed. Retry it on the drive's card, or import without it.
+      {{ post_button("/films/import-anyway", rip, "Import anyway") }}</p>
+  </div>
 {% elif imp %}
   {% set state = imp.state %}
   <div class="import-state import-{{ state }}">

@@ -49,9 +49,9 @@ def _tables(conn):
 def test_migrate_fresh_db(config):
     conn = db.connect(config.db_path)
     try:
-        assert db.migrate(conn) == 9
+        assert db.migrate(conn) == 10
         assert {"settings", "drives"} <= _tables(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     finally:
         conn.close()
 
@@ -62,7 +62,7 @@ def test_migrate_is_idempotent(config):
         db.migrate(conn)
         conn.execute("INSERT INTO settings (key, value) VALUES ('k', '1')")
         conn.commit()
-        assert db.migrate(conn) == 9
+        assert db.migrate(conn) == 10
         assert conn.execute("SELECT value FROM settings WHERE key='k'").fetchone()[0] == "1"
     finally:
         conn.close()
@@ -91,7 +91,7 @@ def test_migration_0002_from_step1_db(config):
         )
         conn.commit()
 
-        assert db.migrate(conn) == 9
+        assert db.migrate(conn) == 10
         row = conn.execute("SELECT * FROM drives").fetchone()
         assert row["media_state"] == "unknown"
         assert row["disc_type"] is None
@@ -128,7 +128,7 @@ def test_migration_0003_prefills_offsets(config):
                 (f"d{i}", model),
             )
         conn.commit()
-        assert db.migrate(conn) == 9
+        assert db.migrate(conn) == 10
         offsets = [r[0] for r in conn.execute("SELECT read_offset FROM drives ORDER BY id")]
         assert offsets == [667, 6, 0, 0]
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}

@@ -51,7 +51,7 @@ def build_v7(conn, *, selection=OLD_DEFAULT):
 def migrated(config):
     conn = db.connect(config.db_path)
     build_v7(conn)
-    assert db.migrate(conn) == 9
+    assert db.migrate(conn) == 10
     presets.fill_fingerprints(conn)
     yield conn
     conn.close()

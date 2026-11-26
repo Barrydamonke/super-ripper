@@ -327,7 +327,9 @@ async def test_encode_pool_tells_services_when_done(config, setup):
     pool = encodepool.EncodePool(config, Notifier(), FakeSpace(), services=hook)
     await pool._finish(5, "done", None)
     await pool._finish(6, "failed", "x")
-    assert hook.seen == [5]
+    await pool._finish(7, "cancelled", None)
+    await pool._finish(8, "interrupted", None)
+    assert hook.seen == [5, 6, 7]
 
 
 @sync
@@ -457,3 +459,122 @@ def test_import_waits_until_the_disc_is_ripped_and_encoded(config, setup, tmp_pa
     row = row_of(setup, rip)
     assert row["state"] == "imported", row["error"]
     assert [Path(p).name for p in json.loads(row["extras"])] == ["extra.mkv"]
+
+
+def _extra_encode(setup, rip, state, error=None):
+    """An extra's encode that ends in `state` (queued stays queued)."""
+    src = Path(json.loads(setup.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip,)).fetchone()[0])["1"]["path"])
+    eid = encodes.create(setup, rip_id=rip, title=1, role="extra", source=src, disc_type="dvd", source_seconds=300,
+                         source_bytes=50, source_audio=2, preset_id=1, preset_name="Standard", now=NOW)
+    if state != "queued":
+        encodes.start(setup, eid, NOW)
+        if state != "running":
+            encodes.finish(setup, eid, state, NOW, error="boom" if state == "failed" else None)
+    return eid
+
+
+def _end_extra_through_pool(config, setup, services, rip, state):
+    eid = _extra_encode(setup, rip, "running")
+
+    async def main():
+        pool = encodepool.EncodePool(config, Notifier(), FakeSpace(), services=services)
+        await pool._finish(eid, state, "boom" if state == "failed" else None)
+        await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(main())
+
+
+def test_failed_last_encode_still_imports(config, setup, tmp_path):
+    """The extra's encode is the disc's last; when it fails the pool still tells the services (the
+    old code only told them about done encodes, so the film never imported)."""
+    rip, _ = make_rip(setup, config, extras=[(1, "title_t01.mkv")])
+    with setup:
+        setup.execute("UPDATE video_rips SET import_anyway = 1 WHERE rip_id = ?", (rip,))
+    services, fake = services_with(config, tmp_path)
+    _end_extra_through_pool(config, setup, services, rip, "failed")
+    assert row_of(setup, rip)["state"] == "imported"
+    assert fake.calls.count("command") == 1
+
+
+def test_cancelled_last_encode_still_imports(config, setup, tmp_path):
+    rip, _ = make_rip(setup, config, extras=[(1, "title_t01.mkv")])
+    services, fake = services_with(config, tmp_path)
+    _end_extra_through_pool(config, setup, services, rip, "cancelled")
+    assert row_of(setup, rip)["state"] == "imported"
+
+
+def test_sweep_ready_imports_a_stuck_rip(config, setup, tmp_path):
+    ready, _ = make_rip(setup, config)
+    not_ready, _ = make_rip(setup, config, extras=[(1, "title_t01.mkv")])
+    _extra_encode(setup, not_ready, "queued")
+    services, fake = services_with(config, tmp_path)
+
+    async def main():
+        await filmimport.sweep_ready(services)
+        await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(main())
+    assert row_of(setup, ready)["state"] == "imported"
+    assert row_of(setup, not_ready) is None
+
+
+def test_failed_title_blocks_until_import_anyway(config, setup, tmp_path):
+    from disc_ripper.web import films_routes
+    rip, _ = make_rip(setup, config, extras=[(1, "title_t01.mkv")])
+    _extra_encode(setup, rip, "failed")
+    services, fake = services_with(config, tmp_path)
+
+    async def sweep():
+        await filmimport.sweep_ready(services)
+        await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(sweep())
+    assert row_of(setup, rip) is None
+    page = films_routes.render_films(setup)
+    assert "Title 1 failed. Retry it on the drive's card, or import without it." in page
+    assert "/films/import-anyway" in page and "Import anyway" in page
+
+    async def anyway():
+        await filmimport.import_anyway(services, rip)
+        await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(anyway())
+    assert row_of(setup, rip)["state"] == "imported"
+    assert "Import anyway" not in films_routes.render_films(setup)
+
+
+def test_pending_retry_blocks_import(config, setup, tmp_path):
+    rip, _ = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    services._retry_rips[99] = rip  # an automatic retry of one of the rip's titles is waiting
+    assert services.retry_pending(rip) and not services.retry_pending(rip + 1)
+    assert not filmimport.ready_to_import(setup, rip, services.retry_pending)
+
+    async def main():
+        await filmimport.sweep_ready(services)
+        assert not services._import_tasks
+        services._retry_rips.clear()
+        await filmimport.sweep_ready(services)
+        await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(main())
+    assert row_of(setup, rip)["state"] == "imported"
+
+
+def test_cleanup_postponed_while_disc_has_work(config, setup, tmp_path):
+    from datetime import datetime, timezone
+    rip, _ = make_rip(setup, config)
+    services, fake = services_with(config, tmp_path)
+    asyncio.run(filmimport.run_import(services, rip))
+    assert row_of(setup, rip)["state"] == "imported"
+    job = jobs.enqueue(setup, "serial:A", "rip_title", {"rip_id": rip, "title": 1}, uses_drive=True, now=NOW)
+    folder = config.downloads_dir / str(rip)
+    later = datetime.now(timezone.utc).replace(year=2099)  # no Jellyfin: 24 h are long past
+
+    asyncio.run(filmimport.confirm_and_clean(services, later))
+    assert folder.exists() and row_of(setup, rip)["state"] == "imported"
+    assert "clean-up postponed: the disc still has work" in import_log(config, rip)
+    with setup:
+        setup.execute("UPDATE jobs SET state = 'cancelled' WHERE id = ?", (job,))
+    asyncio.run(filmimport.confirm_and_clean(services, later))
+    assert not folder.exists() and row_of(setup, rip)["state"] == "in_jellyfin"
