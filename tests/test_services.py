@@ -207,7 +207,7 @@ def test_startup_sweeps_leftover_partials(config, add_sg):
         rip = ids["moved"] if name == "moved" else 50
         folder = video_rips.partial_dir(config.downloads_dir, rip, job)
         folder.mkdir(parents=True)
-        (folder / "t.mkv").write_bytes(b"x")
+        (folder / ("t.mkv" if name == "moved" else "t.part")).write_bytes(b"x")
     orphan = video_rips.partial_dir(config.downloads_dir, 51, 9999)  # a job that no longer exists
     orphan.mkdir(parents=True)
     svc = services.Services(config)

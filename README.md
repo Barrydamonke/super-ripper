@@ -216,7 +216,7 @@ Import steps run in the background and never hold the shutdown guard. The file i
 
 When a second rip of the same film waits and then carries on, it goes through the replace rule. With Ask before replacing off and all checks passing, it replaces automatically.
 
-Encodes that finished before Radarr was set up aren't imported automatically. Use Identify on the Films page, or re-encode.
+Encodes that finished before Radarr was set up are imported automatically once Radarr is set up, unless their downloads folder was deleted (deleting it discards the rip).
 
 **Undo, Skip and the folder tidy.**
 - **Recently imported** at the top of the Films page lists the last imports, each with **Undo**.

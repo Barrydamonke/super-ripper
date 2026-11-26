@@ -589,8 +589,12 @@ class Services:
         if not Path(row["source"]).is_file():
             return None, "The raw rip is no longer on disk."
         if row["preset_id"] is None or presets.get_preset(conn, row["preset_id"]) is None:
-            return None, presets.GONE
-        new_id = encodes.retry(conn, encode_id, utc_now())
+            gone = row["preset_id"] is None or not presets.exists(conn, row["preset_id"])
+            return None, presets.GONE if gone else presets.INVALID
+        try:
+            new_id = encodes.retry(conn, encode_id, utc_now())
+        except ValueError:  # PresetError: the preset went bad between the check and the retry
+            return None, presets.INVALID
         if new_id is None:
             return None, "This file already has an encode waiting or running."
         return new_id, None

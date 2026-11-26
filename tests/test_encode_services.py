@@ -391,3 +391,28 @@ def test_jellyfin_mode_undone_and_skipped_fall_back_to_hours(filed, setup):
 def test_jellyfin_mode_skipped_falls_back_to_hours(filed, setup):
     services, raw = _hold_case(filed, setup, "skipped")
     assert services._sweep_raw(setup) == 1 and not raw.exists()
+
+
+def test_retry_with_invalid_preset_says_so(filed, setup):
+    svc, rip, raw, out, enc = filed
+    with setup:
+        setup.execute("UPDATE encodes SET state = 'failed' WHERE id = ?", (enc,))
+        setup.execute("UPDATE presets SET settings = ? WHERE id = 1", ('{"engine": "nope"}',))
+    new_id, error = asyncio.run(svc.retry_encode_result(enc))
+    assert new_id is None
+    assert error == "Its preset's settings are no longer valid; choose another preset with Encode ▾."
+
+
+def test_sweep_partials_keeps_a_done_jobs_mkv_whatever_the_rip_state(config, setup):
+    job = jobs.enqueue(setup, "serial:A", "rip_title", {}, uses_drive=True, now="t")
+    other = jobs.enqueue(setup, "serial:A", "rip_title", {}, uses_drive=True, now="t")  # the rip's own job id
+    with setup:
+        setup.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (job,))
+        setup.execute("INSERT INTO video_discs (fingerprint, disc_type, last_seen) VALUES ('fp', 'dvd', 't')")
+        setup.execute("INSERT INTO video_rips (rip_id, fingerprint, state, created_at, updated_at) "
+                      "VALUES (?, 'fp', 'ripping', 't', 't')", (other,))
+    folder = video_rips.partial_dir(config.downloads_dir, other, job)
+    folder.mkdir(parents=True)
+    (folder / "t.mkv").write_bytes(b"x")
+    assert video_rips.sweep_partials(setup, config.downloads_dir) == []
+    assert (folder / "t.mkv").is_file()

@@ -156,7 +156,7 @@ def _radarr_set_up(conn: sqlite3.Connection) -> bool:
 
 def _failed_title(conn: sqlite3.Connection, rip: sqlite3.Row, imports: dict) -> tuple[int, str] | None:
     """The failed (title, kind) that alone keeps this film from importing (the owner can import without it)."""
-    if rip["main_title"] is None or rip["import_anyway"] or rip["rip_id"] in imports:
+    if rip["main_title"] is None or rip["import_anyway"] or rip["rip_id"] in imports or not _radarr_set_up(conn):
         return None
     title = filmimport.failed_title(conn, rip["rip_id"])
     if title is None or not filmimport.ready_to_import(conn, rip["rip_id"], ignore_failed=True):
@@ -203,7 +203,9 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
             "created_at": rip["created_at"], "files": views, "logs": logs,
             "imp": imports.get(rip["rip_id"]), "starting": rip["rip_id"] in _STARTING,
             "in_library": rip["rip_id"] in in_library,
-            "failed_title": _failed_title(conn, rip, imports),
+            "failed_title": (ft := _failed_title(conn, rip, imports)),
+            "failed_interrupted": ft is not None and ft[1] == "encode" and bool(
+                [e["state"] for e in rows if e["title"] == ft[0]][-1:] == ["interrupted"]),
             "can_encode_all": rip["rip_id"] not in in_library and any(not f["deleted"] for f in views),
             # A rip with no choice of its own follows the setting only while it's still ripping.
             "encode_with": choice_names.get(

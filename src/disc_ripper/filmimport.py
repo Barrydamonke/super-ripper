@@ -589,7 +589,7 @@ async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROO
 
 def failed_title(conn, rip_id: int) -> tuple[int, str] | None:
     """(title, "rip" | "encode") for the first title whose latest rip attempt or latest encode attempt
-    failed (a cancelled one is the owner's choice and never counts), or None."""
+    failed or (encode) was interrupted and not queued again (a cancelled one is the owner's choice and never counts), or None."""
     latest: dict[int, str] = {}
     for title, _job, state in video_rips.attempts(conn, rip_id):  # oldest first: the last one per title wins
         latest[title] = state
@@ -598,7 +598,7 @@ def failed_title(conn, rip_id: int) -> tuple[int, str] | None:
     for e in encodes.for_rip(conn, rip_id):
         latest[e["title"]] = e["state"]
     for t, state in latest.items():
-        if state == "failed":
+        if state in ("failed", "interrupted"):  # interrupted now means it gave up after repeated restarts
             found.setdefault(t, "encode")
     return (t := min(found), found[t]) if found else None
 
@@ -668,7 +668,8 @@ async def sweep_ready(services) -> None:
         return [r["rip_id"] for r in conn.execute(
             "SELECT rip_id FROM video_rips WHERE main_title IS NOT NULL "
             "AND rip_id NOT IN (SELECT rip_id FROM film_imports) ORDER BY rip_id")
-            if ready_to_import(conn, r["rip_id"], pending)]
+            if (services.config.downloads_dir / str(r["rip_id"])).is_dir()  # deleted folder = discarded rip
+            and ready_to_import(conn, r["rip_id"], pending)]
 
     for rip_id in await asyncio.to_thread(services._db, find):
         await maybe_start(services, rip_id)
@@ -783,7 +784,7 @@ def _disc_has_work(conn, rip_id: int, retry_pending=None) -> bool:
                     "AND (jobs.state = 'running' OR (jobs.state IN ('queued', 'waiting_space') "
                     "AND drives.media_state = 'disc')) LIMIT 1", (rip_id,)).fetchone():
         return True
-    return conn.execute("SELECT 1 FROM encodes WHERE rip_id = ? AND state IN ('queued', 'running') LIMIT 1",
+    return conn.execute("SELECT 1 FROM encodes WHERE rip_id = ? AND state IN ('queued', 'running', 'interrupted') LIMIT 1",
                         (rip_id,)).fetchone() is not None
 
 

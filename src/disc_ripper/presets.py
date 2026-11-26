@@ -402,6 +402,7 @@ def preview(conn: sqlite3.Connection, s: PresetSettings, name: str) -> list[dict
 
 UNKNOWN = "Unknown preset."
 GONE = "That preset was deleted; choose another with Encode ▾."
+INVALID = "Its preset's settings are no longer valid; choose another preset with Encode ▾."
 
 
 @dataclass(frozen=True)
@@ -431,7 +432,18 @@ def get_preset(conn: sqlite3.Connection, preset_id: int) -> Preset | None:
     if not 0 < preset_id < 2**63:  # a URL can carry any integer; SQLite can't
         return None
     row = conn.execute("SELECT * FROM presets WHERE id = ?", (preset_id,)).fetchone()
-    return _preset(row) if row else None
+    if row is None:
+        return None
+    try:
+        return _preset(row)
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:  # like list_presets: an invalid row is skipped
+        log.warning("presets: preset #%s (%s) has settings that are not valid: %s", row["id"], row["name"], exc)
+        return None
+
+
+def exists(conn: sqlite3.Connection, preset_id: int) -> bool:
+    """A row with this id is stored (its settings may still be invalid)."""
+    return 0 < preset_id < 2**63 and conn.execute("SELECT 1 FROM presets WHERE id = ?", (preset_id,)).fetchone() is not None
 
 
 def _taken(conn: sqlite3.Connection, name: str, own_id: int | None) -> bool:
@@ -551,7 +563,8 @@ def for_encode(conn: sqlite3.Connection, row) -> tuple[str, PresetSettings, str]
     if row["preset_settings"]:
         s = PresetSettings.from_dict(json.loads(row["preset_settings"]))
         return row["preset_name"], s, row["preset_fingerprint"] or fingerprint(s)
-    live = get_preset(conn, row["preset_id"]) if row["preset_id"] is not None else None
+    stored = conn.execute("SELECT * FROM presets WHERE id = ?", (row["preset_id"],)).fetchone()         if row["preset_id"] is not None else None
+    live = _preset(stored) if stored else None  # raises on invalid settings: the encode fails with that reason
     return (live.name, live.settings, live.fingerprint) if live else None
 
 

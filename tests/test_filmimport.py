@@ -518,8 +518,14 @@ def test_sweep_ready_imports_a_stuck_rip(config, setup, tmp_path):
     assert row_of(setup, not_ready) is None
 
 
+def _radarr_on(conn):
+    from disc_ripper import settings
+    settings.save(conn, {"radarr_url": "http://radarr.test", "radarr_api_key": "test-key"})
+
+
 def test_failed_title_blocks_until_import_anyway(config, setup, tmp_path):
     from disc_ripper.web import films_routes
+    _radarr_on(setup)
     rip, _ = make_rip(setup, config, extras=[(1, "title_t01.mkv")])
     _extra_encode(setup, rip, "failed")
     services, fake = services_with(config, tmp_path)
@@ -589,6 +595,7 @@ def _rip_attempt(setup, rip, title, state):
 
 def test_failed_rip_title_blocks_until_import_anyway(config, setup, tmp_path):
     from disc_ripper.web import films_routes
+    _radarr_on(setup)
     rip, _ = make_rip(setup, config)
     job = _rip_attempt(setup, rip, 1, "failed")  # an extra that never ripped: no encode for it
     services, fake = services_with(config, tmp_path)
@@ -641,3 +648,58 @@ def test_import_with_invalid_preset_fails_clearly(config, setup, tmp_path):
     row = row_of(setup, rip)
     assert row["state"] == "failed"
     assert "The encode's preset settings are no longer valid:" in row["error"]
+
+
+def test_interrupted_extra_blocks_import_until_import_anyway(config, setup, tmp_path):
+    """An extra's encode that gave up after repeated restarts stays interrupted: it must not be lost silently."""
+    from disc_ripper.web import films_routes
+    _radarr_on(setup)
+    rip, _ = make_rip(setup, config, extras=[(1, "title_t01.mkv")])
+    eid = _extra_encode(setup, rip, "running")
+    with setup:
+        setup.execute("UPDATE encodes SET attempts = ? WHERE id = ?", (encodes.MAX_ATTEMPTS, eid))
+    encodes.mark_interrupted(setup, NOW)
+    encodes.requeue_interrupted(setup, NOW)  # at the limit: it stays interrupted
+    assert encodes.get(setup, eid)["state"] == "interrupted"
+    assert filmimport.failed_title(setup, rip) == (1, "encode")
+    assert filmimport._disc_has_work(setup, rip)
+    services, fake = services_with(config, tmp_path)
+
+    async def sweep():
+        await filmimport.sweep_ready(services)
+        await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(sweep())
+    assert row_of(setup, rip) is None
+    page = films_routes.render_films(setup)
+    assert "Title 1's encode was interrupted. Retry it below, or import without it." in page
+
+    async def anyway():
+        await filmimport.import_anyway(services, rip)
+        await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(anyway())
+    assert row_of(setup, rip)["state"] == "imported"
+
+
+def test_sweep_ready_skips_rips_whose_folder_was_deleted(config, setup, tmp_path):
+    import shutil
+    rip, _ = make_rip(setup, config)
+    shutil.rmtree(config.downloads_dir / str(rip))
+    services, fake = services_with(config, tmp_path)
+
+    async def sweep():
+        await filmimport.sweep_ready(services)
+        await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(sweep())
+    assert row_of(setup, rip) is None and not services._import_tasks
+
+
+def test_import_anyway_banner_needs_radarr(config, setup):
+    from disc_ripper.web import films_routes
+    rip, _ = make_rip(setup, config, extras=[(1, "title_t01.mkv")])
+    _extra_encode(setup, rip, "failed")
+    assert "Import anyway" not in films_routes.render_films(setup)
+    _radarr_on(setup)
+    assert "Import anyway" in films_routes.render_films(setup)

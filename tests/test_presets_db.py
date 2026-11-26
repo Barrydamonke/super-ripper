@@ -161,3 +161,10 @@ def test_list_presets_skips_invalid_row(conn):
     after = [p.name for p in presets.list_presets(conn)]
     assert after == [n for i, n in enumerate(before) if i != 1]
     assert ("2", "Fast") not in presets.choices(conn)
+
+
+def test_get_preset_invalid_row_is_none(conn):
+    with conn:
+        conn.execute("UPDATE presets SET settings = ? WHERE id = 2", ('{"engine": "nope"}',))
+    assert presets.get_preset(conn, 2) is None
+    assert presets.get_preset(conn, 1) is not None

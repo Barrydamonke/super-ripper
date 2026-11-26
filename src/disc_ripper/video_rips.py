@@ -86,6 +86,8 @@ def sweep_partials(conn: sqlite3.Connection, downloads_dir: Path) -> list[tuple[
             if state in ("queued", "running", "waiting_space"):
                 continue
             if state == "done":
+                if any(job_folder.glob("*.mkv")):  # a finished title waiting to be moved, whatever the rip state
+                    continue
                 rip = conn.execute("SELECT state FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
                 if rip is not None and rip["state"] == "move_failed":
                     continue
