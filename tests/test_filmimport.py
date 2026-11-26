@@ -531,7 +531,7 @@ def test_failed_title_blocks_until_import_anyway(config, setup, tmp_path):
     asyncio.run(sweep())
     assert row_of(setup, rip) is None
     page = films_routes.render_films(setup)
-    assert "Title 1 failed. Retry it on the drive's card, or import without it." in page
+    assert "Title 1's encode failed. Retry it below, or import without it." in page
     assert "/films/import-anyway" in page and "Import anyway" in page
 
     async def anyway():
@@ -578,3 +578,43 @@ def test_cleanup_postponed_while_disc_has_work(config, setup, tmp_path):
         setup.execute("UPDATE jobs SET state = 'cancelled' WHERE id = ?", (job,))
     asyncio.run(filmimport.confirm_and_clean(services, later))
     assert not folder.exists() and row_of(setup, rip)["state"] == "in_jellyfin"
+
+
+def _rip_attempt(setup, rip, title, state):
+    job = jobs.enqueue(setup, "serial:A", "rip_title", {"rip_id": rip, "title": title}, uses_drive=True, now=NOW)
+    with setup:
+        setup.execute("UPDATE jobs SET state = ? WHERE id = ?", (state, job))
+    return job
+
+
+def test_failed_rip_title_blocks_until_import_anyway(config, setup, tmp_path):
+    from disc_ripper.web import films_routes
+    rip, _ = make_rip(setup, config)
+    job = _rip_attempt(setup, rip, 1, "failed")  # an extra that never ripped: no encode for it
+    services, fake = services_with(config, tmp_path)
+
+    async def sweep():
+        await filmimport.sweep_ready(services)
+        await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(sweep())
+    assert row_of(setup, rip) is None
+    assert "Title 1 didn't rip. Retry it on the drive's card, or import without it." in films_routes.render_films(setup)
+    with setup:  # a cancelled later attempt is the owner's choice
+        setup.execute("UPDATE jobs SET state = 'cancelled' WHERE id = ?", (job,))
+    assert filmimport.failed_title(setup, rip) is None
+    with setup:
+        setup.execute("UPDATE jobs SET state = 'failed' WHERE id = ?", (job,))
+
+    async def anyway():
+        await filmimport.import_anyway(services, rip)
+        await asyncio.gather(*services._import_tasks)
+
+    asyncio.run(anyway())
+    assert row_of(setup, rip)["state"] == "imported"
+
+
+def test_cancelled_rip_attempt_does_not_block(config, setup, tmp_path):
+    rip, _ = make_rip(setup, config)
+    _rip_attempt(setup, rip, 1, "cancelled")
+    assert filmimport.ready_to_import(setup, rip)

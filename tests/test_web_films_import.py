@@ -393,7 +393,7 @@ def test_import_anyway_route_imports_without_the_failed_title(radarr):
     with_encode(conn, config, rip)
     queue(conn, rip, 1, state="failed", error="boom")
     page = client.get("/films").text
-    assert "Title 1 failed. Retry it on the drive's card, or import without it." in page
+    assert "Title 1's encode failed. Retry it below, or import without it." in page
     assert "/films/import-anyway" in page
     assert client.post("/films/import-anyway", data={"rip_id": rip}, headers={"HX-Request": "true"}).status_code == 200
     assert wait_for(conn, rip, {"imported"})["state"] == "imported"

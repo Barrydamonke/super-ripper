@@ -149,8 +149,8 @@ def _radarr_set_up(conn: sqlite3.Connection) -> bool:
 
 
 
-def _failed_title(conn: sqlite3.Connection, rip: sqlite3.Row, imports: dict) -> int | None:
-    """The failed title that alone keeps this film from importing (the owner can import without it)."""
+def _failed_title(conn: sqlite3.Connection, rip: sqlite3.Row, imports: dict) -> tuple[int, str] | None:
+    """The failed (title, kind) that alone keeps this film from importing (the owner can import without it)."""
     if rip["main_title"] is None or rip["import_anyway"] or rip["rip_id"] in imports:
         return None
     title = filmimport.failed_title(conn, rip["rip_id"])

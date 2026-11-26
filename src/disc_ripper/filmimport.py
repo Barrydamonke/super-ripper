@@ -10,7 +10,7 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
-from . import db, encodes, film_imports, filmid, joblog, presets, settings, videofiles
+from . import db, encodes, film_imports, filmid, joblog, presets, settings, video_rips, videofiles
 from .clock import utc_now
 from .jellyfin import JellyfinError
 from .radarr import RadarrError, parse_resolution, parse_runtime, to_candidate
@@ -583,12 +583,20 @@ async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROO
     return await _locked(services, rip_id, lambda: _run(services, rip_id, "claim", before))
 
 
-def failed_title(conn, rip_id: int) -> int | None:
-    """The first title whose latest encode attempt failed (a cancelled one is the owner's choice), or None."""
+def failed_title(conn, rip_id: int) -> tuple[int, str] | None:
+    """(title, "rip" | "encode") for the first title whose latest rip attempt or latest encode attempt
+    failed (a cancelled one is the owner's choice and never counts), or None."""
     latest: dict[int, str] = {}
-    for e in encodes.for_rip(conn, rip_id):  # oldest first: the last one per title wins
+    for title, _job, state in video_rips.attempts(conn, rip_id):  # oldest first: the last one per title wins
+        latest[title] = state
+    found = {t: "rip" for t, state in latest.items() if state == "failed"}
+    latest = {}
+    for e in encodes.for_rip(conn, rip_id):
         latest[e["title"]] = e["state"]
-    return next((t for t in sorted(latest) if latest[t] == "failed"), None)
+    for t, state in latest.items():
+        if state == "failed":
+            found.setdefault(t, "encode")
+    return (t := min(found), found[t]) if found else None
 
 
 def ready_to_import(conn, rip_id: int, retry_pending=None, *, ignore_failed: bool = False) -> bool:
