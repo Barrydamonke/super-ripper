@@ -163,7 +163,7 @@ def test_encoding_settings_defaults(conn):
     values = settings.get_all(conn)
     assert values["encode_slots"] == 1
     assert "encode_after_rip" not in values and "fast_quality" not in values  # presets own these now
-    assert values["raw_keep_hours"] == 24
+    assert values["raw_keep_hours"] == 0
     assert values["encode_stall_minutes"] == 10
     by_key = {s.key: s for s in settings.SETTINGS}
     assert all(by_key[k].group == "Encoding" for k in (

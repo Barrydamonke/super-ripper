@@ -96,6 +96,7 @@ def test_already_ripped_needs_again(config, setup):
         setup.execute("UPDATE jobs SET state = 'done'")
     video_rips.set_state(setup, rip, "ripped", "", "t")
     (config.downloads_dir / str(rip)).mkdir(parents=True)
+    (config.downloads_dir / str(rip) / "title_t00.mkv").write_bytes(b"x")
     assert start(services, fp, again=False) is None
     again = start(services, fp, again=True)
     assert again is not None and again != rip
@@ -111,6 +112,7 @@ def test_deleted_downloads_folder_unblocks(config, setup):
         setup.execute("UPDATE jobs SET state = 'done'")
     video_rips.set_state(setup, rip, "ripped", "", "t")
     (config.downloads_dir / str(rip)).mkdir(parents=True)
+    (config.downloads_dir / str(rip) / "title_t00.mkv").write_bytes(b"x")
     assert start(services, fp) is None
     shutil.rmtree(config.downloads_dir / str(rip))
     assert start(services, fp) is not None
@@ -206,6 +208,8 @@ def test_extra_added_to_move_failed_rip_keeps_move_failed(config, setup, monkeyp
         return real(cfg, rip_id, role, src, **kw)
 
     monkeypatch.setattr(videofiles, "move_to_downloads", flaky)
+    monkeypatch.setattr(videofiles, "place_in_downloads",  # no rename: the copy runs, and fails for main
+                        lambda *a: (_ for _ in ()).throw(OSError(18, "Invalid cross-device link")))
     rip = start(services, fp)
     run_free(config, services, job_done(setup, rip))
     assert rip_state(setup, rip)["state"] == "move_failed"

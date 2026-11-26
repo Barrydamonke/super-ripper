@@ -137,6 +137,26 @@ def _free_name(dest: Path, name: str) -> Iterator[Path]:
         n += 1
 
 
+def place_in_downloads(config, rip_id: int, role: str, src: Path) -> Path:
+    """Rename src (already inside downloads/<rip_id>/.partial/) into downloads/<rip_id>/ (extras in
+    extras/), never overwriting. A rename needs no free space; OSError if it can't be done."""
+    dest = config.downloads_dir / str(rip_id) / ("extras" if role == "extra" else "")
+    dest.mkdir(parents=True, exist_ok=True)
+    for target in _free_name(dest, src.name):
+        try:
+            os.link(src, target)  # atomic, and fails if the name is taken
+        except FileExistsError:
+            continue
+        except OSError:  # no hard links here: check, then rename
+            if target.exists():
+                continue
+            os.rename(src, target)
+            return target
+        src.unlink()
+        return target
+    raise OSError("no free file name")  # _free_name never runs out
+
+
 def move_to_downloads(config, rip_id: int, role: str, src: Path, statvfs=None, min_free_gb: float = 0,
                      cancel: threading.Event | None = None, reserved_bytes: int = 0) -> Path:
     """Copy src to downloads/<rip_id>/ (extras in extras/), never overwriting, then remove src.

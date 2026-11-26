@@ -56,7 +56,7 @@ Check the guard by hand: `curl -H "X-Shutdown-Secret: <secret>" http://<unraid-i
    - **retries** per bad sector;
    - **approval:** "only check the odd ones" files clean rips automatically; "always ask" sends every album to the Music page;
    - **cover art.**
-4. **Where files go.** Rips are made in `/work/<job>/` and then wait in `/data/downloads/disc-ripper/<job>/`. They're filed into `/data/MEDIA/Music`. Set `MUSIC_DIR` or `DOWNLOADS_DIR` on the container to change those two.
+4. **Where files go.** CD rips are made in `/work/<job>/`; DVD and Blu-ray rips are written straight into `/data/downloads/disc-ripper/<rip>/`. Both wait there in downloads. They're filed into `/data/MEDIA/Music`. Set `MUSIC_DIR` or `DOWNLOADS_DIR` on the container to change those two.
 
 Library layout:
 
@@ -93,7 +93,7 @@ What happens on insert: the disc is scanned and the **longest title** is taken a
 
 A held card lists the titles; pick one and press **Rip**. While a rip runs you can tick **extras** on the card; they are ripped after the main title, and the eject waits for them. Cancelling an unwanted extra still lets the disc eject; a failed title keeps the disc in for Retry. **Eject** also cancels anything still queued for that disc, as does taking the disc out.
 
-Where rips land: `/data/downloads/disc-ripper/<rip_id>/`, with extras in `extras/`. Files keep MakeMKV's own names and are never overwritten. Once a film is imported and Jellyfin shows it, its rip folder is cleaned up (see Importing films); otherwise delete a rip's folder to discard it. If the move out of the work area fails (for example the cache is short of space), the rip still counts as done and the disc ejects; the file stays in `/work/<job>/`, and the drive's card keeps the message and a **Move again** button, with or without a disc in. If the file is gone from the work area by then, Move again says there is nothing left to move.
+Where rips land: `/data/downloads/disc-ripper/<rip_id>/`, with extras in `extras/`. MakeMKV writes each title into a hidden `.partial/<job>/` folder inside the rip's folder, and the finished file is renamed into place. A rename needs no extra space, so a 40 GB Blu-ray needs 40 GB on the cache, not twice that. A failed or cancelled title's partial file is removed. Files keep MakeMKV's own names and are never overwritten. Once a film is imported and Jellyfin shows it, its rip folder is cleaned up (see Importing films); otherwise delete a rip's folder to discard it. If a rename isn't possible, the file is copied instead. If that copy fails (for example the cache is short of space), the rip still counts as done and the disc ejects. The file stays in `.partial/<job>/`, and the drive's card keeps the message and a **Move again** button, with or without a disc in. If the file is gone by then, Move again says there is nothing left to move.
 
 When the beta key or version expires, rips fail with an "Update MakeMKV" message. Paste the new beta key in Settings, or rebuild the image with a newer version (below).
 
@@ -133,7 +133,7 @@ What a finished rip does next is set by **After ripping** on the Presets page. T
 
 Encodes queue behind the shutdown guard (a running encode holds shutdown like a rip, and an encode that would run past the grace period waits for the next session) and behind the work-area space check. Stopping the container mid-encode marks the encode interrupted and it restarts at the next boot.
 
-**Raw deletion.** The raw rip is deleted `raw_keep_hours` after a good encode (any preset, including Copy only), as long as the encode's output still exists and no other encode of that file is queued or running. To keep the raw for another encode, queue it within that window. The **Delete raw now** button on the Films page does the same at once, after a confirmation, and is refused unless a good encode exists. The disc is the backup. The Films page then shows "raw deleted".
+**Raw deletion.** The raw rip is deleted as soon as an encode of it passes its check (any preset, including Copy only), as long as the encode's output still exists and no other encode of that file is queued or running. A disc can always be ripped again. To keep raws for a while, set **Keep raw rips for** in Settings (in hours; 0, the default, means straight away). The **Delete raw now** button on the Films page does the same at once, after a confirmation, and is refused unless a good encode exists. The disc is the backup. The Films page then shows "raw deleted".
 
 **Films page** (`/films`, in the nav): the running and queued encodes at the top (the dashboard's **Encoding** panel shows the same lines), then each rip, newest first, with its files. Each file has an **Encode** menu (and **Encode all** per rip), a failed encode shows its reason with **Retry** and **log**, and every encode has its own log (`/config/logs/`). It updates live.
 
@@ -225,6 +225,8 @@ Encodes that finished before Radarr was set up aren't imported automatically. Us
 - Undo leaves the rip waiting for a film again, so "Choose a different film" is Undo and then Identify.
 - **Skip** gives up on a rip: after a confirmation it deletes the rip's downloads folder.
 - The folder tidy runs only on a replace. The target is the name Radarr itself gives the film; the film's current folder is the last part of its Radarr path.
+
+**When the import starts.** Only once the whole disc is done: every title ripped, and no encode of the disc queued or running. A main title that finishes encoding before the extras have been ripped waits for them, so every extra goes into the film's extras folder.
 
 **Clean-up.** After an import, the ripper asks Jellyfin to refresh and checks every 5 minutes, for up to 24 hours, for the film. It counts as seen when Jellyfin has an item with the film's TMDb ID whose file name and size match the imported file (the name, not the whole path, because Jellyfin may mount the library elsewhere). Then the rip's downloads folder (raw, encodes and extras) is deleted and the Films page says "In Jellyfin; the rip's files were cleaned up." Without Jellyfin set up, the folder is deleted 24 hours after the import. Clean-up waits, and keeps the rip, if the library file is missing or still inside the rip folder: the page says "Check the library." The raw-file sweep leaves any rip that is being imported or was imported alone.
 

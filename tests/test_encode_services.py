@@ -80,6 +80,8 @@ def test_encode_refused_after_raw_deleted(config, setup):
 def test_move_again_queues_encode(config, setup, monkeypatch):
     services, rip = scanned(config, setup)
     monkeypatch.setattr(videofiles, "STATVFS", shortfall(1))
+    monkeypatch.setattr(videofiles, "place_in_downloads",  # no rename: the copy needs space
+                        lambda *a: (_ for _ in ()).throw(OSError(18, "Invalid cross-device link")))
     run_until_done(config, setup, services, rip)
     assert rip_state(setup, rip)["state"] == "move_failed"
     assert encodes_of(setup) == []
@@ -292,3 +294,12 @@ def test_encode_of_another_rip_of_the_file_does_not_free_the_raw(filed, setup):
         setup.execute("UPDATE encodes SET source = ? WHERE id = ?", (str(raw.parent / "earlier.mkv"), enc))
     assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0) is not None
     assert raw.exists()
+
+
+def test_raw_deleted_as_soon_as_its_encode_is_done(filed, setup):
+    """Raw rips are big and can be ripped again: no waiting once an encode passed its check."""
+    services, rip, raw, out, enc = filed
+    assert settings.get(setup, "raw_keep_hours") == 0
+    set_enc_done(setup, enc, out, datetime.now(timezone.utc))
+    asyncio.run(services.encode_done(enc))
+    assert not raw.exists() and out.exists()

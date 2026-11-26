@@ -156,7 +156,10 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
     default_choice = presets.default_choice(conn)
     choice_names = {**dict(presets.choices(conn)), "off": "not encoded automatically"}
     rips = []
-    imports = {r["rip_id"]: _import_view(r) for r in conn.execute("SELECT * FROM film_imports")}
+    import_rows = conn.execute("SELECT * FROM film_imports").fetchall()
+    imports = {r["rip_id"]: _import_view(r) for r in import_rows}
+    # Imported: the files went to the library and the rip folder is cleaned up, so no raw/encode controls.
+    in_library = {r["rip_id"] for r in import_rows if r["state"] in ("imported", "in_jellyfin")}
     for rip in conn.execute("SELECT * FROM video_rips ORDER BY rip_id DESC").fetchall():
         disc = conn.execute("SELECT disc_type, label, scan FROM video_discs WHERE fingerprint = ?",
                             (rip["fingerprint"],)).fetchone()
@@ -178,7 +181,8 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
             "disc_type": DISC_NAMES.get(disc["disc_type"], "") if disc else "",
             "created_at": rip["created_at"], "files": views, "logs": logs,
             "imp": imports.get(rip["rip_id"]), "starting": rip["rip_id"] in _STARTING,
-            "can_encode_all": any(not f["deleted"] for f in views),
+            "in_library": rip["rip_id"] in in_library,
+            "can_encode_all": rip["rip_id"] not in in_library and any(not f["deleted"] for f in views),
             # A rip with no choice of its own follows the setting only while it's still ripping.
             "encode_with": choice_names.get(
                 rip["encode_preset"] or (default_choice if rip["state"] == "ripping" else ""), ""),

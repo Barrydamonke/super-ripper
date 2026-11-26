@@ -490,6 +490,7 @@ def test_ripped_disc_offers_rip_again_and_done_line(dash, config):
                  (fp, json.dumps({"0": {"path": "/downloads/7/SOME_FILM_t00.mkv", "role": "main"}})))
     conn.commit()
     (config.downloads_dir / "7").mkdir()
+    (config.downloads_dir / "7" / "title_t00.mkv").write_bytes(b"x")
     text = " ".join(_page(client).split())
     assert "Already ripped (downloads/7/)" in text and "Rip again" in text
     assert "#7 done → downloads/7/SOME_FILM_t00.mkv (2:16:04, 38.2 GB)" in text
