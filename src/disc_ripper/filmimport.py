@@ -583,26 +583,48 @@ async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROO
     return await _locked(services, rip_id, lambda: _run(services, rip_id, "claim", before))
 
 
+def ready_to_import(conn, rip_id: int) -> bool:
+    """The whole disc is done: nothing left to rip, no encode of it queued or running, and the
+    main title has a finished encode. Importing earlier missed extras still being ripped, and
+    the clean-up then deleted the folder under them."""
+    rip = conn.execute("SELECT state, main_title FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    if rip is None or rip["state"] == "ripping":
+        return False
+    row = film_imports.get(conn, rip_id)
+    if row is not None and row["state"] != "identifying":
+        return False
+    rows = encodes.for_rip(conn, rip_id)
+    if any(e["state"] in ("queued", "running") for e in rows):
+        return False
+    if rip["main_title"] is None:  # TV-like: the flow marks it tv_skipped
+        return any(e["state"] == "done" for e in rows)
+    return any(e["state"] == "done" and e["title"] == rip["main_title"] for e in rows)
+
+
 def import_rip_for(conn, encode_id: int) -> int | None:
-    """The rip whose import this finished encode should start, or None."""
+    """The rip whose import this finished encode may start, or None."""
     enc = encodes.get(conn, encode_id)
     if enc is None:
         return None
-    rip = conn.execute("SELECT main_title FROM video_rips WHERE rip_id = ?", (enc["rip_id"],)).fetchone()
-    if rip is None or (rip["main_title"] is not None and rip["main_title"] != enc["title"]):
-        return None
-    row = film_imports.get(conn, enc["rip_id"])
-    return enc["rip_id"] if row is None or row["state"] == "identifying" else None
+    return enc["rip_id"] if ready_to_import(conn, enc["rip_id"]) else None
+
+
+async def maybe_start(services, rip_id: int) -> None:
+    """Start the import of a rip in the background once it is ready (see ready_to_import)."""
+    if services.radarr() is None or services.import_lock(rip_id).locked():
+        return
+    if not await asyncio.to_thread(services._db, ready_to_import, rip_id):
+        return
+    _spawn(services, _background(services, rip_id), f"film import {rip_id}")
 
 
 async def encode_done(services, encode_id: int) -> None:
-    """A finished encode of a rip's main title starts the import in the background."""
+    """A finished encode may complete its disc: start the import then."""
     if services.radarr() is None:
         return
     rip_id = await asyncio.to_thread(services._db, import_rip_for, encode_id)
-    if rip_id is None or services.import_lock(rip_id).locked():
-        return
-    _spawn(services, _background(services, rip_id), f"film import {rip_id}")
+    if rip_id is not None:
+        await maybe_start(services, rip_id)
 
 
 async def _background(services, rip_id: int) -> None:

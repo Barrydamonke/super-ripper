@@ -374,3 +374,14 @@ def test_starting_flag_cleared_once_the_flow_holds_the_lock(radarr, monkeypatch)
     assert rip not in films_routes._STARTING  # the page shows the real step, not "Working on it..."
     while services.import_lock(rip).locked() and time.time() < end:
         time.sleep(0.05)
+
+
+def test_imported_rip_shows_in_library_without_raw_controls(radarr):
+    client, conn, config, fake = radarr
+    rip = film_rip(conn, config)
+    set_row(conn, rip, state="in_jellyfin", tmdb_id=137106, title="The Lego Movie", year=2014,
+            imported_at="2026-11-22T10:00:00+00:00", new_path="/library/Movies/Lego (2014)/lego.mkv")
+    section = client.get("/films").text.split(f"Rip {rip}")[1]
+    assert "in the library" in section
+    for needle in ("raw missing", "raw kept", "Delete raw now", "/films/encode"):
+        assert needle not in section, needle

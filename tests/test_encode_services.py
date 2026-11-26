@@ -292,3 +292,12 @@ def test_encode_of_another_rip_of_the_file_does_not_free_the_raw(filed, setup):
         setup.execute("UPDATE encodes SET source = ? WHERE id = ?", (str(raw.parent / "earlier.mkv"), enc))
     assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0) is not None
     assert raw.exists()
+
+
+def test_raw_deleted_as_soon_as_its_encode_is_done(filed, setup):
+    """Raw rips are big and can be ripped again: no waiting once an encode passed its check."""
+    services, rip, raw, out, enc = filed
+    assert settings.get(setup, "raw_keep_hours") == 0
+    set_enc_done(setup, enc, out, datetime.now(timezone.utc))
+    asyncio.run(services.encode_done(enc))
+    assert not raw.exists() and out.exists()

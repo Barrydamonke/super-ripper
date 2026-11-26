@@ -40,7 +40,7 @@
       <div class="film-file">
         <strong>{{ f.name }}</strong>
         {% if f.seconds %} · {{ f.seconds|hms }}{% endif %}
-        · {% if f.deleted %}raw deleted{% elif f.size is not none %}{{ f.size|gb }} raw{% else %}raw missing{% endif %}
+        · {% if rip.in_library %}in the library{% elif f.deleted %}raw deleted{% elif f.size is not none %}{{ f.size|gb }} raw{% else %}raw missing{% endif %}
         {% for e in f.encodes %}
           <div class="encode-row">
             {% if e.state == "done" %}
@@ -61,6 +61,7 @@
             {% endif %}
           </div>
         {% endfor %}
+        {% if not rip.in_library %}
         {% if f.no_intact %}<span class="hint">raw kept: no intact encode</span>{% endif %}
         {% if f.countdown %}<span class="hint">raw deleted {{ f.countdown }}</span>{% endif %}
         {% if f.can_delete %}
@@ -74,6 +75,7 @@
           <select name="preset">{% for key, label in presets %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select>
           <button type="submit">Encode</button>
         </form>
+        {% endif %}
         {% endif %}
       </div>
     {% else %}

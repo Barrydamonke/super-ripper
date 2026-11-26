@@ -133,7 +133,7 @@ What a finished rip does next is set by **After ripping** on the Presets page. T
 
 Encodes queue behind the shutdown guard (a running encode holds shutdown like a rip, and an encode that would run past the grace period waits for the next session) and behind the work-area space check. Stopping the container mid-encode marks the encode interrupted and it restarts at the next boot.
 
-**Raw deletion.** The raw rip is deleted `raw_keep_hours` after a good encode (any preset, including Copy only), as long as the encode's output still exists and no other encode of that file is queued or running. To keep the raw for another encode, queue it within that window. The **Delete raw now** button on the Films page does the same at once, after a confirmation, and is refused unless a good encode exists. The disc is the backup. The Films page then shows "raw deleted".
+**Raw deletion.** The raw rip is deleted as soon as an encode of it passes its check (any preset, including Copy only), as long as the encode's output still exists and no other encode of that file is queued or running. A disc can always be ripped again. To keep raws for a while, set **Keep raw rips for** in Settings (in hours; 0, the default, means straight away). The **Delete raw now** button on the Films page does the same at once, after a confirmation, and is refused unless a good encode exists. The disc is the backup. The Films page then shows "raw deleted".
 
 **Films page** (`/films`, in the nav): the running and queued encodes at the top (the dashboard's **Encoding** panel shows the same lines), then each rip, newest first, with its files. Each file has an **Encode** menu (and **Encode all** per rip), a failed encode shows its reason with **Retry** and **log**, and every encode has its own log (`/config/logs/`). It updates live.
 
@@ -225,6 +225,8 @@ Encodes that finished before Radarr was set up aren't imported automatically. Us
 - Undo leaves the rip waiting for a film again, so "Choose a different film" is Undo and then Identify.
 - **Skip** gives up on a rip: after a confirmation it deletes the rip's downloads folder.
 - The folder tidy runs only on a replace. The target is the name Radarr itself gives the film; the film's current folder is the last part of its Radarr path.
+
+**When the import starts.** Only once the whole disc is done: every title ripped, and no encode of the disc queued or running. A main title that finishes encoding before the extras have been ripped waits for them, so every extra goes into the film's extras folder.
 
 **Clean-up.** After an import, the ripper asks Jellyfin to refresh and checks every 5 minutes, for up to 24 hours, for the film. It counts as seen when Jellyfin has an item with the film's TMDb ID whose file name and size match the imported file (the name, not the whole path, because Jellyfin may mount the library elsewhere). Then the rip's downloads folder (raw, encodes and extras) is deleted and the Films page says "In Jellyfin; the rip's files were cleaned up." Without Jellyfin set up, the folder is deleted 24 hours after the import. Clean-up waits, and keeps the rip, if the library file is missing or still inside the rip folder: the page says "Check the library." The raw-file sweep leaves any rip that is being imported or was imported alone.
 

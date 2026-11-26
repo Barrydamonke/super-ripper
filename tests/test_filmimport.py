@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import json
+from pathlib import Path
 
 import pytest
 
@@ -284,8 +285,8 @@ def test_encode_done_triggers_import(config, setup, tmp_path):
     assert fake.calls.count("command") == 1
 
 
-def test_encode_done_ignores_extra_titles(config, setup, tmp_path):
-    rip, _ = make_rip(setup, config, extras=[(1, "title_t01.mkv")])
+def test_extra_encode_without_a_main_encode_does_not_import(config, setup, tmp_path):
+    rip, _ = make_rip(setup, config, extras=[(1, "title_t01.mkv")], encode=False)
     folder = config.downloads_dir / str(rip)
     extra = add_encode(setup, rip, 1, folder / "enc", "x.mkv", folder / "title_t01.mkv", 300, "extra")
     services, fake = services_with(config, tmp_path)
@@ -419,3 +420,40 @@ def test_radarr_quality_follows_the_encodes_preset(config, setup, tmp_path):
     [entry] = next(iter(fake.commands.values()))["files"]
     assert entry["quality"]["quality"]["name"] == "Remux-1080p"
     assert "(Copy only)" in import_log(config, rip)
+
+
+def test_import_waits_until_the_disc_is_ripped_and_encoded(config, setup, tmp_path):
+    """The main title's encode can finish while extras are still ripping or encoding (the
+    Hunger Games run): the import must wait, or the last extra is missed and its folder deleted."""
+    rip, eid = make_rip(setup, config, extras=[(1, "title_t01.mkv")])
+    folder = config.downloads_dir / str(rip)
+    with setup:
+        setup.execute("UPDATE video_rips SET state = 'ripping' WHERE rip_id = ?", (rip,))
+    services, fake = services_with(config, tmp_path)
+
+    async def settle():
+        await asyncio.gather(*services._import_tasks)
+
+    async def main():
+        await services.encode_done(eid)  # the main encode finished first: too early
+        await settle()
+        assert row_of(setup, rip) is None
+        with setup:
+            setup.execute("UPDATE video_rips SET state = 'ripped' WHERE rip_id = ?", (rip,))
+        queued = encodes.create(setup, rip_id=rip, title=1, role="extra", source=folder / "title_t01.mkv",
+                                disc_type="dvd", source_seconds=300, source_bytes=50, source_audio=2,
+                                preset_id=1, preset_name="Standard", now=NOW)
+        await filmimport.maybe_start(services, rip)  # ripped, but an extra's encode is still queued
+        await settle()
+        assert row_of(setup, rip) is None
+        encodes.start(setup, queued, NOW)
+        out = folder / "enc" / "extra.mkv"
+        out.write_bytes(b"x" * 20)
+        encodes.finish(setup, queued, "done", NOW, output=str(out), output_bytes=20)
+        await services.encode_done(queued)  # the last encode of the disc: now it imports
+        await settle()
+
+    asyncio.run(main())
+    row = row_of(setup, rip)
+    assert row["state"] == "imported", row["error"]
+    assert [Path(p).name for p in json.loads(row["extras"])] == ["extra.mkv"]

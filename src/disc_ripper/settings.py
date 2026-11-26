@@ -121,8 +121,9 @@ SETTINGS: tuple[SettingDef, ...] = (
         group="Encoding",
     ),
     SettingDef(
-        "raw_keep_hours", "Keep raw rips for", "int", 24, "hours", 0, 720,
-        "A raw rip is deleted this long after one of its encodes finishes, if the output is still there.",
+        "raw_keep_hours", "Keep raw rips for", "int", 0, "hours", 0, 720,
+        "A raw rip is deleted this long after one of its encodes passes its check (0: straight away). "
+        "A disc can always be ripped again.",
         group="Encoding",
     ),
     SettingDef(

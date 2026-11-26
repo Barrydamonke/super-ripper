@@ -130,7 +130,13 @@ class Services:
         return self._import_locks.setdefault(rip_id, asyncio.Lock())
 
     async def encode_done(self, encode_id: int) -> None:
-        """An encode finished: start the film import when it is the main title's."""
+        """An encode finished: delete raws that are due (straight away by default), and start the
+        film import once the whole disc is ripped and encoded."""
+        try:
+            if await asyncio.to_thread(self._db, self._sweep_raw):
+                await self.encodes_changed()
+        except Exception:
+            log.exception("encode: deleting raw rips after encode #%s failed", encode_id)
         await filmimport.encode_done(self, encode_id)
 
     # -- audio CDs -------------------------------------------------------------
@@ -743,7 +749,9 @@ class Services:
     async def job_ended(self, job_id: int) -> None:
         """The runner's hook: a job finished, or a queued one was cancelled. A rip_title job
         settles its rip once nothing of it is pending (ripped, move_failed or failed)."""
-        await asyncio.to_thread(self._db, self._settle_for_job, job_id)
+        rip_id = await asyncio.to_thread(self._db, self._settle_for_job, job_id)
+        if rip_id is not None:  # the disc may be complete now (its encodes finished before it)
+            await filmimport.maybe_start(self, rip_id)
         await self._maybe_auto_retry(job_id)
 
     def _plan_auto_retry(self, conn, job_id: int) -> bool:
