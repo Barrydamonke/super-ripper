@@ -101,7 +101,7 @@ When the beta key or version expires, rips fail with an "Update MakeMKV" message
 
 ### Job logs
 
-Every job (scans, rips, and test jobs when enabled) keeps a log in `/config/logs/job-<id>.log`: what ran, the tool's own messages, progress every 10% and how it ended. A CD rip also keeps cyanrip's own log beside it as `job-<id>-cyanrip.log`. Progress chatter is left out, so a log is usually 10–20 KB. Logs are kept until you delete them. Each job on a drive's card has a **log** link that opens the log in a new tab, and a failed job shows its reason in a box on the card with **Retry** and **View log**.
+Every job (scans, rips, and test jobs when enabled) keeps a log in `/config/logs/job-<id>.log`: what ran, the tool's own messages, progress every 10% and how it ended. A CD rip also keeps cyanrip's own log beside it as `job-<id>-cyanrip.log`. Progress chatter is left out, so a log is usually 10–20 KB. Finished jobs and their logs are deleted after 30 days (jobs a rip, album or film still refers to are kept), checked at start-up and daily. Each job on a drive's card has a **log** link that opens the log in a new tab, and a failed job shows its reason in a box on the card with **Retry** and **View log**.
 
 ### Testing step 4 on the server
 

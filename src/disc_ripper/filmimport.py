@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 from . import db, encodes, film_imports, filmid, joblog, presets, settings, video_rips, videofiles
-from .clock import utc_now
+from .clock import parse_utc, utc_now
 from .jellyfin import JellyfinError
 from .radarr import RadarrError, parse_resolution, parse_runtime, to_candidate
 
@@ -752,11 +752,6 @@ async def _background(services, rip_id: int) -> None:
 # -- Jellyfin confirmation and clean-up ----------------------------------------------------
 
 
-def _parse_utc(value: str) -> datetime:
-    moment = datetime.fromisoformat(value)
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
-
-
 def _seen_in(sources, path: str, size: int) -> bool:
     """Jellyfin may mount the library elsewhere, so compare the file's name and size, not its folder."""
     name = PurePosixPath(path.replace("\\", "/")).name
@@ -785,7 +780,7 @@ async def _confirm_one(services, rip_id: int, now: datetime) -> None:
         if row is None or row["state"] != "imported" or not row["imported_at"] or not row["new_path"]:
             return
         jlog = joblog.JobLog(services.config.config_dir / joblog.LOG_DIRNAME / f"import-{rip_id}.log")
-        waited = now - _parse_utc(row["imported_at"]) >= timedelta(hours=CONFIRM_HOURS)
+        waited = now - parse_utc(row["imported_at"]) >= timedelta(hours=CONFIRM_HOURS)
         folder = services.config.downloads_dir / str(int(rip_id))
         new = Path(row["new_path"])
         if not await asyncio.to_thread(_library_file_safe, new, folder):

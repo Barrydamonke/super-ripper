@@ -95,7 +95,7 @@ def conn(config, add_sg):
 
 def rip(config, conn, services, disc_id, n_tracks, *, statuses=None):
     job_id = jobs.enqueue(conn, "serial:A", "rip_cd", {}, uses_drive=True, now="t")
-    cd_rips.create(conn, job_id, disc_id, "t")
+    cd_rips.ensure(conn, job_id, disc_id, "t")
     rip_dir = config.work_dir / str(job_id) / "rip"
     for n in range(1, n_tracks + 1):
         make_flac(rip_dir / f"{n}.flac")
@@ -201,7 +201,7 @@ def test_deluxe_edition_goes_to_look(config, conn):
 def test_second_disc_while_first_waiting(config, conn):
     group = musicbrainz.candidates_for_disc(releases("compilation"), NOW44_2)[0].release_group_id
     waiting = jobs.enqueue(conn, "serial:A", "rip_cd", {}, now="t")
-    cd_rips.create(conn, waiting, "disc1", "t")
+    cd_rips.ensure(conn, waiting, "disc1", "t")
     cd_rips.update(conn, waiting, state="needs_look", reasons=["1 track(s) not verified"],
                    candidates=[{"release_group_id": group, "medium": 1}])
     _, row = rip(config, conn, FakeServices(FakeMB(releases("compilation"))), NOW44_2, 22)
@@ -373,7 +373,7 @@ def test_move_failure_keeps_files_visible(config, conn, monkeypatch):
 
     monkeypatch.setattr(filing_mod, "_move", flaky)
     job_id = jobs.enqueue(conn, "serial:A", "rip_cd", {}, uses_drive=True, now="t")
-    cd_rips.create(conn, job_id, NEVERMIND, "t")
+    cd_rips.ensure(conn, job_id, NEVERMIND, "t")
     rip_dir = config.work_dir / str(job_id) / "rip"
     for n in range(1, 13):
         make_flac(rip_dir / f"{n:02d}.flac")

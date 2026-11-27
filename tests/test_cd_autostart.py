@@ -58,7 +58,7 @@ def test_insert_ignores_non_audio(svc):
 
 def _finished_rip(conn, state, cd_state="ripping"):
     j = jobs.enqueue(conn, "serial:A", "rip_cd", {"disc_id": DISC}, uses_drive=True, now="t")
-    cd_rips.create(conn, j, DISC, "t")
+    cd_rips.ensure(conn, j, DISC, "t")
     jobs.start(conn, j, "t")
     jobs.finish(conn, j, state, "t")
     if cd_state != "ripping":

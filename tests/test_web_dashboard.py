@@ -277,7 +277,7 @@ def test_rip_again_route(dash):
     _audio_disc(client, conn)
     disc_id = musicbrainz_disc_id(CD_TOC)
     old = jobs.enqueue(conn, "serial:A", "rip_cd", {"disc_id": disc_id}, uses_drive=True, now="t")
-    cd_rips.create(conn, old, disc_id, "t")
+    cd_rips.ensure(conn, old, disc_id, "t")
     jobs.start(conn, old, "t")
     jobs.finish(conn, old, "done", "t")
     cd_rips.update(conn, old, state="filed", summary="Nirvana — Nevermind (1991)")
@@ -295,7 +295,7 @@ def test_rip_again_route(dash):
 def test_card_links_recent_rip_to_music_page(dash):
     client, conn = dash
     j = jobs.enqueue(conn, "serial:A", "rip_cd", {"disc_id": "x"}, uses_drive=True, now="t")
-    cd_rips.create(conn, j, "x", "t")
+    cd_rips.ensure(conn, j, "x", "t")
     jobs.start(conn, j, "t")
     jobs.finish(conn, j, "done", "t")
     cd_rips.update(conn, j, state="needs_look", summary="Unknown album · 9 tracks")
@@ -325,7 +325,7 @@ def test_old_disc_not_shown_after_tray_empties(dash):
     old_toc = Toc(first=1, last=5, offsets=(0, 1, 2, 3, 4), leadout=99999, data_tracks=frozenset())
     old = musicbrainz_disc_id(old_toc)
     j = jobs.enqueue(conn, "serial:A", "rip_cd", {"disc_id": old}, uses_drive=True, now="t")
-    cd_rips.create(conn, j, old, "t")
+    cd_rips.ensure(conn, j, old, "t")
     jobs.start(conn, j, "t")
     jobs.finish(conn, j, "done", "t")
     cd_rips.update(conn, j, state="filed", summary="Old Album")
@@ -608,7 +608,7 @@ def test_job_log_page_shows_the_log_and_kept_tool_logs(dash, config):
     assert "job started" in r.text
     assert f"job-{j}-cyanrip.log" in r.text and "Tracks ripped accurately: 13/13" in r.text
     missing = client.get("/jobs/9999/log")
-    assert missing.status_code == 404 and "No log" in missing.text
+    assert missing.status_code == 404 and missing.text == "No log was kept for this job."
 
 
 def test_job_log_needs_login(client):

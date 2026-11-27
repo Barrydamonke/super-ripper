@@ -24,16 +24,6 @@ def test_output_name():
     assert not hasattr(encoding, "PRESETS") and not hasattr(encoding, "encode_argv")
 
 
-def test_audio_plan():
-    assert encoding.audio_plan(8) == (6, 640)
-    assert encoding.audio_plan(6) == (6, 640)
-    assert encoding.audio_plan(2) == (2, 224)
-    assert encoding.audio_plan(1) == (1, 224)
-    assert encoding.audio_plan(0) == (2, 224)
-    assert encoding.audio_plan(4) == (6, 640)
-    assert encoding.audio_plan(3) == (6, 640)
-
-
 def test_env_overrides(monkeypatch):
     assert encoding.handbrake_prefix() == ["HandBrakeCLI"]
     assert encoding.ffmpeg_prefix() == ["ffmpeg"]
@@ -120,7 +110,6 @@ def test_progress_noise_filter():
         assert noise(line), line
     for line in ("progress=end", "x265 [info]: frame I:1", "Error: something failed", "[error] bad"):
         assert not noise(line), line
-    assert encoding.is_progress_noise("speed=2x") and not encoding.is_progress_noise("progress=end")
 
 
 IDET_I = "[Parsed_idet_0 @ 0x1] Multi frame detection: TFF:   400 BFF:    10 Progressive:    50 Undetermined:     0"

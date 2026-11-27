@@ -28,7 +28,7 @@ def music(logged_in_client, config, add_sg):
 def waiting_rip(conn, config, *, tracks=12, cands=None, reasons=("several possible releases",), release_id=None,
                 disc_id=NEVERMIND):
     job_id = jobs.enqueue(conn, "serial:A", "rip_cd", {"disc_id": disc_id}, uses_drive=True, now="t")
-    cd_rips.create(conn, job_id, disc_id, "t")
+    cd_rips.ensure(conn, job_id, disc_id, "t")
     jobs.start(conn, job_id, "t")
     jobs.finish(conn, job_id, "done", "t")
     dest = config.downloads_dir / str(job_id)

@@ -16,7 +16,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from .. import db, encodes, encoding, film_imports, filmid, filmimport, filmundo, joblog, presets, settings
-from ..clock import utc_now
+from ..clock import parse_utc, utc_now
 from ..radarr import RadarrError, to_candidate
 from .deps import templates
 
@@ -60,11 +60,6 @@ templates.env.filters["day"] = _day
 DISC_NAMES = {"dvd": "DVD", "bluray": "Blu-ray"}
 
 
-def _parse_utc(value: str) -> datetime:
-    moment = datetime.fromisoformat(value)
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
-
-
 def _active_rows(conn: sqlite3.Connection) -> list[dict]:
     rows = []
     for row in [*encodes.running(conn), *encodes.queued(conn)]:
@@ -82,7 +77,7 @@ def _active_rows(conn: sqlite3.Connection) -> list[dict]:
 
 
 def _raw_countdown(done: list[sqlite3.Row], keep_hours: float, now: datetime) -> str | None:
-    stamps = [_parse_utc(r["finished_at"]) for r in done if r["finished_at"]]
+    stamps = [parse_utc(r["finished_at"]) for r in done if r["finished_at"]]
     if not stamps:
         return None
     left = (min(stamps).timestamp() + keep_hours * 3600 - now.timestamp()) / 3600
@@ -147,7 +142,7 @@ def _import_view(row: sqlite3.Row) -> dict:
     item["undo_until"] = None
     if item["replaced"] and row["imported_at"] and _BIN_DAYS["days"]:
         try:
-            item["undo_until"] = (_parse_utc(row["imported_at"]) + timedelta(days=_BIN_DAYS["days"])).isoformat()
+            item["undo_until"] = (parse_utc(row["imported_at"]) + timedelta(days=_BIN_DAYS["days"])).isoformat()
         except ValueError:
             pass
     return item

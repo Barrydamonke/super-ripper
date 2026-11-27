@@ -14,14 +14,6 @@ _FIELDS = {
 }
 
 
-def create(conn: sqlite3.Connection, job_id: int, disc_id: str, now: str) -> None:
-    with conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO cd_rips (job_id, disc_id, state, updated_at) VALUES (?, ?, 'ripping', ?)",
-            (job_id, disc_id, now),
-        )
-
-
 def ensure(conn: sqlite3.Connection, job_id: int, disc_id: str, now: str) -> None:
     """Make sure a rip job has its row (a retried job is a new job without one)."""
     with conn:

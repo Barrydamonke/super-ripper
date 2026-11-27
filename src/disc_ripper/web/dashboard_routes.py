@@ -475,8 +475,7 @@ def _read_job_log(config, job_id: int) -> str | None:
 async def job_log(request: Request, job_id: int):
     text = await asyncio.to_thread(_read_job_log, request.app.state.config, job_id)
     if text is None:
-        return PlainTextResponse(f"No log was kept for job #{job_id} (logs started with this version).",
-                                 status_code=404)
+        return PlainTextResponse("No log was kept for this job.", status_code=404)
     return PlainTextResponse(text)
 
 
