@@ -566,6 +566,14 @@ async def skip(request: Request, rip_id: int = Form(...)):
     return await _respond(request, notice="Skipped. The rip's files were deleted.")
 
 
+@router.post("/films/remove")
+async def remove(request: Request, rip_id: int = Form(...)):
+    refusal = await _services(request).remove_rip(rip_id)
+    if refusal:
+        return await _respond(request, error=refusal, status_code=409)
+    return await _respond(request, notice=f"Rip {rip_id} removed.")
+
+
 @router.post("/films/undo")
 async def undo(request: Request, rip_id: int = Form(...)):
     services = _services(request)

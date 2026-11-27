@@ -26,6 +26,7 @@
   <div class="video-move">
     <p class="error">Rip #{{ mv.rip_id }}: {{ mv.message or "Moving the rip to downloads failed." }}</p>
     <button hx-post="/dashboard/video/move" hx-vals='{"drive_id": {{ drive.id|tojson }}, "rip_id": {{ mv.rip_id }}}' hx-target="#drive-{{ key }}" hx-disabled-elt="this">Move again</button>
+    <a class="hint" href="/films">or remove it on the Films page</a>
   </div>
 {% endfor %}
 {% if drive.media_state == "disc" and drive.disc_type in ("dvd", "bluray") %}{% include "_video_card.html" %}{% endif %}

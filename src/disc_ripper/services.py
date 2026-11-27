@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import shutil
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -507,6 +508,79 @@ class Services:
             await self.drive_changed(drive_id)
         return error
 
+    # -- removing a rip ----------------------------------------------------------
+
+    def _remove_prepare(self, conn, rip_id: int) -> tuple[str | None, list[int], list[int]]:
+        """(refusal, the rip's rip_title job ids, its encode ids); queued jobs and encodes are cancelled."""
+        if conn.execute("SELECT 1 FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone() is None:
+            return "Unknown rip.", [], []
+        imp = film_imports.get(conn, rip_id)
+        if imp is not None and imp["state"] in ("importing", "identifying"):
+            return f"Rip {rip_id} is being imported; wait for it to finish.", [], []
+        job_rows = conn.execute("SELECT id, state FROM jobs WHERE kind = 'rip_title' "
+                                "AND json_extract(params, '$.rip_id') = ? ORDER BY id", (rip_id,)).fetchall()
+        if any(r["state"] == "running" for r in job_rows):
+            return f"Rip {rip_id} is still ripping; cancel it on the drive's card first.", [], []
+        enc_rows = encodes.for_rip(conn, rip_id)
+        if any(r["state"] == "running" for r in enc_rows):
+            return f"Rip {rip_id} is still encoding; cancel the encode first.", [], []
+        now = utc_now()
+        for row in enc_rows:
+            if row["state"] == "queued" and encodes.cancel_queued(conn, row["id"], now) == "running":
+                return f"Rip {rip_id} is still encoding; cancel the encode first.", [], []
+        for row in job_rows:
+            if row["state"] in ("queued", "waiting_space") and jobs.cancel_queued(conn, row["id"], now) == "running":
+                return f"Rip {rip_id} is still ripping; cancel it on the drive's card first.", [], []
+        return None, [r["id"] for r in job_rows], [r["id"] for r in enc_rows]
+
+    def _remove_files(self, rip_id: int, job_ids: list[int], encode_ids: list[int]) -> str | None:
+        paths = [self.config.downloads_dir / str(rip_id)]
+        paths += [self.config.work_dir / str(i) for i in job_ids]
+        paths += [self.config.work_dir / f"encode-{i}" for i in encode_ids]
+        for path in paths:
+            try:
+                if path.exists():
+                    shutil.rmtree(path)
+            except OSError as exc:
+                return f"Couldn't delete {path}: {exc}"
+        return None
+
+    def _remove_rows(self, conn, rip_id: int) -> list[str]:
+        """Delete the rip's rows (jobs and logs stay as history); returns the drives its jobs ran on."""
+        drives_ = self._rip_drives(conn, rip_id)
+        with conn:
+            conn.execute("DELETE FROM encodes WHERE rip_id = ?", (rip_id,))
+            conn.execute("DELETE FROM film_imports WHERE rip_id = ?", (rip_id,))
+            conn.execute("DELETE FROM video_rips WHERE rip_id = ?", (rip_id,))
+        return drives_
+
+    async def remove_rip(self, rip_id: int) -> str | None:
+        """Remove a rip from the Films page: its downloads folder, work leftovers and rows. The library
+        and Radarr are never touched. Returns why it can't be removed, or None."""
+        lock = self.import_lock(rip_id)
+        if lock.locked():
+            return f"Rip {rip_id} is being imported; wait for it to finish."
+        async with lock:  # also keeps a film import from starting meanwhile
+            refusal, job_ids, encode_ids = await asyncio.to_thread(self._db, self._remove_prepare, rip_id)
+            if refusal is None:
+                refusal = await asyncio.to_thread(self._remove_files, rip_id, job_ids, encode_ids)
+            drive_ids = []
+            if refusal is None:
+                drive_ids = await asyncio.to_thread(self._db, self._remove_rows, rip_id)
+                log.info("films: removed rip #%s", rip_id)
+        # Always publish: a refusal may follow cancelling some queued work.
+        self.films_changed()
+        await self.encodes_changed()
+        for drive_id in drive_ids or await asyncio.to_thread(self._db, self._rip_drives, rip_id):
+            await self.drive_changed(drive_id)
+        return refusal
+
+    @staticmethod
+    def _rip_drives(conn, rip_id: int) -> list[str]:
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT drive_id FROM jobs WHERE kind = 'rip_title' "
+            "AND json_extract(params, '$.rip_id') = ? AND drive_id IS NOT NULL", (rip_id,))]
+
     # -- encodes ---------------------------------------------------------------
 
     def _queue_encode(self, conn, rip_id: int, title: int, choice: str) -> tuple[int | None, str | None]:
@@ -876,7 +950,9 @@ class Services:
                 same_disc = current is not None and current["fingerprint"] == params.get("fingerprint")
             elif same_disc:
                 same_disc = drive["disc_label"] == params.get("label", "")
-            if newer or not same_disc:
+            gone = row["kind"] == "rip_title" and conn.execute(
+                "SELECT 1 FROM video_rips WHERE rip_id = ?", (params.get("rip_id"),)).fetchone() is None
+            if newer or not same_disc or gone:  # (gone: the rip was removed while the retry waited)
                 conn.rollback()
                 return None
             params["auto_retry"] = int(params.get("auto_retry", 0)) + 1

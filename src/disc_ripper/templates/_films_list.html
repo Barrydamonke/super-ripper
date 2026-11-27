@@ -28,6 +28,9 @@
     <h2>Rip {{ rip.rip_id }}{% if rip.label %} · {{ rip.label }}{% endif %}{% if rip.disc_type %} · {{ rip.disc_type }}{% endif %} · {{ rip.created_at|day }}
       {% for job_id in rip.logs %}<a class="hint" href="/jobs/{{ job_id }}/log" target="_blank">log</a> {% endfor %}</h2>
     {% include "_film_import.html" %}
+    {% set what = rip.label or rip.disc_type or "" %}
+    <button class="remove-rip" hx-post="/films/remove" hx-vals='{"rip_id": {{ rip.rip_id }}}' hx-target="#films"
+            hx-confirm="Remove rip {{ rip.rip_id }}{% if what %} ({{ what }}){% endif %}? {% if rip.in_library %}The film stays in your library; only this rip's leftovers are deleted, and its import can no longer be undone.{% else %}Its folder in downloads is deleted (raw rip, encodes and extras) and it disappears from this page. The disc can be ripped again later.{% endif %}">Remove</button>
     {% if rip.encode_with %}<p class="hint">Encode with: {{ rip.encode_with }}</p>{% endif %}
     {% if rip.can_encode_all %}
     <form class="inline" hx-post="/films/encode-all" hx-target="#films" hx-disabled-elt="find button">

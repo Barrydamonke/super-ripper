@@ -137,6 +137,8 @@ Encodes queue behind the shutdown guard (a running encode holds shutdown like a 
 
 **Films page** (`/films`, in the nav): the running and queued encodes at the top (the dashboard's **Encoding** panel shows the same lines), then each rip, newest first, with its files. Each file has an **Encode** menu (and **Encode all** per rip), a failed encode shows its reason with **Retry** and **log**, and every encode has its own log (`/config/logs/`). It updates live.
 
+Each rip has a **Remove** button (after a confirmation). It deletes the rip's folder in downloads (raw rip, encodes, extras), any leftover files in the work area (such as a file stuck after a failed move to downloads) and the rip's rows, so it disappears from the page and the disc can be ripped again. It is refused while the rip is ripping, encoding or being imported; queued rips and encodes of it are cancelled. The library and Radarr are never touched: removing an imported film keeps it in your library, but its import can no longer be undone. Job and encode logs are kept.
+
 **GPU setup.** The template passes `--device=/dev/dri`. The entrypoint keeps the render group itself, clears the other groups, and warns in the container log if the render node is root-only (then Fast cannot run as the app user). Check as the app user with the `setpriv ... vainfo` command in step 5 of the install (plain `docker exec ... vainfo` runs as root and proves nothing): it must list `VAProfileHEVCMain : VAEntrypointEncSlice`. Without it, use Standard or Copy only.
 
 ### Testing step 6 on the server
