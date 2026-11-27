@@ -11,8 +11,10 @@ import hashlib
 import json
 import logging
 import math
+import os
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from . import cd_rips, cdrip, coverart, db, drives, encodes, film_imports, filmimport, joblog, jobs, presets, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
@@ -50,13 +52,39 @@ def _parse_utc(value: str) -> datetime:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
-def _configure_logging() -> None:
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+_APP_LOG = "app.log"
+
+
+def _configure_logging(config_dir: Path | None = None) -> None:
     logger = logging.getLogger("disc_ripper")
-    if not logger.handlers:
+    if not any(type(h) is logging.StreamHandler for h in logger.handlers):
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        handler.setFormatter(logging.Formatter(_LOG_FORMAT))
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
+    if config_dir is None:
+        return
+    path = Path(config_dir) / "logs" / _APP_LOG
+    for h in list(logger.handlers):  # one app log at a time (a restart in-process swaps it)
+        if isinstance(h, RotatingFileHandler):
+            logger.removeHandler(h)
+            h.close()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(path, maxBytes=2 * 1024 * 1024, backupCount=4, encoding="utf-8")
+    except OSError as exc:
+        log.warning("could not open the app log %s: %s; carrying on without it", path, exc)
+        return
+    file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    logger.addHandler(file_handler)
+
+
+def _app_version() -> str:
+    from . import __version__
+
+    sha = os.environ.get("GIT_SHA", "").strip()
+    return f"{__version__} ({sha[:12]})" if sha else __version__
 
 
 AUTO_RETRY_SECONDS = 180  # a stalled MakeMKV job is tried again after this…
@@ -101,9 +129,10 @@ class Services:
         self._import_locks: dict[int, asyncio.Lock] = {}
         self._import_tasks: set[asyncio.Task] = set()
         self.dvd_decoy_wait: float = DVD_DECOY_WAIT_SECONDS
-        self._dvd_waits: set[asyncio.Task] = set()
+        self._dvd_waits: dict[str, asyncio.Task] = {}  # drive id -> its pending DVD wait
         self.auto_retry_wait: float = AUTO_RETRY_SECONDS
         self._auto_retries: set[asyncio.Task] = set()
+        self._retry_rips: dict[int, int] = {}  # job id of a pending automatic retry -> its rip
         self._films_push: asyncio.Task | None = None
         self._films_dirty = False
 
@@ -129,8 +158,12 @@ class Services:
         """The lock that lets one film-import flow at a time run for a rip."""
         return self._import_locks.setdefault(rip_id, asyncio.Lock())
 
+    def retry_pending(self, rip_id: int) -> bool:
+        """An automatic retry of one of this rip's titles is waiting to happen."""
+        return rip_id in self._retry_rips.values()
+
     async def encode_done(self, encode_id: int) -> None:
-        """An encode finished: delete raws that are due (straight away by default), and start the
+        """An encode ended (done, failed or cancelled): delete raws that are due (straight away by default), and start the
         film import once the whole disc is ripped and encoded."""
         try:
             if await asyncio.to_thread(self._db, self._sweep_raw):
@@ -374,8 +407,21 @@ class Services:
             log.info("video: DVD wait over on %s: %s", drive_id, outcome)
 
         task = asyncio.get_running_loop().create_task(later())
-        self._dvd_waits.add(task)
-        task.add_done_callback(self._dvd_waits.discard)
+        old = self._dvd_waits.get(drive_id)
+        if old is not None:
+            old.cancel()
+        self._dvd_waits[drive_id] = task
+
+        def forget(done, drive_id=drive_id):
+            if self._dvd_waits.get(drive_id) is done:
+                del self._dvd_waits[drive_id]
+
+        task.add_done_callback(forget)
+
+    def dvd_wait_pending(self, drive_id: str) -> bool:
+        """A DVD on this drive is waiting out its decoy delay before ripping by itself."""
+        task = self._dvd_waits.get(drive_id)
+        return task is not None and not task.done()
 
     async def start_video_rip(self, drive_id: str, fingerprint: str, *, main: int | None, extras: list[int],
                               again: bool, scan_job_id: int | None = None, after_wait: bool = False) -> int | None:
@@ -543,8 +589,12 @@ class Services:
         if not Path(row["source"]).is_file():
             return None, "The raw rip is no longer on disk."
         if row["preset_id"] is None or presets.get_preset(conn, row["preset_id"]) is None:
-            return None, presets.GONE
-        new_id = encodes.retry(conn, encode_id, utc_now())
+            gone = row["preset_id"] is None or not presets.exists(conn, row["preset_id"])
+            return None, presets.GONE if gone else presets.INVALID
+        try:
+            new_id = encodes.retry(conn, encode_id, utc_now())
+        except ValueError:  # PresetError: the preset went bad between the check and the retry
+            return None, presets.INVALID
         if new_id is None:
             return None, "This file already has an encode waiting or running."
         return new_id, None
@@ -673,11 +723,45 @@ class Services:
         keep = settings.get(conn, "raw_keep_hours")
         now = datetime.now(timezone.utc)
         pairs = conn.execute("SELECT DISTINCT rip_id, title FROM encodes WHERE state = 'done'").fetchall()
-        return sum(self.delete_raw_sync(conn, p["rip_id"], p["title"], now=now, keep_hours=keep) is None
-                   for p in pairs)  # refusals are normal (not yet, or already gone)
+        removed = 0
+        for p in pairs:
+            rows = encodes.for_rip(conn, p["rip_id"])
+            if encodes.lost_subtitles([r for r in rows if r["title"] == p["title"]]):
+                continue  # the raw has the subtitles the encode lost: only Delete raw now lets it go
+            if film_imports.jellyfin_hold(conn, p["rip_id"]) is not None:
+                continue  # the Jellyfin clean-up removes the whole folder once the film shows
+            # refusals are normal (not yet, or already gone)
+            removed += self.delete_raw_sync(conn, p["rip_id"], p["title"], now=now, keep_hours=keep) is None
+        return removed
+
+    def _cancel_orphaned_disc_jobs(self, conn) -> None:
+        """Start-up: queued disc jobs whose disc was taken out while the app was off can never run."""
+        ids = [r[0] for r in conn.execute(
+            "SELECT jobs.id FROM jobs JOIN drives ON drives.id = jobs.drive_id "
+            "WHERE jobs.kind IN ('rip_title', 'scan_video') AND jobs.state IN ('queued', 'waiting_space') "
+            "AND drives.media_state IN ('empty', 'tray_open')")]
+        if not ids:
+            return
+        with conn:
+            conn.executemany(
+                "UPDATE jobs SET state = 'cancelled', finished_at = ?, message = ? WHERE id = ?",
+                [(utc_now(), "The disc was taken out while the app was off.", i) for i in ids])
+        for job_id in ids:
+            self._settle_for_job(conn, job_id)
+        log.info("jobs: cancelled %d queued disc job(s): their disc was taken out while the app was off", len(ids))
+
+    def _sweep_partials(self, conn) -> int:
+        removed = video_rips.sweep_partials(conn, self.config.downloads_dir)
+        for rip_id, job_id in removed:
+            log.info("video: removed the leftover partial folder of job #%s (rip #%s)", job_id, rip_id)
+        return len(removed)
 
     async def _raw_sweep_loop(self) -> None:
         while True:
+            try:
+                await asyncio.to_thread(self._db, self._sweep_partials)
+            except Exception:
+                log.exception("video: removing leftover partial folders failed")
             try:
                 if await asyncio.to_thread(self._db, self._sweep_raw):
                     await self.encodes_changed()
@@ -691,6 +775,10 @@ class Services:
                 await filmimport.confirm_and_clean(self, datetime.now(timezone.utc))
             except Exception:  # never let the loop die
                 log.exception("film import: confirming imports failed")
+            try:
+                await filmimport.sweep_ready(self)
+            except Exception:
+                log.exception("film import: looking for rips ready to import failed")
             await asyncio.sleep(FILM_CONFIRM_SECONDS)
 
     def _render_films(self) -> str | None:
@@ -750,9 +838,9 @@ class Services:
         """The runner's hook: a job finished, or a queued one was cancelled. A rip_title job
         settles its rip once nothing of it is pending (ripped, move_failed or failed)."""
         rip_id = await asyncio.to_thread(self._db, self._settle_for_job, job_id)
+        await self._maybe_auto_retry(job_id)  # first: a pending retry keeps the import from starting
         if rip_id is not None:  # the disc may be complete now (its encodes finished before it)
             await filmimport.maybe_start(self, rip_id)
-        await self._maybe_auto_retry(job_id)
 
     def _plan_auto_retry(self, conn, job_id: int) -> bool:
         """A scan or rip that failed because MakeMKV went silent gets another go (up to
@@ -803,16 +891,24 @@ class Services:
         if not await asyncio.to_thread(self._db, self._plan_auto_retry, job_id):
             return
         row = await asyncio.to_thread(self._db, jobs.get, job_id)
+        rip_id = json.loads(row["params"]).get("rip_id") if row["kind"] == "rip_title" else None
+        if rip_id is not None:  # before any await: a concurrent readiness check must see the pending retry
+            self._retry_rips[job_id] = rip_id
         await self.drive_changed(row["drive_id"])
 
         async def later():
-            await asyncio.sleep(self.auto_retry_wait)
-            new_id = await asyncio.to_thread(self._db, self._do_auto_retry, job_id)
+            try:
+                await asyncio.sleep(self.auto_retry_wait)
+                new_id = await asyncio.to_thread(self._db, self._do_auto_retry, job_id)
+            finally:
+                self._retry_rips.pop(job_id, None)
             log.info("jobs: automatic retry of #%s: %s", job_id,
                      f"queued #{new_id}" if new_id else "skipped (the drive was used or the disc came out)")
             if new_id is not None:
                 self.wake(row["drive_id"])
                 await self.drive_changed(row["drive_id"])
+            elif rip_id is not None:  # the retry was dropped: the disc may be ready after all
+                await filmimport.maybe_start(self, rip_id)
 
         task = asyncio.get_running_loop().create_task(later())
         self._auto_retries.add(task)
@@ -899,6 +995,13 @@ class Services:
         disc = video_rips.disc_in_drive(conn, drive_id)
         if disc is None:
             return []
+        held = json.loads(disc["held"])
+        if any(r.startswith(titles.DECOY_REASON + ":") for r in held):  # the wait is over: drop "rips at HH:MM"
+            held = [titles.DECOY_REASON if r.startswith(titles.DECOY_REASON + ":") else r for r in held]
+            held.append("Hold pressed")
+            with conn:
+                conn.execute("UPDATE video_discs SET held = ? WHERE fingerprint = ?",
+                             (json.dumps(held), disc["fingerprint"]))
         # One write transaction, so the worker can't start the main title or an extra in between.
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -921,6 +1024,9 @@ class Services:
 
     async def hold_video(self, drive_id: str) -> None:
         """Hold the disc: no automatic rip, and a queued (not yet running) main rip is cancelled."""
+        task = self._dvd_waits.pop(drive_id, None)
+        if task is not None:  # Hold during the DVD's wait: it must not rip when the wait ends
+            task.cancel()
         await asyncio.to_thread(self._db, self._hold_video, drive_id)
         self.wake(drive_id)
         await self.drive_changed(drive_id)
@@ -935,7 +1041,8 @@ class Services:
             row = conn.execute("SELECT * FROM drives WHERE id = ?", (drive_id,)).fetchone()
             if row is None:
                 return None
-            return render_drive_card(conn, row, datetime.now().astimezone(), config=self.config)
+            return render_drive_card(conn, row, datetime.now().astimezone(), config=self.config,
+                                     dvd_wait_pending=self.dvd_wait_pending)
         finally:
             conn.close()
 
@@ -1020,18 +1127,32 @@ class Services:
             await self._guard_changed_safely()
 
     async def start(self) -> None:
-        _configure_logging()
+        _configure_logging(self.config.config_dir)
+        log.info("disc-ripper %s starting", _app_version())
         self._loop = asyncio.get_running_loop()
+        count = 0
         conn = db.connect(self.config.db_path)
         try:
-            count = jobs.mark_interrupted(conn, utc_now())
-            encodes.mark_interrupted(conn, utc_now())  # a stale running row can survive a stop race
-            encodes.requeue_interrupted(conn, utc_now())
-            presets.fill_fingerprints(conn)
-            cd_rips.reconcile(conn, self.config.work_dir)
-            for rip_id in video_rips.unsettled(conn):  # rips whose last job ended in the last run
-                video_rips.settle(conn, rip_id, self.config.work_dir, utc_now(), downloads_dir=self.config.downloads_dir)
-            cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc))
+            def guard(label, fn):
+                try:
+                    return fn()
+                except Exception:  # one bad step must not keep the app from starting
+                    log.exception("start-up: %s failed; carrying on", label)
+
+            count = guard("marking interrupted jobs", lambda: jobs.mark_interrupted(conn, utc_now())) or 0
+            # a stale running row can survive a stop race
+            guard("marking interrupted encodes", lambda: encodes.mark_interrupted(conn, utc_now()))
+            guard("requeueing interrupted encodes", lambda: encodes.requeue_interrupted(conn, utc_now()))
+            guard("filling preset fingerprints", lambda: presets.fill_fingerprints(conn))
+            guard("reconciling CD rips", lambda: cd_rips.reconcile(conn, self.config.work_dir))
+            unsettled = guard("listing unsettled rips", lambda: list(video_rips.unsettled(conn))) or []
+            for rip_id in unsettled:  # rips whose last job ended in the last run
+                guard(f"settling rip #{rip_id}", lambda rip_id=rip_id: video_rips.settle(
+                    conn, rip_id, self.config.work_dir, utc_now(), downloads_dir=self.config.downloads_dir))
+            guard("cancelling orphaned disc jobs", lambda: self._cancel_orphaned_disc_jobs(conn))
+            guard("sweeping partial files", lambda: self._sweep_partials(conn))
+            guard("sweeping old work folders",
+                  lambda: cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc)))
         finally:
             conn.close()
         if count:
@@ -1042,6 +1163,10 @@ class Services:
             await filmimport.resume_after_restart(self)
         except Exception:  # the loops must still start
             log.exception("film import: resuming after the restart failed")
+        try:
+            await filmimport.sweep_ready(self)
+        except Exception:
+            log.exception("film import: looking for rips ready to import failed")
         for coro, name in (
             (self._raw_sweep_loop(), "raw sweep"),
             (self._film_confirm_loop(), "film import confirm"),

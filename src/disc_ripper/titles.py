@@ -59,6 +59,7 @@ def hold_reasons(
     hold_pressed: bool,
     already_ripped: str | None,
     from_insert: bool,
+    in_library: str | None = None,
 ) -> list[str]:
     """Reasons to hold the disc for the owner; an empty list means start."""
     reasons: list[str] = []
@@ -71,7 +72,9 @@ def hold_reasons(
         reasons.append("Hold pressed")
     if not auto_start:
         reasons.append("auto-start is off")
-    if already_ripped:
+    if in_library is not None:
+        reasons.append(f"already in the library ({in_library})")
+    elif already_ripped:
         reasons.append(f"already ripped ({already_ripped})")
     if not from_insert:
         reasons.append("disc was in the drive at start-up")

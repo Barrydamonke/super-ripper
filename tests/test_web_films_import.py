@@ -385,3 +385,16 @@ def test_imported_rip_shows_in_library_without_raw_controls(radarr):
     assert "in the library" in section
     for needle in ("raw missing", "raw kept", "Delete raw now", "/films/encode"):
         assert needle not in section, needle
+
+
+def test_import_anyway_route_imports_without_the_failed_title(radarr):
+    client, conn, config, fake = radarr
+    rip = film_rip(conn, config, names=("film_t01.mkv", "extra_t02.mkv"))
+    with_encode(conn, config, rip)
+    queue(conn, rip, 1, state="failed", error="boom")
+    page = client.get("/films").text
+    assert "Title 1's encode failed. Retry it below, or import without it." in page
+    assert "/films/import-anyway" in page
+    assert client.post("/films/import-anyway", data={"rip_id": rip}, headers={"HX-Request": "true"}).status_code == 200
+    assert wait_for(conn, rip, {"imported"})["state"] == "imported"
+    assert conn.execute("SELECT import_anyway FROM video_rips WHERE rip_id = ?", (rip,)).fetchone()[0] == 1

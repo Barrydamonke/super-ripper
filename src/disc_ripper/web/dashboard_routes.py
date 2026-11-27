@@ -126,7 +126,7 @@ def _video_context(conn: sqlite3.Connection, drive_row: sqlite3.Row, grouped, co
 
 def render_drive_card(
     conn: sqlite3.Connection, drive_row: sqlite3.Row, now: datetime, *, error: str | None = None,
-    config,
+    config, dvd_wait_pending=None,
 ) -> str:
     guard = schedule_source.current_guard(conn, now)
     grouped = jobs.drive_jobs(conn, drive_row["id"])
@@ -152,6 +152,7 @@ def render_drive_card(
         blocking=blocking,
         rips=rips,
         **_video_context(conn, drive_row, grouped, config),
+        dvd_waiting=bool(dvd_wait_pending and dvd_wait_pending(drive_row["id"])),
         default_minutes=DEFAULT_TEST_MINUTES,
         running_past_grace=_past_grace(guard, running_finish),
         new_job_past_grace=_past_grace(guard, now + timedelta(minutes=DEFAULT_TEST_MINUTES)),
@@ -189,15 +190,17 @@ def _drive(conn: sqlite3.Connection, drive_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM drives WHERE id = ?", (drive_id,)).fetchone()
 
 
-def _card_sync(conn, config, drive_id: str, error: str | None) -> str | None:
+def _card_sync(conn, config, drive_id: str, error: str | None, dvd_wait_pending=None) -> str | None:
     row = _drive(conn, drive_id)
     if row is None:
         return None
-    return render_drive_card(conn, row, datetime.now().astimezone(), error=error, config=config)
+    return render_drive_card(conn, row, datetime.now().astimezone(), error=error, config=config,
+                             dvd_wait_pending=dvd_wait_pending)
 
 
 async def _card(request: Request, drive_id: str, *, error: str | None = None, status_code: int = 200):
-    html = await asyncio.to_thread(_with_conn, request, _card_sync, request.app.state.config, drive_id, error)
+    html = await asyncio.to_thread(_with_conn, request, _card_sync, request.app.state.config, drive_id, error,
+                                  _services(request).dvd_wait_pending)
     if html is None:
         return HTMLResponse('<p class="error">Unknown drive.</p>', status_code=404)
     return HTMLResponse(html, status_code=status_code)
@@ -205,10 +208,10 @@ async def _card(request: Request, drive_id: str, *, error: str | None = None, st
 
 # -- pages ---------------------------------------------------------------------
 
-def _dashboard_sync(conn, config) -> dict:
+def _dashboard_sync(conn, config, dvd_wait_pending=None) -> dict:
     now = datetime.now().astimezone()
     cards = [
-        {"key": drive_key(row["id"]), "drive_id": row["id"], "html": render_drive_card(conn, row, now, config=config)}
+        {"key": drive_key(row["id"]), "drive_id": row["id"], "html": render_drive_card(conn, row, now, config=config, dvd_wait_pending=dvd_wait_pending)}
         for row in drives.list_drives(conn)
         if row["present"] and row["enabled"]
     ]
@@ -218,16 +221,17 @@ def _dashboard_sync(conn, config) -> dict:
             "default_minutes": DEFAULT_TEST_MINUTES}
 
 
-def _burst_sync(conn, config) -> dict:
+def _burst_sync(conn, config, dvd_wait_pending=None) -> dict:
     """What a (re)connecting event stream sends: the dashboard's parts plus the Films list."""
     from .films_routes import render_films
 
-    return {**_dashboard_sync(conn, config), "films_html": render_films(conn)}
+    return {**_dashboard_sync(conn, config, dvd_wait_pending), "films_html": render_films(conn)}
 
 
 @router.get("/")
 async def dashboard(request: Request):
-    context = await asyncio.to_thread(_with_conn, request, _dashboard_sync, request.app.state.config)
+    context = await asyncio.to_thread(_with_conn, request, _dashboard_sync, request.app.state.config,
+                                      _services(request).dvd_wait_pending)
     return templates.TemplateResponse(request, "dashboard.html", context)
 
 
@@ -492,7 +496,7 @@ async def event_stream(svc: Services, request) -> AsyncIterator[str]:
         # Subscribe first so nothing published during the burst is missed.
         conn = db.connect(svc.config.db_path)
         try:
-            burst = await asyncio.to_thread(_burst_sync, conn, svc.config)
+            burst = await asyncio.to_thread(_burst_sync, conn, svc.config, svc.dvd_wait_pending)
         finally:
             conn.close()
         yield format_sse("guard", burst["guard_html"])

@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, Request
 
-from .. import auth, settings
+from .. import auth, filmimport, settings
 from .auth_routes import set_session_cookie
 from .deps import get_conn, templates
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 
 def _display(value: Any) -> Any:
@@ -70,6 +72,12 @@ async def settings_save(request: Request, conn: sqlite3.Connection = Depends(get
             submitted[d.key] = d.key in form if d.kind == "bool" else form.get(d.key, "")
         return _render(request, conn, values=submitted, errors=exc.errors, status_code=400)
     settings.save(conn, parsed)
+    services = getattr(request.app.state, "services", None)
+    if services is not None:  # Radarr may be set up now: import the films that were waiting for it
+        try:
+            await filmimport.sweep_ready(services)
+        except Exception:
+            log.exception("film import: looking for rips ready to import failed")
     return _render(request, conn, message="Settings saved.")
 
 

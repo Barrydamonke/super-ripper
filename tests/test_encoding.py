@@ -147,7 +147,7 @@ def test_guard_decision():
     assert encoding.guard_decision(GuardState("draining", end, grace, start), now, 60, False)[0] == "wait"
     assert encoding.guard_decision(GuardState("off_hours", None, None), now, 99 * 3600, False)[0] == "start"
     d, msg = encoding.guard_decision(inw, now, 8 * 3600, False)
-    assert d == "too_long" and "about 8 h" in msg and "use Fast" in msg
+    assert d == "too_long" and "about 8 h" in msg and "Choose a faster preset" in msg and "Fast" not in msg
     assert encoding.guard_decision(inw, now, 4 * 3600, True)[0] == "start"  # 5 h rough, fits exactly
     assert encoding.guard_decision(inw, now, 4 * 3600 + 600, True)[0] == "wait"
     assert encoding.guard_decision(inw, now, 4 * 3600 + 600, False)[0] == "start"
@@ -168,3 +168,29 @@ def test_clear_default_subtitles_argv():
     assert encoding.clear_default_subtitles_argv(Path("a.mkv"), Path("b.tmp")) == [
         "ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(Path("a.mkv")), "-map", "0", "-c", "copy",
         "-disposition:s", "-default", "-f", "matroska", str(Path("b.tmp"))]
+
+
+def _in_window():
+    from datetime import datetime, timezone
+    from disc_ripper.schedule import GuardState
+    utc = timezone.utc
+    inw = GuardState("in_window", datetime(2026, 11, 21, 23, 0, tzinfo=utc), datetime(2026, 11, 22, 1, 0, tzinfo=utc),
+                     datetime(2026, 11, 21, 18, 0, tzinfo=utc))
+    return inw, datetime(2026, 11, 21, 20, 0, tzinfo=utc)
+
+
+def test_rough_too_long_waits_not_fails():
+    inw, now = _in_window()
+    verdict, msg = encoding.guard_decision(inw, now, 20 * 3600, True)  # far beyond one session
+    assert verdict == "wait"
+    assert msg == ("Waiting for the next session: probably needs about 25 h "
+                   "(a rough guess until this preset has history)")
+    from disc_ripper.schedule import GuardState
+    assert encoding.guard_decision(GuardState("off_hours", None, None), now, 99 * 3600, True) == ("start", "")
+
+
+def test_measured_too_long_message_has_no_preset_name():
+    inw, now = _in_window()
+    assert encoding.guard_decision(inw, now, 8 * 3600, False) == (
+        "too_long", "Too long to finish in one session (about 8 h). Choose a faster preset, "
+                    "or run it with the server on outside the schedule")

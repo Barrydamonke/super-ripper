@@ -110,7 +110,8 @@ def new_preset(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
 def edit_preset(preset_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     found = presets.get_preset(conn, preset_id)
     if found is None:
-        raise HTTPException(404, presets.UNKNOWN)
+        raise HTTPException(404, "That preset's stored settings are invalid." if presets.exists(conn, preset_id)
+                            else presets.UNKNOWN)
     return _edit(request, conn, {"id": str(preset_id)}, _values(found.settings, found.name), {}, found.settings)
 
 

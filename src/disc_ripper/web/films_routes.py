@@ -69,7 +69,7 @@ def _active_rows(conn: sqlite3.Connection) -> list[dict]:
         item["preset_label"] = row["preset_name"]
         item["percent"] = int(round((row["progress"] or 0) * 100))
         if row["state"] == "queued":
-            est = encodes.estimate_for(conn, row)
+            est = encodes.try_estimate(conn, row)
             if est is not None:
                 item["estimate"] = encoding._hours_minutes(est.seconds)
                 item["rough"] = est.rough_time
@@ -86,7 +86,7 @@ def _raw_countdown(done: list[sqlite3.Row], keep_hours: float, now: datetime) ->
 
 
 def _file_view(key: str, entry: dict, scan_titles: dict, rows: list[sqlite3.Row],
-               keep_hours: float, now: datetime) -> dict:
+               keep_hours: float, now: datetime, until_jellyfin: str | None = None) -> dict:
     path = Path(entry.get("path", ""))
     deleted = bool(entry.get("raw_deleted_at"))
     size = None
@@ -105,12 +105,17 @@ def _file_view(key: str, entry: dict, scan_titles: dict, rows: list[sqlite3.Row]
     done = [r for r in theirs if r["state"] == "done"]
     good = encodes.good_encodes(theirs, path)  # the same rule the raw sweep and Delete use
     busy = any(r["state"] in ("queued", "running") for r in mine)
+    waiting = not (deleted or busy or not good)  # a raw the sweep may be holding or counting down for
+    lost_subs = waiting and encodes.lost_subtitles(theirs)
     name = f"{path.parent.name}/{path.name}" if path.parent.name == "extras" else path.name
     return {
         "title": int(key), "name": name, "role": entry.get("role", ""),
         "seconds": scan_titles.get(int(key), {}).get("seconds"),
         "size": size, "deleted": deleted, "encodes": mine,
-        "countdown": None if deleted or busy or not good else _raw_countdown(good, keep_hours, now),
+        "lost_subs": lost_subs,
+        "until_jellyfin": waiting and not lost_subs and until_jellyfin is not None,
+        "jellyfin_note": until_jellyfin or "",
+        "countdown": None if not waiting or lost_subs or until_jellyfin is not None else _raw_countdown(good, keep_hours, now),
         "no_intact": bool(done) and not good and not deleted and not busy,
         "can_delete": bool(good) and not deleted and not busy,
     }
@@ -149,6 +154,16 @@ def _radarr_set_up(conn: sqlite3.Connection) -> bool:
 
 
 
+def _failed_title(conn: sqlite3.Connection, rip: sqlite3.Row, imports: dict) -> tuple[int, str] | None:
+    """The failed (title, kind) that alone keeps this film from importing (the owner can import without it)."""
+    if rip["main_title"] is None or rip["import_anyway"] or rip["rip_id"] in imports or not _radarr_set_up(conn):
+        return None
+    title = filmimport.failed_title(conn, rip["rip_id"])
+    if title is None or not filmimport.ready_to_import(conn, rip["rip_id"], ignore_failed=True):
+        return None
+    return title
+
+
 def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, error: str | None = None,
                   notice: str | None = None, oob: bool = False) -> dict:
     now = now or datetime.now(timezone.utc)
@@ -171,7 +186,13 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
                 scan_titles = {}
         rows = encodes.for_rip(conn, rip["rip_id"])
         files = json.loads(rip["files"] or "{}")
-        views = [_file_view(key, files[key], scan_titles, rows, keep_hours, now)
+        hold = film_imports.jellyfin_hold(conn, rip["rip_id"])
+        if hold is not None and not hold and rip["rip_id"] not in imports:
+            failed = _failed_title(conn, rip, imports)
+            if failed:
+                hold = f"Title {failed[0]} failed; Retry or Import anyway"
+        until_jellyfin = None if hold is None else hold
+        views = [_file_view(key, files[key], scan_titles, rows, keep_hours, now, until_jellyfin)
                  for key in sorted(files, key=int)]
         logs = [r[0] for r in conn.execute(
             "SELECT id FROM jobs WHERE kind = 'rip_title' AND json_extract(params, '$.rip_id') = ? ORDER BY id",
@@ -182,6 +203,9 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
             "created_at": rip["created_at"], "files": views, "logs": logs,
             "imp": imports.get(rip["rip_id"]), "starting": rip["rip_id"] in _STARTING,
             "in_library": rip["rip_id"] in in_library,
+            "failed_title": (ft := _failed_title(conn, rip, imports)),
+            "failed_interrupted": ft is not None and ft[1] == "encode" and bool(
+                (mine := [e for e in rows if e["title"] == ft[0]]) and max(mine, key=lambda e: e["id"])["state"] == "interrupted"),
             "can_encode_all": rip["rip_id"] not in in_library and any(not f["deleted"] for f in views),
             # A rip with no choice of its own follows the setting only while it's still ripping.
             "encode_with": choice_names.get(
@@ -521,6 +545,14 @@ async def import_retry(request: Request, rip_id: int = Form(...)):
     if refusal:
         return await _respond(request, error=refusal, status_code=409)
     _start(request, rip_id, lambda s: filmimport.retry_import(s, rip_id))
+    return await _respond(request)
+
+
+@router.post("/films/import-anyway")
+async def import_anyway(request: Request, rip_id: int = Form(...)):
+    services = _services(request)
+    await filmimport.import_anyway(services, rip_id)
+    services.films_changed()
     return await _respond(request)
 
 

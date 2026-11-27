@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from pathlib import Path
 
@@ -49,9 +50,9 @@ def _tables(conn):
 def test_migrate_fresh_db(config):
     conn = db.connect(config.db_path)
     try:
-        assert db.migrate(conn) == 9
+        assert db.migrate(conn) == 11
         assert {"settings", "drives"} <= _tables(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     finally:
         conn.close()
 
@@ -62,7 +63,7 @@ def test_migrate_is_idempotent(config):
         db.migrate(conn)
         conn.execute("INSERT INTO settings (key, value) VALUES ('k', '1')")
         conn.commit()
-        assert db.migrate(conn) == 9
+        assert db.migrate(conn) == 11
         assert conn.execute("SELECT value FROM settings WHERE key='k'").fetchone()[0] == "1"
     finally:
         conn.close()
@@ -91,7 +92,7 @@ def test_migration_0002_from_step1_db(config):
         )
         conn.commit()
 
-        assert db.migrate(conn) == 9
+        assert db.migrate(conn) == 11
         row = conn.execute("SELECT * FROM drives").fetchone()
         assert row["media_state"] == "unknown"
         assert row["disc_type"] is None
@@ -128,7 +129,7 @@ def test_migration_0003_prefills_offsets(config):
                 (f"d{i}", model),
             )
         conn.commit()
-        assert db.migrate(conn) == 9
+        assert db.migrate(conn) == 11
         offsets = [r[0] for r in conn.execute("SELECT read_offset FROM drives ORDER BY id")]
         assert offsets == [667, 6, 0, 0]
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -171,5 +172,72 @@ def test_migration_0005(config):
             conn.execute(
                 "INSERT INTO encodes (rip_id, title, role, source, disc_type, source_seconds, source_bytes, "
                 "preset_id, state, created_at) VALUES (1, 1, 'main', 'x', 'bluray', 1, 1, 1, 'bogus', 't')")
+    finally:
+        conn.close()
+
+
+def _old_db(config, version=1):
+    from importlib import resources
+
+    conn = db.connect(config.db_path)
+    sql = (resources.files("disc_ripper") / "migrations" / "0001_initial.sql").read_text(encoding="utf-8")
+    conn.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = {version};\nCOMMIT;")
+    return conn
+
+
+def test_migrate_backs_up_before_upgrading(config):
+    conn = _old_db(config)
+    try:
+        db.migrate(conn)
+    finally:
+        conn.close()
+    backup = config.config_dir / "backups" / "disc-ripper-v1.db"
+    assert backup.exists()
+    old = sqlite3.connect(backup)
+    try:
+        assert old.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        old.close()
+
+
+def test_migrate_keeps_five_backups(config):
+    folder = config.config_dir / "backups"
+    folder.mkdir(parents=True)
+    for v in range(1, 8):
+        stamp = folder / f"disc-ripper-v{v}.db"
+        stamp.write_bytes(b"x")
+        os.utime(stamp, (1_000_000 + v, 1_000_000 + v))
+    conn = _old_db(config)
+    try:
+        db.migrate(conn)
+    finally:
+        conn.close()
+    names = sorted(p.name for p in folder.iterdir())
+    assert len(names) == 5
+    assert "disc-ripper-v1.db" in names  # the one just made is the newest
+    assert "disc-ripper-v7.db" in names and "disc-ripper-v2.db" not in names
+
+
+def test_migrate_no_backup_when_up_to_date(config):
+    conn = db.connect(config.db_path)
+    try:
+        db.migrate(conn)
+        db.migrate(conn)
+    finally:
+        conn.close()
+    assert not (config.config_dir / "backups").exists()
+
+
+def test_failing_backup_blocks_migration(config, monkeypatch):
+    conn = _old_db(config)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(db, "_backup_before_upgrade", boom)
+    try:
+        with pytest.raises(OSError):
+            db.migrate(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
     finally:
         conn.close()

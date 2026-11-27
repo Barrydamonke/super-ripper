@@ -154,3 +154,11 @@ def test_huge_ids_do_not_500(client):
 def test_delete_button_confirms_with_the_name(client):
     html = client.get("/presets").text
     assert "onsubmit='return confirm(&#34;Delete preset Standard?&#34;)'" in html or         "onsubmit='return confirm(\"Delete preset Standard?\")'" in html
+
+
+def test_invalid_preset_page_is_a_404_not_a_500(client, conn):
+    with conn:
+        conn.execute("UPDATE presets SET settings = ? WHERE id = 2", ('{"engine": "nope"}',))
+    r = client.get("/presets/2")
+    assert r.status_code == 404 and "stored settings are invalid" in r.text
+    assert client.get("/presets/999").status_code == 404

@@ -468,3 +468,45 @@ def test_job_log_has_start_and_outcome(config, conn):
     assert '"title": 3' in text
     assert "progress 50%" in text
     assert text.rstrip().endswith("finished: failed — boom")
+
+
+def _real_space(config, downloads_free_gb, work_free_gb=1000, used_gb=0):
+    from types import SimpleNamespace
+
+    from disc_ripper import space
+
+    def statvfs(path):
+        free = downloads_free_gb if str(path) == str(config.downloads_dir) else work_free_gb
+        return SimpleNamespace(f_bavail=int(free * space.GB / 4096), f_frsize=4096)
+
+    return space.SpaceChecker(config.work_dir, statvfs=statvfs, size_fn=lambda p: int(used_gb * space.GB))
+
+
+def test_rip_space_checked_on_downloads_not_work_budget(config, conn):
+    from disc_ripper.space import GB
+
+    # A 70 GB rip with the default 60 GB work budget (and /work nearly full) starts when downloads has room.
+    j = jobs.enqueue(conn, "serial:A", "rip_title", {"rip_id": 1, "title": 0}, needs_bytes=70 * GB,
+                     uses_drive=True, now="t")
+    r = make_runner(config, space=_real_space(config, downloads_free_gb=500, work_free_gb=1, used_gb=59))
+    assert r._space_check(conn, 70 * GB, "rip_title") is None
+    # The same size as any other kind of job still hits the budget.
+    assert "work area budget" in r._space_check(conn, 70 * GB, "test")
+    assert j  # (the job row only documents the scenario)
+
+
+def test_rip_waits_for_downloads_space(config, conn):
+    from disc_ripper.space import GB
+
+    r = make_runner(config, space=_real_space(config, downloads_free_gb=75))
+    msg = r._space_check(conn, 70 * GB, "rip_title")  # default floor: 20 GB spare
+    assert msg == "Waiting for space on the downloads disk: needs 70.0 GB, 75.0 GB free (keeping 20 GB spare)."
+    # A running rip's not-yet-written bytes count against the free space.
+    other = jobs.enqueue(conn, "serial:B", "rip_title", {"rip_id": 2, "title": 0}, needs_bytes=10 * GB, now="t")
+    jobs.start(conn, other, "t")
+    r2 = make_runner(config, space=_real_space(config, downloads_free_gb=105))
+    assert r2._space_check(conn, 70 * GB, "rip_title") is None
+    jobs.finish(conn, other, "done", "t")
+    running = jobs.enqueue(conn, "serial:B", "rip_title", {"rip_id": 3, "title": 0}, needs_bytes=20 * GB, now="t")
+    jobs.start(conn, running, "t")
+    assert "Waiting for space on the downloads disk" in r2._space_check(conn, 70 * GB, "rip_title")

@@ -11,7 +11,7 @@
   <Overview>Rips, encodes and burns discs from its own web UI. Optical drives are found by serial number at start-up; no --privileged needed.</Overview>
   <Category>MediaApp:Video</Category>
   <WebUI>http://[IP]:[PORT:8580]/</WebUI>
-  <ExtraParams>--device-cgroup-rule='b 11:* rmw' --device-cgroup-rule='c 21:* rmw' --stop-timeout=60 --device=/dev/dri</ExtraParams>
+  <ExtraParams>--device-cgroup-rule='b 11:* rmw' --device-cgroup-rule='c 21:* rmw' --stop-timeout=60 --device=/dev/dri --restart=unless-stopped</ExtraParams>
   <Config Name="Web UI port" Target="8580" Default="8580" Mode="tcp" Description="Web UI" Type="Port" Display="always" Required="true">8580</Config>
   <Config Name="Config" Target="/config" Default="/mnt/cache/appdata/disc-ripper" Mode="rw" Description="Settings and the SQLite database (cache only)" Type="Path" Display="always" Required="true">/mnt/cache/appdata/disc-ripper</Config>
   <Config Name="Data" Target="/data" Default="/mnt/user/Barry-server" Mode="rw" Description="The Barry-server share, mounted as /data like in Radarr, Sonarr and Jellyfin" Type="Path" Display="always" Required="true">/mnt/user/Barry-server</Config>

@@ -68,3 +68,15 @@ def test_min_free_counts_running_reservations(tmp_path):
     c, _ = checker(tmp_path, free_gb=60)
     assert c.check(10 * GB, 40 * GB, 1000, 20) is not None
     assert c.check(10 * GB, 0, 1000, 20) is None
+
+
+def test_check_on_another_path_skips_the_budget(tmp_path):
+    other = tmp_path / "downloads"
+    other.mkdir()
+    c, calls = checker(tmp_path, free_gb=100, used_gb=59)
+    assert c.check(70 * GB, 0, 60, 20) is not None  # over the budget
+    assert c.check(70 * GB, 0, 60, 20, path=other, use_budget=False) is None
+    assert calls["size"] == 1  # the second check never walked the work area
+    msg = c.check(85 * GB, 0, 60, 20, path=other, use_budget=False)
+    assert msg == "Waiting for space on the downloads disk: needs 85.0 GB, 100.0 GB free (keeping 20 GB spare)."
+    assert c.check(GB, 0, 60, 20, path=tmp_path / "gone", use_budget=False).startswith("Downloads folder")

@@ -86,3 +86,24 @@ def test_stalled_rip_is_retried_while_its_disc_is_in(config, setup):
     end(config, j)
     extra, retry = newer_jobs(setup, j)  # the extra queued with it doesn't count as the owner acting
     assert retry["kind"] == "rip_title" and json.loads(retry["params"])["auto_retry"] == 1
+
+
+def test_pending_retry_is_recorded_before_the_card_is_rendered(config, setup):
+    params = {"rip_id": 7, "title": 0, "fingerprint": "fp", "sr_name": "sr0"}
+    j = failed_job(setup, kind="rip_title", params=params)
+    services = Services(config)
+    services.auto_retry_wait = 0.2
+    seen = []
+
+    async def drive_changed(drive_id):
+        seen.append(services.retry_pending(7))
+
+    services.drive_changed = drive_changed
+
+    async def main():
+        await services.job_ended(j)
+        while services._auto_retries:
+            await asyncio.sleep(0.02)
+
+    asyncio.run(main())
+    assert seen and seen[0] is True

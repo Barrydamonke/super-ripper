@@ -141,7 +141,6 @@ def test_errors_are_readable():
     for exc, expect in [
         (radarr.HttpStatusError(401, b""), "Radarr refused the API key"),
         (ConnectionRefusedError("boom"), f"Radarr didn't answer at {URL}"),
-        (TimeoutError(), f"Radarr didn't answer at {URL}"),
         (urllib.error.URLError("nope"), f"Radarr didn't answer at {URL}"),
         (radarr.HttpStatusError(400, b'{"message": "Path is bad"}'), "Radarr: 400 Path is bad"),
         (radarr.HttpStatusError(400, b'[{"errorMessage": "Bad A"}, {"errorMessage": "Bad B"}]'), "Radarr: 400 Bad A; Bad B"),
@@ -213,3 +212,24 @@ def test_on_call_hook_reports_outcomes_without_key():
         c.quality_profiles()
     assert seen == [("GET", "/api/v3/rootfolder", "ok"), ("GET", "/api/v3/qualityprofile", "Radarr: 500")]
     assert KEY not in repr(seen)
+
+
+def test_manual_import_view_uses_long_timeout():
+    c, fake = client({("GET", "/api/v3/manualimport"): [], ("GET", "/api/v3/movie/lookup"): [],
+                      ("GET", "/api/v3/rootfolder"): []})
+    c.manual_import_view("/x")
+    c.lookup("a")
+    c.lookup_tmdb(1)
+    c.root_folders()
+    assert [call[4] for call in fake.calls] == [180.0, 60.0, 60.0, 15.0]
+
+
+def test_timeout_message():
+    for exc in (TimeoutError(), urllib.error.URLError(TimeoutError())):
+        c, _ = client({("GET", "/api/v3/rootfolder"): exc})
+        with pytest.raises(RadarrError) as err:
+            c.root_folders()
+        assert str(err.value) == "Radarr took too long to answer /api/v3/rootfolder. It may be busy; press Retry."
+    c, _ = client({("GET", "/api/v3/rootfolder"): ConnectionRefusedError()})
+    with pytest.raises(RadarrError, match="didn't answer"):
+        c.root_folders()

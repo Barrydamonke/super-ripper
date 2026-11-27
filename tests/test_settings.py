@@ -24,6 +24,7 @@ VALID_FORM = {
     "cd_approval": "odd_ones",
     "cd_cover_art": "on",
     "encode_slots": "1",
+    "raw_keep_until": "hours",
     "raw_keep_hours": "24",
     "encode_stall_minutes": "10",
     "radarr_url": "",
@@ -171,3 +172,18 @@ def test_encoding_settings_defaults(conn):
     assert (by_key["encode_slots"].minimum, by_key["encode_slots"].maximum) == (1, 2)
     assert (by_key["raw_keep_hours"].minimum, by_key["raw_keep_hours"].maximum) == (0, 720)
     assert (by_key["encode_stall_minutes"].minimum, by_key["encode_stall_minutes"].maximum) == (1, 240)
+
+
+def test_settings_raw_keep_until_choice(conn):
+    by_key = {s.key: s for s in settings.SETTINGS}
+    d = by_key["raw_keep_until"]
+    assert (d.kind, d.group, d.label, d.default) == ("choice", "Encoding", "Keep raw rips", "hours")
+    assert [c[0] for c in d.choices] == ["hours", "jellyfin"]
+    keys = [s.key for s in settings.SETTINGS]
+    assert keys.index("raw_keep_until") + 1 == keys.index("raw_keep_hours")
+    assert settings.get(conn, "raw_keep_until") == "hours"
+    settings.save(conn, settings.parse_form({**VALID_FORM, "raw_keep_until": "jellyfin"}))
+    assert settings.get(conn, "raw_keep_until") == "jellyfin"
+    with pytest.raises(settings.SettingsError):
+        settings.parse_form({**VALID_FORM, "raw_keep_until": "never"})
+    assert by_key["raw_keep_hours"].help.startswith("Used when Keep raw rips is set to hours.")

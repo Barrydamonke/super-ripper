@@ -162,6 +162,11 @@ async def test_too_long_fails_immediately(config, conn, monkeypatch):
     now = datetime(2026, 11, 18, 22, 0, tzinfo=timezone.utc)
     patch_guard(monkeypatch, GuardState("in_window", now + timedelta(hours=1), now + timedelta(hours=2),
                                         window_start=now - timedelta(hours=1)))
+    seed_row = add(conn, 9)  # history: measured speed 1.0 for this preset, so estimates are not rough
+    fp = presets.fingerprint(presets.PresetSettings.from_dict(presets.SEEDS[1][1]))
+    with conn:
+        conn.execute("UPDATE encodes SET state = 'done', speed = 1.0, preset_fingerprint = ?, finished_at = 't' "
+                     "WHERE id = ?", (fp, seed_row))
     first = add(conn, 1, source_seconds=20 * 3600.0)
     second = add(conn, 2, source_seconds=60.0)
     monkeypatch.setattr(encodepool, "run_encode", noop)
@@ -371,3 +376,24 @@ def test_reserved_bytes(conn):
     encodes.start(conn, a, "t")
     encodes.start(conn, b, "t")
     assert encodes.reserved_bytes(conn) == 3_500_000_000 + 10_000_000_000
+
+
+def _break_preset(conn, preset_id):
+    with conn:
+        conn.execute("UPDATE presets SET settings = ? WHERE id = ?", ('{"engine": "nope"}', preset_id))
+
+
+@sync
+async def test_invalid_preset_fails_that_encode_and_queue_moves_on(config, conn, monkeypatch):
+    monkeypatch.setattr(encodepool, "run_encode", noop)
+    bad = add(conn, 1, preset=2)
+    good = add(conn, 2, preset=1)
+    _break_preset(conn, 2)
+    pool = pool_for(config)
+    pool.start()
+    await wait_until(lambda: state(conn, bad) == "failed")
+    error = encodes.get(conn, bad)["error"]
+    assert error.startswith("Its preset settings are no longer valid: ") and error.endswith(
+        ". Edit the preset, then Retry.")
+    await wait_until(lambda: state(conn, good) == "done")
+    await pool.stop()

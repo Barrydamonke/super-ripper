@@ -71,7 +71,7 @@
 {% if last and last.state == "failed" and not jobs.running %}
   <div class="error job-failed">
     <strong>Job #{{ last.id }} failed:</strong> {{ last.error or "no reason was recorded" }}
-    <button hx-post="/jobs/{{ last.id }}/retry" hx-target="#drive-{{ key }}">Retry</button>
+    <button hx-post="/jobs/{{ last.id }}/retry" hx-target="#drive-{{ key }}" hx-disabled-elt="this">Retry</button>
     <a href="/jobs/{{ last.id }}/log" target="_blank">View log</a>
   </div>
 {% endif %}
@@ -89,7 +89,7 @@
     {%- if note %} → {{ note }}{% endif %}
     <a href="/jobs/{{ job.id }}/log" target="_blank">log</a>
     {%- if job.state in ("interrupted", "failed", "cancelled") %}
-      <button hx-post="/jobs/{{ job.id }}/retry" hx-target="#drive-{{ key }}">Retry</button>
+      <button hx-post="/jobs/{{ job.id }}/retry" hx-target="#drive-{{ key }}" hx-disabled-elt="this">Retry</button>
     {%- endif %}{% if not loop.last %} ·{% endif %}
   {% endfor %}
   </div>

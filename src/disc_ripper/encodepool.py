@@ -43,13 +43,13 @@ def _read_settings(conn):
     return settings.get(conn, "encode_stall_minutes"), settings.get(conn, "cache_min_free_gb")
 
 
-def _other_reserved(conn, work_dir: Path, encode_id: int) -> int:
+def _other_reserved(conn, work_dir: Path, encode_id: int, downloads_dir: Path | None = None) -> int:
     """What other running rips and encodes were admitted for but haven't written yet."""
-    total = videorip.outstanding_bytes(conn, work_dir, None)
+    total = videorip.outstanding_bytes(conn, work_dir, None, downloads_dir)
     for other in encodes.running(conn):
         if other["id"] != encode_id:
             written = space_mod.tree_size(work_dir / f"encode-{other['id']}")
-            est = encodes.estimate_for(conn, other)
+            est = encodes.try_estimate(conn, other)
             total += max((est.bytes if est else 0) - written, 0)
     return total
 
@@ -249,7 +249,7 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
 
     await ctx.report(0.99, "Moving to downloads…")
     stop = threading.Event()
-    reserved = await ctx.db(_other_reserved, ctx.config.work_dir, ctx.job_id)
+    reserved = await ctx.db(_other_reserved, ctx.config.work_dir, ctx.job_id, ctx.config.downloads_dir)
     copying = asyncio.ensure_future(asyncio.to_thread(
         _move, ctx.config, row["rip_id"], row["role"], out, min_free, stop, reserved))
     try:
@@ -344,6 +344,7 @@ class EncodePool:
         if result == "cancelled":
             await self.notify()
             self.wake()
+            await self._tell_done(encode_id)
             return True
         if result != "running":
             return False
@@ -409,7 +410,14 @@ class EncodePool:
         row = encodes.next_queued(conn)
         if row is None:
             return None, "idle", ""
-        verdict, message = self._decide(conn, row)
+        try:
+            verdict, message = self._decide(conn, row)
+        except ValueError as exc:  # a preset row that no longer validates must not hold up the queue
+            text = getattr(exc, "message", None) or str(exc) or type(exc).__name__
+            message = (f"Its preset settings are no longer valid: {text.rstrip('.')}. "
+                       "Edit the preset, then Retry.")
+            log.warning("encodes: #%s: %s", row["id"], message)
+            verdict = "too_long"  # the same ending: failed at once, the queue moves on
         if verdict == "start":
             if not encodes.start(conn, row["id"], utc_now()):
                 return None, "retry", ""  # cancelled while we were checking
@@ -434,6 +442,7 @@ class EncodePool:
         elif outcome == "too_long":
             joblog.JobLog(self._log_path(row["id"])).write(f"finished: failed — {message}")
             await self.notify()
+            await self._tell_done(row["id"])
         elif outcome in ("wait", "wait_changed"):
             if outcome == "wait_changed":
                 await self.notify()
@@ -491,7 +500,7 @@ class EncodePool:
         log.info("encodes: #%s %s%s", encode_id, state, f": {error}" if error else "")
         joblog.JobLog(self._log_path(encode_id)).write(f"finished: {state}" + (f" — {error}" if error else ""))
         await self.notify()
-        if state == "done":
+        if state in ("done", "failed", "cancelled"):  # any of them may be the disc's last encode
             await self._tell_done(encode_id)
 
     async def _tell_done(self, encode_id: int) -> None:

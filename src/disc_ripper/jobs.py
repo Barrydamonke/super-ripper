@@ -128,12 +128,38 @@ def cancel_queued(
     return "cancelled" if cur.rowcount == 1 else "running"
 
 
+def _retry_superseded(conn: sqlite3.Connection, row: sqlite3.Row, params: dict) -> bool:
+    """A second Retry (a double-click) or a stale one: the same work is already queued or running
+    on the drive, or a newer attempt at this rip title exists."""
+    if row["kind"] == "rip_title":
+        clause = "json_extract(params, '$.rip_id') IS ? AND json_extract(params, '$.title') IS ?"
+        args = (params.get("rip_id"), params.get("title"))
+    elif row["kind"] == "scan_video":
+        clause = "json_extract(params, '$.label') IS ?"
+        args = (params.get("label"),)
+    else:
+        return False
+    active = conn.execute(
+        "SELECT 1 FROM jobs WHERE drive_id = ? AND kind = ? AND state IN ('queued', 'running', 'waiting_space') "
+        f"AND {clause} LIMIT 1", (row["drive_id"], row["kind"], *args)).fetchone()  # noqa: S608
+    if active is not None:
+        return True
+    if row["kind"] == "rip_title":
+        return conn.execute(
+            f"SELECT 1 FROM jobs WHERE kind = 'rip_title' AND id > ? AND {clause} LIMIT 1",  # noqa: S608
+            (row["id"], *args)).fetchone() is not None
+    return False
+
+
 def retry(conn: sqlite3.Connection, job_id: int, now: str) -> int | None:
     row = get(conn, job_id)
     if row is None or row["state"] not in ("interrupted", "failed", "cancelled"):
         return None
+    params = json.loads(row["params"])
+    if _retry_superseded(conn, row, params):
+        return None
     return enqueue(
-        conn, row["drive_id"], row["kind"], json.loads(row["params"]),
+        conn, row["drive_id"], row["kind"], params,
         needs_bytes=row["needs_bytes"], uses_drive=bool(row["uses_drive"]), now=now,
     )
 
@@ -158,7 +184,9 @@ def running_jobs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def running_bytes(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT COALESCE(SUM(needs_bytes), 0) FROM jobs WHERE state = 'running'").fetchone()[0]
+    """Bytes running jobs count against the work-area budget: not DVD/Blu-ray rips, which write to downloads."""
+    return conn.execute("SELECT COALESCE(SUM(needs_bytes), 0) FROM jobs WHERE state = 'running' "
+                        "AND kind != 'rip_title'").fetchone()[0]
 
 
 def drive_jobs(conn: sqlite3.Connection, drive_id: str, recent: int = 5) -> DriveJobs:

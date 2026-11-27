@@ -207,3 +207,18 @@ def test_reserved_bytes_uses_the_running_encodes_snapshot(conn):
     s = presets.PresetSettings.from_dict(presets.SEEDS[3][1])  # copy: the whole source
     encodes.snapshot(conn, a, "Copy only", json.dumps(s.to_dict()), presets.fingerprint(s))
     assert encodes.reserved_bytes(conn) == 30_000_000_000
+
+
+def test_interrupted_twice_stays_interrupted(conn):
+    a = _create(conn)
+    for t in ("t1", "t2"):
+        assert encodes.start(conn, a, t)
+        encodes.mark_interrupted(conn, t + "x")
+        encodes.requeue_interrupted(conn, t + "y")
+    row = encodes.get(conn, a)
+    assert row["attempts"] == 2
+    assert row["state"] == "interrupted" and row["message"] == "Interrupted twice; press Retry to try again"
+    assert encodes.requeue_interrupted(conn, "t9") == 0  # and it stays that way
+    assert encodes.get(conn, a)["state"] == "interrupted"
+    new = encodes.retry(conn, a, "t10")
+    assert new is not None and encodes.get(conn, new)["attempts"] == 0 and encodes.get(conn, new)["state"] == "queued"

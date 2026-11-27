@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from . import settings
+
 _COLUMNS = {
     "state", "step", "candidates", "tmdb_id", "movie_id", "title", "year", "root_folder", "encode_id", "replace",
     "old_path", "old_folder", "recycled_path", "new_path", "extras", "message", "error", "imported_at",
@@ -74,6 +76,34 @@ def waiting_for(conn: sqlite3.Connection, tmdb_id: int) -> list[sqlite3.Row]:
 def active_rip_ids(conn: sqlite3.Connection) -> set[int]:
     return {r[0] for r in conn.execute(
         "SELECT rip_id FROM film_imports WHERE state IN ('importing', 'imported')")}
+
+
+_JELLYFIN_NOTES = {"needs_identify": "waiting for you to identify it", "needs_replace_ok": "waiting for your OK to replace",
+                   "failed": "import failed; Retry", "imported": "waiting for Jellyfin to show it"}
+UNDONE_STEP = "undone"  # filmundo leaves this in `step` when it puts a film back to needs_identify
+
+
+def jellyfin_hold(conn: sqlite3.Connection, rip_id: int) -> str | None:
+    """None when this rip's raws follow the keep-hours setting. Otherwise raws are kept until the film
+    is in Jellyfin, and this is what the film is waiting for ("" when there is nothing to add).
+
+    That is the case in "until in Jellyfin" mode for a film (main title, Radarr set up) still headed for the
+    library, including one waiting for the owner. Undone, skipped and TV rips use the hours."""
+    if settings.get(conn, "raw_keep_until") != "jellyfin":
+        return None
+    if not (settings.get(conn, "radarr_url") and settings.get(conn, "radarr_api_key")):
+        return None
+    rip = conn.execute("SELECT main_title FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+    if rip is None or rip["main_title"] is None:
+        return None
+    row = get(conn, rip_id)
+    if row is None:
+        return ""
+    if row["state"] in ("skipped", "tv_skipped", "undone"):
+        return None
+    if row["state"] == "needs_identify" and row["step"] == UNDONE_STEP:
+        return None
+    return _JELLYFIN_NOTES.get(row["state"], "")
 
 
 def fail_interrupted(conn: sqlite3.Connection, now: str) -> int:

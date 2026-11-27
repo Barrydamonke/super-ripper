@@ -223,3 +223,42 @@ def test_extra_added_to_move_failed_rip_keeps_move_failed(config, setup, monkeyp
     assert asyncio.run(services.move_again(rip)) is None
     row = rip_state(setup, rip)
     assert row["state"] == "ripped" and set(json.loads(row["files"])) == {"0", "1"}
+
+
+def _imported_and_cleaned(setup, config, rip, import_state, title="Some Film"):
+    """The rip's film was imported and its downloads folder cleaned up."""
+    with setup:
+        setup.execute("UPDATE jobs SET state = 'done'")
+    video_rips.set_state(setup, rip, "ripped", "", "t")
+    setup.execute("INSERT INTO film_imports (rip_id, state, title, created_at, updated_at) VALUES (?, ?, ?, 't', 't')",
+                  (rip, import_state, title))
+    setup.commit()
+    shutil.rmtree(config.downloads_dir / str(rip), ignore_errors=True)
+
+
+def test_reinsert_after_import_is_held_in_library(config, setup):
+    services, fp = scanned_disc(config, setup)
+    rip = start(services, fp)
+    _imported_and_cleaned(setup, config, rip, "in_jellyfin")
+    assert video_rips.blocking_rip(setup, fp, config.downloads_dir, config.work_dir) == {
+        "rip_id": rip, "state": "in_library", "title": "Some Film"}
+    j = scan_job(setup, from_insert=True)  # the disc goes back in
+    run(config, services, finished(setup, j))
+    held = json.loads(video_rips.disc_in_drive(setup, "serial:A")["held"])
+    assert "already in the library (Some Film)" in held
+    assert len(rip_jobs(setup)) == 1  # nothing new started
+    assert start(services, fp, again=False) is None
+    assert start(services, fp, again=True) is not None  # Rip again
+
+
+def test_reinsert_after_skip_counts_as_already_ripped(config, setup):
+    services, fp = scanned_disc(config, setup)
+    rip = start(services, fp)
+    _imported_and_cleaned(setup, config, rip, "skipped")
+    assert video_rips.blocking_rip(setup, fp, config.downloads_dir, config.work_dir) == {
+        "rip_id": rip, "state": "ripped", "skipped": True}
+    j = scan_job(setup, from_insert=True)
+    run(config, services, finished(setup, j))
+    assert "already ripped (skipped in Radarr)" in json.loads(video_rips.disc_in_drive(setup, "serial:A")["held"])
+    assert start(services, fp, again=False) is None
+    assert start(services, fp, again=True) is not None

@@ -41,6 +41,7 @@ jobs:
           context: .
           load: true
           tags: disc-ripper:ci
+          build-args: GIT_SHA=${{ github.sha }}
 
       - name: Smoke test
         run: |
@@ -97,3 +98,4 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: GIT_SHA=${{ github.sha }}

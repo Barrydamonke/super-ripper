@@ -133,7 +133,7 @@ async def _undo(flow: Flow, row) -> str:
         flow.conn.execute("UPDATE encodes SET imported_path = NULL, imported_at = NULL WHERE rip_id = ?",
                           (flow.rip_id,))
     flow.set(state="undone", message=message)
-    flow.set(state="needs_identify", step="", message=message, error=None, movie_id=None, encode_id=None,
+    flow.set(state="needs_identify", step=film_imports.UNDONE_STEP, message=message, error=None, movie_id=None, encode_id=None,
              new_path=None, old_path=None, old_folder=None, recycled_path=None, extras=[], replace={},
              imported_at=None, added_by_us=0)
     return message

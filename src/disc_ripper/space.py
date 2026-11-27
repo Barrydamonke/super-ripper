@@ -51,21 +51,30 @@ class SpaceChecker:
             self._cached = (now, self._size_fn(self.work_dir))
         return self._cached[1]
 
-    def check(self, needs_bytes: int, running_bytes: int, budget_gb: float, min_free_gb: float) -> str | None:
-        """None if the job fits; otherwise the reason it has to wait."""
+    def check(self, needs_bytes: int, running_bytes: int, budget_gb: float, min_free_gb: float,
+              path: Path | None = None, use_budget: bool = True) -> str | None:
+        """None if the job fits; otherwise the reason it has to wait.
+
+        path is where the job writes (default: the work area); use_budget=False leaves the
+        work-area budget out, for jobs that write elsewhere (DVD and Blu-ray rips, into downloads)."""
         if needs_bytes <= 0:
             return None
-        if not self.work_dir.is_dir():
-            return f"Work area {self.work_dir} not found."
+        target = path if path is not None else self.work_dir
+        if not target.is_dir():
+            return f"Work area {target} not found." if path is None else f"Downloads folder {target} not found."
         needs = f"needs {needs_bytes / GB:.1f} GB"
-        left = budget_gb * GB - self._used() - running_bytes
-        if needs_bytes > left:
-            return f"Waiting for cache space: {needs}, work area budget has {max(left, 0) / GB:.1f} GB left."
+        if use_budget:
+            left = budget_gb * GB - self._used() - running_bytes
+            if needs_bytes > left:
+                return f"Waiting for cache space: {needs}, work area budget has {max(left, 0) / GB:.1f} GB left."
         if self._statvfs is None:
             return "Waiting for cache space: free space can't be read on this platform."
-        st = self._statvfs(self.work_dir)
+        st = self._statvfs(target)
         # Running jobs may not have written their data yet; count it as already used.
         free = st.f_bavail * st.f_frsize - running_bytes
         if free - needs_bytes < min_free_gb * GB:
+            if path is not None:
+                return (f"Waiting for space on the downloads disk: {needs}, {max(free, 0) / GB:.1f} GB free "
+                        f"(keeping {min_free_gb:g} GB spare).")
             return f"Waiting for cache space: {needs}, cache would drop below the {min_free_gb:g} GB minimum free."
         return None
