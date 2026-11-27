@@ -22,12 +22,21 @@ log = logging.getLogger(__name__)
 def write_settings_conf(home: Path, key: str, selection: str) -> None:
     path = home / ".MakeMKV" / "settings.conf"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(makemkv.settings_conf(key, selection.strip() or settings.DEFAULT_VIDEO_SELECTION),
-                    encoding="utf-8")
+    _write_atomic(path, makemkv.settings_conf(key, selection.strip() or settings.DEFAULT_VIDEO_SELECTION))
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write via a temp file in the same folder and rename over, so a reader sees all or nothing."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        tmp.write_text(text, encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def scan_env(config) -> dict:

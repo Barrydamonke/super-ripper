@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -280,3 +281,32 @@ def test_scan_stall_fails_with_a_clear_message(config, setup, monkeypatch):
     assert rip_jobs(setup) == []
     log_text = (config.config_dir / "logs" / f"job-{j}.log").read_text(encoding="utf-8")
     assert "makemkvcon" in log_text and "no output for" in log_text
+
+
+def test_settings_conf_is_written_via_temp_file_and_replaced(tmp_path, monkeypatch):
+    path = tmp_path / ".MakeMKV" / "settings.conf"
+    videorip.write_settings_conf(tmp_path, "OLD", "")
+    seen = []
+    real_replace = os.replace
+
+    def replace(src, dst):
+        seen.append((Path(src).name, Path(src).read_text(), Path(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(videorip.os, "replace", replace)
+    videorip.write_settings_conf(tmp_path, "NEW", "")
+    assert len(seen) == 1
+    name, content, dst = seen[0]
+    assert dst == path and name != path.name and "NEW" in content  # complete before it was swapped in
+    assert path.read_text() == content and "OLD" not in content
+    assert [p.name for p in path.parent.iterdir()] == ["settings.conf"]  # temp file gone
+
+
+def test_settings_conf_failed_write_keeps_old_file(tmp_path, monkeypatch):
+    videorip.write_settings_conf(tmp_path, "OLD", "")
+    path = tmp_path / ".MakeMKV" / "settings.conf"
+    monkeypatch.setattr(videorip.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError):
+        videorip.write_settings_conf(tmp_path, "NEW", "")
+    assert "OLD" in path.read_text()
+    assert [p.name for p in path.parent.iterdir()] == ["settings.conf"]

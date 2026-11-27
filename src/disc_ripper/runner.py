@@ -31,8 +31,14 @@ log = logging.getLogger(__name__)
 PROGRESS_INTERVAL = 1.0
 CANCEL_WAIT_SECONDS = 3.0
 KILL_GRACE_SECONDS = 5.0
+KILL_WAIT_SECONDS = 30.0  # longest to wait for a SIGKILLed child to be gone
+UNKILLABLE_MESSAGE = "MakeMKV could not be stopped; eject the disc or restart the container."
 # Child processes started by jobs, so tests (and shutdown checks) can see none are left.
 LIVE_PROCESSES: set[asyncio.subprocess.Process] = set()
+
+
+class ProcessUnkillable(Exception):
+    """The child ignored SIGKILL (stuck in uninterruptible sleep, e.g. a wedged drive)."""
 
 
 class ProcessStalled(Exception):
@@ -156,7 +162,11 @@ async def _terminate(proc: asyncio.subprocess.Process, posix: bool) -> None:
         await asyncio.wait_for(proc.wait(), KILL_GRACE_SECONDS)
     except TimeoutError:
         send(getattr(signal, "SIGKILL", signal.SIGTERM))
-        await proc.wait()
+        try:
+            await asyncio.wait_for(proc.wait(), KILL_WAIT_SECONDS)
+        except TimeoutError:
+            log.error("jobs: pid %s would not die after SIGKILL; leaving it", proc.pid)
+            raise ProcessUnkillable(UNKILLABLE_MESSAGE) from None
 
 
 Handler = Callable[[JobContext], Awaitable[None]]

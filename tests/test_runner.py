@@ -510,3 +510,27 @@ def test_rip_waits_for_downloads_space(config, conn):
     running = jobs.enqueue(conn, "serial:B", "rip_title", {"rip_id": 3, "title": 0}, needs_bytes=20 * GB, now="t")
     jobs.start(conn, running, "t")
     assert "Waiting for space on the downloads disk" in r2._space_check(conn, 70 * GB, "rip_title")
+
+
+def test_terminate_gives_up_when_child_will_not_die(monkeypatch):
+    monkeypatch.setattr(runner, "KILL_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(runner, "KILL_WAIT_SECONDS", 0.05)
+
+    class Stuck:
+        returncode = None
+        pid = 4242
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        async def wait(self):
+            await asyncio.Event().wait()  # never returns
+
+    async def go():
+        await asyncio.wait_for(runner._terminate(Stuck(), False), 5)
+
+    with pytest.raises(runner.ProcessUnkillable, match="could not be stopped; eject the disc or restart"):
+        asyncio.run(go())

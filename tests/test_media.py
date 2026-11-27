@@ -88,10 +88,11 @@ def test_first_poll_does_not_fire_insert(config, setup):
 
 
 def test_eject_clears_type_and_label(config, setup):
-    fakes = {"sr0": FakeDrive(["disc", "empty"]), "sr1": FakeDrive(["empty"])}
+    fakes = {"sr0": FakeDrive(["disc", "empty", "empty"]), "sr1": FakeDrive(["empty"])}
     m = monitor(config, fakes, RecordingNotifier())
     asyncio.run(m.poll_once(first=True))
     asyncio.run(m.poll_once())
+    asyncio.run(m.poll_once())  # empty must repeat before it counts as an eject
     r = row(setup, "serial:A")
     assert (r["media_state"], r["disc_type"], r["disc_label"]) == ("empty", None, "")
 
@@ -277,3 +278,21 @@ def test_removal_after_glitch_still_fires(config, setup):
 
 def test_timeout_does_not_count_as_removal(config, setup):
     assert _removals(config, ["disc", TimeoutError(), "disc"]) == []
+
+
+def test_one_transient_not_ready_is_not_a_removal(config, setup):
+    assert _removals(config, ["disc", "not_ready", "disc", "disc"]) == []
+    assert _removals(config, ["disc", "empty", "disc", "disc"]) == []
+
+
+def test_transient_count_resets_after_disc_seen(config, setup):
+    assert _removals(config, ["disc", "not_ready", "disc", "not_ready", "disc"]) == []
+
+
+def test_two_not_ready_in_a_row_count_as_removal(config, setup):
+    assert _removals(config, ["disc", "not_ready", "not_ready"]) == ["serial:A"]
+    assert _removals(config, ["disc", "not_ready", "empty"]) == ["serial:A"]
+
+
+def test_tray_open_removal_is_immediate(config, setup):
+    assert _removals(config, ["disc", "tray_open"]) == ["serial:A"]

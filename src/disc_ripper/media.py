@@ -23,6 +23,9 @@ from .events import Notifier
 log = logging.getLogger(__name__)
 _BUSY = object()
 _BEFORE_INSERT = ("empty", "tray_open", "not_ready")
+# Readings that may be a drive busy or spinning, not a removal: they must repeat to count.
+_TRANSIENT = ("not_ready", "empty")
+LOSS_POLLS = 2  # consecutive transient readings before a disc counts as removed
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,7 @@ class MediaMonitor:
         self.on_remove = on_remove  # the disc left: its queued jobs must not outlive it
         self.probe = discprobe.probe
         self._locks: dict[str, threading.Lock] = {}
+        self._lost_polls: dict[str, int] = {}
         self._locks_guard = threading.Lock()
 
     def drive_lock(self, drive_id: str) -> threading.Lock:
@@ -118,6 +122,15 @@ class MediaMonitor:
             # still in. Treating it as a removal cancelled the drive's queued rips.
             log.info("media: %s did not report a state; keeping 'disc'", target.drive_id)
             return
+        if state in _TRANSIENT and target.previous == "disc" and not first:
+            # One not_ready/empty between title jobs is not a removal; it must persist.
+            seen = self._lost_polls.get(target.drive_id, 0) + 1
+            if seen < LOSS_POLLS:
+                self._lost_polls[target.drive_id] = seen
+                log.info("media: %s reports %s with a disc in; waiting for another reading",
+                         target.drive_id, state)
+                return
+        self._lost_polls.pop(target.drive_id, None)
         disc_type: str | None = None
         label = ""
         inserted = state == "disc" and (first or target.previous != "disc")

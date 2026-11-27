@@ -127,13 +127,13 @@ def test_glitch_unknown_to_disc_no_insert(config, svc):
     async def on_insert(drive_id):
         inserts.append(drive_id)
 
-    fake = ScriptedDrive(["disc", "unknown", "disc", "empty", "disc"])
+    fake = ScriptedDrive(["disc", "unknown", "disc", "empty", "empty", "disc"])
     m = media.MediaMonitor(config, Notifier(), drive_factory=lambda p: fake, on_insert=on_insert)
     m.probe = lambda drive: ("audio", "")
 
     async def polls():
         await m.poll_once(first=True)
-        for _ in range(4):
+        for _ in range(5):
             await m.poll_once()
 
     asyncio.run(polls())
