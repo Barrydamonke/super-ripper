@@ -1,6 +1,6 @@
 # Change ideas (not yet chosen)
 
-These came from the code review of Nov 26, 2026, plus items parked during earlier steps. Items A1–A14 from that review were built and merged on Nov 27. Pick any of the IDs below to have them built.
+These came from the code review of Nov 26, 2026, plus items parked during earlier steps. Items A1–A14 from that review were built and merged on Nov 27, followed by F1–F16, E1 and E3–E6 the same day. Pick any of the IDs below to have them built.
 
 ## Larger features still to build
 
@@ -11,6 +11,7 @@ These came from the code review of Nov 26, 2026, plus items parked during earlie
 | **P3** | **Second versions and Keep lossless** | Keep two versions of a film side by side in Jellyfin, or keep the lossless rip next to the encode. |
 | **P4** | **Audio CD burning** | Tracklist builder, volume levelling, CD-TEXT, and erasing CD-RWs first. |
 | **P5** | **Data discs to ISO** | Copy data discs to an ISO image with ddrescue. |
+| **P6** | **CD Presets** | Presets for CDs which manage copies and how they should be ripped |
 
 ## B. Quality of life for a long run
 
@@ -29,6 +30,7 @@ These came from the code review of Nov 26, 2026, plus items parked during earlie
 | **B11** | Show each preset's measured speed (e.g. "0.4× real time"). |
 | **B12** | Make the stall message agree with the "Retrying automatically" note, and clear stale retry notes after a restart. |
 | **B14** | Move extras into the library instead of copying them (less disk work), through a temporary name so a crash can't leave half a file. |
+| **B15** | Add support for discord webhooks which tell you the status of rips and if errors come through etc. |
 
 ## C. Audio CDs
 
@@ -51,36 +53,11 @@ These came from the code review of Nov 26, 2026, plus items parked during earlie
 | **D2** | The login check runs a database query on the main thread for every request. Cache it. |
 | **D3** | Create the secret file private from the start, add "log out everywhere", close the first-run setup race, and support a reverse proxy. |
 
-## E. Remove or tidy
+## E. Remove or tidy (after the mass rip)
 
 | ID | Change |
 |---|---|
-| **E1** | Delete the "Raw rip retention (24 h)" setting, which does nothing; the real one is "Keep raw rips". Also delete the unused "ISO folder" setting, and "burns" from the descriptions. |
 | **E2** | After the mass rip, remove the old copy fallback for rips and the `/work` lookups for rips made before the `.partial` change. |
-| **E3** | Move the test-job controls on the drive cards behind a debug setting. |
-| **E4** | Delete unused code: `audio_plan`, `is_progress_noise`, `cd_rips.create`, and duplicated helpers. |
-| **E5** | Prune old job logs and job rows. |
-| **E6** | Show the app version in the page footer. It's already in the start-up log. |
-
-## F. Small bugs (each under an hour)
-
-| ID | Change |
-|---|---|
-| **F1** | Write MakeMKV's settings file atomically. The second drive could read it half-written and look unlicensed. |
-| **F2** | Put a time limit on killing a MakeMKV stuck on a wedged drive. Today it can hang that drive's queue forever. |
-| **F3** | Don't treat one `not_ready` reading as a disc removal. |
-| **F4** | Fix a race that can drop "raw deleted" records. |
-| **F5** | Delete a raw before marking it deleted, so a crash can't orphan the file. |
-| **F6** | Count interrupted encodes and unfinished rips when refusing to delete a preset. |
-| **F7** | Cap AC-3 stereo at 640 kb/s. |
-| **F8** | Undo after clean-up loses the extras. |
-| **F9** | Skipped rips still show Encode buttons. |
-| **F10** | Undo doesn't restore a film's Radarr monitoring. |
-| **F11** | Read the Radarr root folders and quality profile from Radarr instead of hard-coding them. |
-| **F12** | Don't say "In Jellyfin" when Jellyfin isn't set up. |
-| **F13** | Skip HandBrake's full-file subtitle fix-up pass when there are no subtitles. It doubles `/work` use. |
-| **F14** | Use best-effort I/O priority rather than idle, so a starved encode isn't mistaken for a stall. |
-| **F15** | Group all of Settings, and apply "Encodes at once" without a restart. |
 
 ## G. Parked earlier (rare or minor)
 
@@ -95,3 +72,7 @@ These came from the code review of Nov 26, 2026, plus items parked during earlie
 | **G7** | The README's GPU check uses `setpriv`; a simpler command would do. |
 | **G8** | The real cyanrip captures are still in `git stash`, waiting to become test fixtures. |
 | **G9** | Rips and encodes don't count each other's not-yet-written bytes when the cache and `/work` share one pool. The free-space floor covers this in practice. |
+| **G10** | The Settings page asks Radarr for its folders and profiles on every load, so it can take about 6 s when Radarr is down. Cache it like the Films page does. |
+| **G11** | A root folder saved as a name (e.g. "Movies") shows as "(not in Radarr)" in Settings, though it still works. |
+| **G12** | A disc swapped within about 6 s on a slot-loading drive isn't noticed when both discs look alike (two audio CDs, or the same label). Tray drives aren't affected. |
+| **G13** | The test-job route still accepts requests when "Show test-job controls" is off; only the form is hidden. |
