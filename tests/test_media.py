@@ -296,3 +296,92 @@ def test_two_not_ready_in_a_row_count_as_removal(config, setup):
 
 def test_tray_open_removal_is_immediate(config, setup):
     assert _removals(config, ["disc", "tray_open"]) == ["serial:A"]
+
+
+def _monitor(config, statuses, probes=None):
+    """A monitor on sr0 with scripted statuses, a fake clock and removal/insert records."""
+    fakes = {"sr0": FakeDrive(statuses), "sr1": FakeDrive(["empty"])}
+    events = []
+
+    async def on_remove(drive_id):
+        events.append("remove")
+
+    async def on_insert(drive_id):
+        events.append("insert")
+
+    m = media.MediaMonitor(config, RecordingNotifier(), drive_factory=lambda p: fakes[p.name],
+                           on_remove=on_remove, on_insert=on_insert)
+    probes = list(probes or [("dvd", "MOVIE")])
+    m.probe = lambda drive: probes.pop(0) if len(probes) > 1 else probes[0]
+    m.now = 0.0
+    m._clock = lambda: m.now
+    return m, events
+
+
+def _poll(m, first=False, advance=3.0):
+    m.now += advance
+    asyncio.run(m.poll_once(first=first))
+
+
+def test_swap_within_debounce_is_remove_and_insert(config, setup):
+    m, events = _monitor(config, ["disc", "not_ready", "disc"], [("dvd", "OLD"), ("dvd", "NEW")])
+    _poll(m, first=True)
+    _poll(m)
+    assert events == []
+    _poll(m)
+    assert events == ["remove", "insert"]
+    r = row(setup, "serial:A")
+    assert (r["media_state"], r["disc_type"], r["disc_label"]) == ("disc", "dvd", "NEW")
+
+
+def test_same_disc_back_within_debounce_is_quiet(config, setup):
+    m, events = _monitor(config, ["disc", "not_ready", "disc", "disc"], [("dvd", "MOVIE")])
+    _poll(m, first=True)
+    _poll(m)
+    _poll(m)
+    _poll(m)
+    assert events == []
+    assert row(setup, "serial:A")["disc_label"] == "MOVIE"
+
+
+def test_transients_far_apart_are_not_a_removal(config, setup):
+    m, events = _monitor(config, ["disc", "not_ready", "disc", "disc", "not_ready"], [("dvd", "MOVIE")])
+    _poll(m, first=True)
+    _poll(m)
+    _poll(m)
+    _poll(m, advance=60)
+    _poll(m, advance=60)  # a new first transient, long after the old one
+    assert events == []
+
+
+def test_two_transients_too_far_apart_are_not_a_removal(config, setup):
+    m, events = _monitor(config, ["disc", "not_ready", "not_ready"], [("dvd", "MOVIE")])
+    _poll(m, first=True)
+    _poll(m)
+    _poll(m, advance=60)  # more than the window later
+    assert events == []
+    _poll(m)  # and one more, now within the window of the second
+    assert events == ["remove"]
+
+
+def test_unknown_between_transients_breaks_the_run(config, setup):
+    m, events = _monitor(config, ["disc", "not_ready", "unknown", "not_ready"], [("dvd", "MOVIE")])
+    _poll(m, first=True)
+    _poll(m)
+    _poll(m)
+    _poll(m)
+    assert events == []
+
+
+def test_skipped_poll_while_a_job_holds_the_drive_breaks_the_run(config, setup):
+    m, events = _monitor(config, ["disc", "not_ready", "not_ready"], [("dvd", "MOVIE")])
+    _poll(m, first=True)
+    _poll(m)  # not_ready before the title job
+    j = jobs.enqueue(setup, "serial:A", "rip_title", {}, now="t")
+    with setup:
+        setup.execute("UPDATE jobs SET state = 'running', uses_drive = 1 WHERE id = ?", (j,))
+    _poll(m)  # skipped: the drive is in use
+    with setup:
+        setup.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (j,))
+    _poll(m)  # not_ready after it: a fresh first reading, not a removal
+    assert events == []

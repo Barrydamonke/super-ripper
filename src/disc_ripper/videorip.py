@@ -27,6 +27,8 @@ def write_settings_conf(home: Path, key: str, selection: str) -> None:
 
 def _write_atomic(path: Path, text: str) -> None:
     """Write via a temp file in the same folder and rename over, so a reader sees all or nothing."""
+    for stale in path.parent.glob(f"{path.name}.*.tmp"):
+        stale.unlink(missing_ok=True)  # left by a crash mid-write
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")

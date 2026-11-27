@@ -532,5 +532,84 @@ def test_terminate_gives_up_when_child_will_not_die(monkeypatch):
     async def go():
         await asyncio.wait_for(runner._terminate(Stuck(), False), 5)
 
-    with pytest.raises(runner.ProcessUnkillable, match="could not be stopped; eject the disc or restart"):
+    with pytest.raises(runner.ProcessUnkillable, match="The program could not be stopped; restart the container"):
         asyncio.run(go())
+
+
+def test_unkillable_message_names_the_program():
+    assert runner.unkillable_message("makemkvcon", True) ==         "makemkvcon could not be stopped; eject the disc or restart the container."
+    assert runner.unkillable_message("HandBrakeCLI", False) ==         "HandBrakeCLI could not be stopped; restart the container."
+
+
+def test_run_process_uses_program_name_and_discards_live_process(conn, config, tmp_path, monkeypatch):
+    import sys
+
+    async def stuck(proc, posix, name="x"):
+        raise runner.ProcessUnkillable(runner.unkillable_message(name, name in runner.DRIVE_PROGRAMS))
+
+    monkeypatch.setattr(runner, "_terminate", stuck)
+
+    async def on_line(line):
+        raise RuntimeError("stop")
+
+    async def main():
+        r = runner.JobRunner(config, RecordingNotifier(), FakeSpace())
+        ctx = runner.JobContext(r, 9, "serial:A", {})
+        # argv[0] is python, so the name is its basename, not a drive program
+        with pytest.raises(runner.ProcessUnkillable) as e:
+            await ctx.run_process([sys.executable, "-c", "print('x', flush=True); import time; time.sleep(30)"],
+                                  cwd=tmp_path, on_line=on_line)
+        assert "could not be stopped; restart the container." in str(e.value)
+
+    try:
+        asyncio.run(main())
+    finally:
+        for p in list(runner.LIVE_PROCESSES):
+            try:
+                p.kill()
+            except ProcessLookupError:
+                pass
+    assert not runner.LIVE_PROCESSES
+
+
+def test_wedged_drive_keeps_next_job_queued_until_cleared(config, conn):
+    async def stuck(ctx):
+        raise runner.ProcessUnkillable(runner.unkillable_message("makemkvcon", True), True)
+
+    ran = []
+
+    async def after(ctx):
+        ran.append(ctx.job_id)
+
+    a = jobs.enqueue(conn, "serial:A", "stuck", {}, now="t")
+    b = jobs.enqueue(conn, "serial:A", "after", {}, now="t")
+
+    async def main():
+        r = make_runner(config, handlers={"stuck": stuck, "after": after})
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, a) == ["failed"])
+        assert jobs.get(conn, a)["error"] == "makemkvcon could not be stopped; eject the disc or restart the container."
+        await asyncio.sleep(0.2)
+        assert r.is_wedged("serial:A") and states(conn, b) == ["queued"] and ran == []
+        assert r.clear_wedged("serial:A") is True
+        await wait_until(lambda: states(conn, b) == ["done"])
+        assert not r.is_wedged("serial:A") and ran == [b]
+        await r.stop()
+
+    asyncio.run(main())
+
+
+def test_encoder_unkillable_does_not_wedge_the_drive(config, conn):
+    async def stuck(ctx):
+        raise runner.ProcessUnkillable(runner.unkillable_message("HandBrakeCLI", False), False)
+
+    a = jobs.enqueue(conn, "serial:A", "stuck", {}, now="t")
+
+    async def main():
+        r = make_runner(config, handlers={"stuck": stuck})
+        r.sync_workers({"serial:A"})
+        await wait_until(lambda: states(conn, a) == ["failed"])
+        assert not r.is_wedged("serial:A")
+        await r.stop()
+
+    asyncio.run(main())

@@ -1066,6 +1066,8 @@ class Services:
 
     async def on_remove(self, drive_id: str) -> None:
         """The disc left the drive (ejected, or the media monitor saw it go)."""
+        if self.runner.clear_wedged(drive_id):
+            await self.drive_changed(drive_id)  # the "drive is stuck" note goes
         await self.cancel_disc_jobs(drive_id)
 
     def _hold_video(self, conn, drive_id: str) -> list[int]:
@@ -1121,7 +1123,8 @@ class Services:
             if row is None:
                 return None
             return render_drive_card(conn, row, datetime.now().astimezone(), config=self.config,
-                                     dvd_wait_pending=self.dvd_wait_pending)
+                                     dvd_wait_pending=self.dvd_wait_pending,
+                                     drive_wedged=self.runner.is_wedged)
         finally:
             conn.close()
 

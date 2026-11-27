@@ -700,3 +700,20 @@ def test_retry_button_disables_itself(dash):
     j = jobs.enqueue(conn, "serial:A", "rip_title", {"rip_id": 1}, now="t")
     jobs.finish(conn, j, "failed", "t2", error="boom")
     assert f'hx-post="/jobs/{j}/retry" hx-target="#drive-{KEY}" hx-disabled-elt="this"' in _page(client)
+
+
+def test_wedged_drive_card_says_so_and_on_remove_clears_it(dash):
+    client, conn = dash
+    from datetime import datetime
+
+    svc = client.app.state.services
+    row = conn.execute("SELECT * FROM drives WHERE id = 'serial:A'").fetchone()
+    now = datetime.now().astimezone()
+    svc.runner._wedged.add("serial:A")
+    html = dashboard_routes.render_drive_card(conn, row, now, config=client.app.state.config,
+                                              drive_wedged=svc.runner.is_wedged)
+    assert "The drive is stuck. Eject the disc or restart the container." in html
+    assert "The drive is stuck" in client.get("/").text
+    asyncio.run(svc.on_remove("serial:A"))
+    assert not svc.runner.is_wedged("serial:A")
+    assert "The drive is stuck" not in client.get("/").text

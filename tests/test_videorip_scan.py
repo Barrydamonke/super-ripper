@@ -310,3 +310,11 @@ def test_settings_conf_failed_write_keeps_old_file(tmp_path, monkeypatch):
         videorip.write_settings_conf(tmp_path, "NEW", "")
     assert "OLD" in path.read_text()
     assert [p.name for p in path.parent.iterdir()] == ["settings.conf"]
+
+
+def test_stale_temp_settings_files_are_removed(tmp_path):
+    folder = tmp_path / ".MakeMKV"
+    folder.mkdir()
+    (folder / "settings.conf.123.456.tmp").write_text("junk")
+    videorip.write_settings_conf(tmp_path, "K", "")
+    assert [p.name for p in folder.iterdir()] == ["settings.conf"]

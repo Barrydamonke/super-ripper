@@ -32,13 +32,22 @@ PROGRESS_INTERVAL = 1.0
 CANCEL_WAIT_SECONDS = 3.0
 KILL_GRACE_SECONDS = 5.0
 KILL_WAIT_SECONDS = 30.0  # longest to wait for a SIGKILLed child to be gone
-UNKILLABLE_MESSAGE = "MakeMKV could not be stopped; eject the disc or restart the container."
+DRIVE_PROGRAMS = {"makemkvcon", "cyanrip"}  # programs that hold a disc drive
+
+
+def unkillable_message(name: str, uses_drive: bool) -> str:
+    action = "eject the disc or restart the container" if uses_drive else "restart the container"
+    return f"{name} could not be stopped; {action}."
 # Child processes started by jobs, so tests (and shutdown checks) can see none are left.
 LIVE_PROCESSES: set[asyncio.subprocess.Process] = set()
 
 
 class ProcessUnkillable(Exception):
     """The child ignored SIGKILL (stuck in uninterruptible sleep, e.g. a wedged drive)."""
+
+    def __init__(self, message: str, uses_drive: bool = False):
+        super().__init__(message)
+        self.uses_drive = uses_drive
 
 
 class ProcessStalled(Exception):
@@ -106,6 +115,7 @@ class JobContext:
             start_new_session=posix,  # its own process group, so helpers die with it
         )
         LIVE_PROCESSES.add(proc)
+        name = os.path.basename(str(argv[0])).lower().removesuffix(".exe")
         splitter = LineSplitter()
         try:
             while True:
@@ -128,11 +138,13 @@ class JobContext:
             self.log.write(f"exit code {code}")
             return code
         finally:
-            if proc.returncode is None:
-                # Cancelled, or on_line failed: stop the child. Shielded so a second
-                # cancel (e.g. shutdown after a user cancel) can't skip the SIGKILL.
-                await asyncio.shield(_terminate(proc, posix))
-            LIVE_PROCESSES.discard(proc)
+            try:
+                if proc.returncode is None:
+                    # Cancelled, or on_line failed: stop the child. Shielded so a second
+                    # cancel (e.g. shutdown after a user cancel) can't skip the SIGKILL.
+                    await asyncio.shield(_terminate(proc, posix, name))
+            finally:
+                LIVE_PROCESSES.discard(proc)
 
 
 def _duration(seconds: float) -> str:
@@ -142,7 +154,7 @@ def _duration(seconds: float) -> str:
     return f"{seconds:g} s"
 
 
-async def _terminate(proc: asyncio.subprocess.Process, posix: bool) -> None:
+async def _terminate(proc: asyncio.subprocess.Process, posix: bool, name: str = "The program") -> None:
     if proc.returncode is not None:
         return
 
@@ -166,7 +178,7 @@ async def _terminate(proc: asyncio.subprocess.Process, posix: bool) -> None:
             await asyncio.wait_for(proc.wait(), KILL_WAIT_SECONDS)
         except TimeoutError:
             log.error("jobs: pid %s would not die after SIGKILL; leaving it", proc.pid)
-            raise ProcessUnkillable(UNKILLABLE_MESSAGE) from None
+            raise ProcessUnkillable(unkillable_message(name, name in DRIVE_PROGRAMS), name in DRIVE_PROGRAMS) from None
 
 
 Handler = Callable[[JobContext], Awaitable[None]]
@@ -214,6 +226,7 @@ class JobRunner:
         self.recheck_seconds = recheck_seconds
         self._workers: dict[str, asyncio.Task] = {}
         self._wakeups: dict[str, asyncio.Event] = {}
+        self._wedged: set[str] = set()  # drives whose program would not die; in memory only
         self._running: dict[int, asyncio.Task] = {}
         self._user_cancelled: set[int] = set()
         self._finished: dict[int, asyncio.Event] = {}
@@ -249,6 +262,17 @@ class JobRunner:
             if drive_id not in self._workers:
                 self._wakeups[drive_id] = asyncio.Event()
                 self._workers[drive_id] = asyncio.create_task(self._worker(drive_id), name=f"worker {drive_id}")
+
+    def is_wedged(self, drive_id: str) -> bool:
+        return drive_id in self._wedged
+
+    def clear_wedged(self, drive_id: str) -> bool:
+        """The disc left (or the app restarted): the drive may take jobs again."""
+        if drive_id not in self._wedged:
+            return False
+        self._wedged.discard(drive_id)
+        self.wake(drive_id)
+        return True
 
     def wake(self, drive_id: str) -> None:
         event = self._wakeups.get(drive_id)
@@ -329,6 +353,9 @@ class JobRunner:
 
     async def _step(self, drive_id: str) -> None:
         self._wakeups[drive_id].clear()
+        if drive_id in self._wedged:
+            await self._wait(drive_id, None)  # stuck drive: jobs stay queued until the disc is out
+            return
         job = await self.db(jobs.next_job, drive_id)
         if job is None:
             await self._wait(drive_id, None)
@@ -381,6 +408,11 @@ class JobRunner:
                 ctx.log.write("finished: interrupted (restart or shutdown)")
                 raise
             await self._finish(drive_id, job_id, "cancelled", None)
+        except ProcessUnkillable as exc:
+            log.error("jobs: #%s: %s", job_id, exc)
+            if exc.uses_drive:
+                self._wedged.add(drive_id)
+            await self._finish(drive_id, job_id, "failed", str(exc))
         except Exception as exc:  # a job failing must not kill the drive's worker
             log.exception("jobs: #%s failed", job_id)
             await self._finish(drive_id, job_id, "failed", str(exc) or type(exc).__name__)
