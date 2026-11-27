@@ -397,3 +397,43 @@ async def test_invalid_preset_fails_that_encode_and_queue_moves_on(config, conn,
         ". Edit the preset, then Retry.")
     await wait_until(lambda: state(conn, good) == "done")
     await pool.stop()
+
+
+@sync
+async def test_slots_grow_and_shrink_live(config, conn, monkeypatch):
+    running, release = [], asyncio.Event()
+
+    async def fake(ctx, row):
+        running.append(row["id"])
+        await release.wait()
+
+    monkeypatch.setattr(encodepool, "run_encode", fake)
+    ids = [add(conn, n) for n in (1, 2, 3)]
+    pool = pool_for(config)
+    pool.start()
+    await wait_until(lambda: running == [ids[0]])
+    await asyncio.sleep(0.05)
+    assert running == [ids[0]]  # one slot
+    settings.save(conn, {"encode_slots": 2})
+    pool.apply_slots()
+    await wait_until(lambda: sorted(running) == sorted(ids[:2]))  # grew without a restart
+    await asyncio.sleep(0.05)
+    assert state(conn, ids[2]) == "queued"
+    settings.save(conn, {"encode_slots": 1})
+    pool.apply_slots()
+    await asyncio.sleep(0.05)
+    assert state(conn, ids[0]) == "running" and state(conn, ids[1]) == "running"  # running ones finish
+    release.set()
+    await wait_until(lambda: state(conn, ids[2]) == "done")
+    assert all(state(conn, i) == "done" for i in ids)
+    # the surplus slot stopped once idle: two more encodes now run one at a time
+    release.clear()
+    running.clear()
+    extra = [add(conn, 4), add(conn, 5)]
+    pool.wake()
+    await wait_until(lambda: len(running) == 1)
+    await asyncio.sleep(0.05)
+    assert len(running) == 1 and state(conn, extra[1]) == "queued"
+    release.set()
+    await wait_until(lambda: state(conn, extra[1]) == "done")
+    await pool.stop()

@@ -155,6 +155,7 @@ def render_drive_card(
         wedged=bool(drive_wedged and drive_wedged(drive_row["id"])),
         dvd_waiting=bool(dvd_wait_pending and dvd_wait_pending(drive_row["id"])),
         default_minutes=DEFAULT_TEST_MINUTES,
+        show_test_jobs=settings.get(conn, "show_test_jobs"),
         running_past_grace=_past_grace(guard, running_finish),
         new_job_past_grace=_past_grace(guard, now + timedelta(minutes=DEFAULT_TEST_MINUTES)),
     )
@@ -219,7 +220,7 @@ def _dashboard_sync(conn, config, dvd_wait_pending=None, drive_wedged=None) -> d
     from .films_routes import render_encodes
 
     return {"cards": cards, "guard_html": render_guard(conn, now), "encodes_html": render_encodes(conn),
-            "default_minutes": DEFAULT_TEST_MINUTES}
+            "default_minutes": DEFAULT_TEST_MINUTES, "show_test_jobs": settings.get(conn, "show_test_jobs")}
 
 
 def _burst_sync(conn, config, dvd_wait_pending=None, drive_wedged=None) -> dict:

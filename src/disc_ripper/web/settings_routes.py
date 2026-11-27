@@ -89,6 +89,12 @@ async def settings_save(request: Request, conn: sqlite3.Connection = Depends(get
         return _render(request, conn, values=submitted, errors=exc.errors, options=options, status_code=400)
     settings.save(conn, parsed)
     services = getattr(request.app.state, "services", None)
+    pool = getattr(services, "encoder", None)
+    if pool is not None:  # "Encodes at once" applies without a restart
+        try:
+            pool.apply_slots()
+        except Exception:
+            log.exception("encodes: applying the slot count failed")
     if services is not None:  # Radarr may be set up now: import the films that were waiting for it
         try:
             await filmimport.sweep_ready(services)

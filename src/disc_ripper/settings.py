@@ -38,62 +38,14 @@ class SettingDef:
 
 SETTINGS: tuple[SettingDef, ...] = (
     SettingDef(
-        "work_budget_gb", "Work area budget", "int", 60, "GB", 1, 10000,
-        "Space the in-progress work area may use on the cache. It covers CD rips and encodes, not DVD and Blu-ray rips (those write to downloads).",
-    ),
-    SettingDef(
         "cache_min_free_gb", "Minimum free cache space", "int", 20, "GB", 0, 10000,
         "A rip only starts if at least this much stays free on the cache pool (or the downloads disk, for DVD and Blu-ray rips).",
+        group="DVD and Blu-ray",
     ),
     SettingDef(
         "auto_start_rips", "Auto-start rips", "bool", True,
         help="Start ripping the main title as soon as a disc is scanned, unless it is held.",
-    ),
-    SettingDef(
-        "shutdown_grace_hours", "Shutdown grace period", "float", 3, "hours", 0, 3.5,
-        "How long past the scheduled end jobs may delay shutdown. "
-        "unraid-backend stops waiting for the ripper 4 hours after a shutdown request, "
-        "so this must stay below that.",
-    ),
-    SettingDef(
-        "cd_rip_mode", "CD rip mode", "choice", "secure",
-        help="Secure re-reads every sector until it is sure (slower; best for scratched discs).",
-        choices=(("secure", "Secure (re-read until sure)"), ("fast", "Fast")),
-    ),
-    SettingDef(
-        "cd_retries", "CD retries per bad sector", "int", 10, "", 0, 50,
-        "How often cyanrip re-reads a bad sector before flagging the track.",
-    ),
-    SettingDef(
-        "cd_approval", "CD approval", "choice", "odd_ones",
-        help="Only check the odd ones: an exact match with every track verified files itself.",
-        choices=(("odd_ones", "Only check the odd ones"), ("always", "Always ask")),
-    ),
-    SettingDef("cd_cover_art", "Fetch CD cover art", "bool", True, help="Save cover.jpg from the Cover Art Archive."),
-    SettingDef(
-        "jellyfin_url", "Jellyfin address", "url", "",
-        help="For the music duplicate check and library refresh, e.g. http://192.168.68.143:8096.",
-    ),
-    SettingDef(
-        "jellyfin_api_key", "Jellyfin API key", "secret", "",
-        help="Jellyfin Dashboard → API Keys. Never shown again once saved.",
-    ),
-    SettingDef(
-        "schedule_status_url", "Schedule source (unraid-backend /status)", "url", "",
-        help="Where to read the power schedule, e.g. http://192.168.1.10:3001/status. "
-        "Blank: skip.",
-    ),
-    SettingDef(
-        "schedule_pi_url", "Schedule fallback (Pi /schedule)", "url", "",
-        help="Used when the source above can't be read, e.g. http://192.168.1.20:8090/schedule.",
-    ),
-    SettingDef(
-        "raw_retention_hours", "Raw rip retention", "int", 24, "hours", 1, 720,
-        "Delete an unkept raw rip this long after its encode passed, even if the job is still waiting.",
-    ),
-    SettingDef(
-        "iso_dir", "ISO folder", "path", "/data/ISOs",
-        help="Where data-disc ISOs are saved (a path inside the container).",
+        group="DVD and Blu-ray",
     ),
     SettingDef(
         "makemkv_key", "MakeMKV key", "secret", "",
@@ -118,8 +70,13 @@ SETTINGS: tuple[SettingDef, ...] = (
         group="DVD and Blu-ray",
     ),
     SettingDef(
+        "work_budget_gb", "Work area budget", "int", 60, "GB", 1, 10000,
+        "Space the in-progress work area may use on the cache. It covers CD rips and encodes, not DVD and Blu-ray rips (those write to downloads).",
+        group="Encoding",
+    ),
+    SettingDef(
         "encode_slots", "Encodes at once", "int", 1, "", 1, 2,
-        "How many encodes may run at the same time. A change applies after the container restarts.",
+        "How many encodes may run at the same time. A change applies at once; encodes already running finish first.",
         group="Encoding",
     ),
     SettingDef(
@@ -169,6 +126,58 @@ SETTINGS: tuple[SettingDef, ...] = (
         "tidy_folders_on_replace", "Tidy folders on replace", "bool", True,
         help="When replacing, rename the film's folder to Radarr's own name for it.",
         group="Radarr",
+    ),
+    SettingDef(
+        "jellyfin_url", "Jellyfin address", "url", "",
+        help="For the music duplicate check and library refresh, e.g. http://192.168.68.143:8096.",
+        group="Jellyfin",
+    ),
+    SettingDef(
+        "jellyfin_api_key", "Jellyfin API key", "secret", "",
+        help="Jellyfin Dashboard → API Keys. Never shown again once saved.",
+        group="Jellyfin",
+    ),
+    SettingDef(
+        "cd_rip_mode", "CD rip mode", "choice", "secure",
+        help="Secure re-reads every sector until it is sure (slower; best for scratched discs).",
+        choices=(("secure", "Secure (re-read until sure)"), ("fast", "Fast")),
+        group="Audio CDs",
+    ),
+    SettingDef(
+        "cd_retries", "CD retries per bad sector", "int", 10, "", 0, 50,
+        "How often cyanrip re-reads a bad sector before flagging the track.",
+        group="Audio CDs",
+    ),
+    SettingDef(
+        "cd_approval", "CD approval", "choice", "odd_ones",
+        help="Only check the odd ones: an exact match with every track verified files itself.",
+        choices=(("odd_ones", "Only check the odd ones"), ("always", "Always ask")),
+        group="Audio CDs",
+    ),
+    SettingDef("cd_cover_art", "Fetch CD cover art", "bool", True, help="Save cover.jpg from the Cover Art Archive.",
+               group="Audio CDs"),
+    SettingDef(
+        "shutdown_grace_hours", "Shutdown grace period", "float", 3, "hours", 0, 3.5,
+        "How long past the scheduled end jobs may delay shutdown. "
+        "unraid-backend stops waiting for the ripper 4 hours after a shutdown request, "
+        "so this must stay below that.",
+        group="Power schedule",
+    ),
+    SettingDef(
+        "schedule_status_url", "Schedule source (unraid-backend /status)", "url", "",
+        help="Where to read the power schedule, e.g. http://192.168.1.10:3001/status. "
+        "Blank: skip.",
+        group="Power schedule",
+    ),
+    SettingDef(
+        "schedule_pi_url", "Schedule fallback (Pi /schedule)", "url", "",
+        help="Used when the source above can't be read, e.g. http://192.168.1.20:8090/schedule.",
+        group="Power schedule",
+    ),
+    SettingDef(
+        "show_test_jobs", "Show test-job controls", "bool", False,
+        help="Show the 'Add test job' form on each drive's card. Test jobs are pretend jobs for trying the queue.",
+        group="Debug",
     ),
 )
 

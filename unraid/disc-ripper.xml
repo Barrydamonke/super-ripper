@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/Barrydamonke/super-ripper</Support>
   <Project>https://github.com/Barrydamonke/super-ripper</Project>
-  <Overview>Rips, encodes and burns discs from its own web UI. Optical drives are found by serial number at start-up; no --privileged needed.</Overview>
+  <Overview>Rips and encodes discs from its own web UI. Optical drives are found by serial number at start-up; no --privileged needed.</Overview>
   <Category>MediaApp:Video</Category>
   <WebUI>http://[IP]:[PORT:8580]/</WebUI>
   <ExtraParams>--device-cgroup-rule='b 11:* rmw' --device-cgroup-rule='c 21:* rmw' --stop-timeout=60 --device=/dev/dri --restart=unless-stopped</ExtraParams>

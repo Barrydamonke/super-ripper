@@ -217,6 +217,9 @@ def test_live_card_does_not_contain_the_form(dash):
 
     html = dashboard_routes.render_drive_card(conn, row, datetime.now().astimezone(), config=client.app.state.config)
     assert 'name="minutes"' not in html
+    from disc_ripper import settings
+
+    settings.save(conn, {"show_test_jobs": True})
     page = client.get("/").text
     assert page.count('name="minutes"') == 1
     form_at = page.index('name="minutes"')
@@ -717,3 +720,21 @@ def test_wedged_drive_card_says_so_and_on_remove_clears_it(dash):
     asyncio.run(svc.on_remove("serial:A"))
     assert not svc.runner.is_wedged("serial:A")
     assert "The drive is stuck" not in client.get("/").text
+
+
+def test_test_job_controls_hidden_unless_enabled(dash):
+    from disc_ripper import settings
+
+    client, conn = dash
+    text = _page(client)
+    assert 'class="test-job"' not in text and "test job would finish" not in text
+    settings.save(conn, {"show_test_jobs": True})
+    assert 'class="test-job"' in _page(client)
+
+
+def test_dashboard_swaps_keep_open_menus(dash):
+    client, _ = dash
+    text = _page(client)
+    js = client.get("/static/hold-open.js")
+    assert js.status_code == 200 and "sseBeforeMessage" in js.text and "details[open]" in js.text
+    assert 'src="/static/hold-open.js"' in text
