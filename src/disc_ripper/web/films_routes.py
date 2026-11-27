@@ -31,6 +31,7 @@ _BIN_DAYS_TTL = 600.0
 # Radarr's root folders for the "Where to add it" dropdown; refreshed (short timeout) when the page is asked for.
 _ROOTS: dict = {"roots": [], "at": -1e9}
 _ROOTS_TTL = 60.0
+_ROOTS_FAILED_TTL = 30.0  # after a failed fetch, don't ask again for this long
 
 
 def _hms(seconds) -> str:
@@ -279,9 +280,13 @@ async def _refresh_roots(request: Request) -> None:
     if client is None:
         _ROOTS["roots"] = []
         return
-    roots, _profiles = await asyncio.to_thread(filmimport.radarr_choices, client)
-    if roots:
-        _ROOTS["roots"], _ROOTS["at"] = roots, time.monotonic()
+    try:
+        roots = await asyncio.to_thread(client.root_folders, timeout=filmimport.CHOICES_TIMEOUT)
+    except Exception:  # Radarr down or slow: keep the last good list, and don't wait on it again for a while
+        _ROOTS["at"] = time.monotonic() - _ROOTS_TTL + _ROOTS_FAILED_TTL
+        return
+    _ROOTS["roots"] = [r for r in roots or [] if isinstance(r, dict) and r.get("path")]
+    _ROOTS["at"] = time.monotonic()
 
 
 async def _respond(request: Request, *, error: str | None = None, notice: str | None = None,

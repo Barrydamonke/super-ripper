@@ -163,6 +163,9 @@ async def skip(services, rip_id: int) -> str | None:
             rip = conn.execute("SELECT state FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
             if rip is not None and rip["state"] == "ripping":
                 return "This rip is still ripping; wait for it to finish."
+            if conn.execute("SELECT 1 FROM jobs WHERE kind = 'rip_title' AND json_extract(params, '$.rip_id') = ? "
+                            "AND state IN ('queued', 'running', 'waiting_space') LIMIT 1", (rip_id,)).fetchone():
+                return "This rip is still ripping; cancel it on the drive's card first."
             row = film_imports.ensure(conn, rip_id, utc_now())
             if row["state"] == "importing":
                 return "This rip is being imported; wait for it to finish."

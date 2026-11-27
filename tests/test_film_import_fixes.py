@@ -254,3 +254,64 @@ def test_raw_hold_note_without_jellyfin_does_not_wait_for_it(radarr):
     rip = _imported(conn, config, "imported")
     assert film_imports.jellyfin_hold(conn, rip) == "imported; waiting for clean-up"
     assert "waiting for Jellyfin" not in client.get("/films").text
+
+
+# -- review follow-ups -----------------------------------------------------------------
+
+
+def test_radarr_down_is_cached_between_page_loads(radarr, monkeypatch):
+    client, conn, config, fake = radarr
+    calls = []
+
+    def down(*args, **kwargs):
+        calls.append(1)
+        raise RadarrError("Radarr didn't answer at http://radarr.test")
+
+    monkeypatch.setattr(fake, "root_folders", down)
+    monkeypatch.setattr(fake, "quality_profiles", down)
+    assert client.get("/films").status_code == 200
+    assert client.get("/films").status_code == 200
+    assert len(calls) == 1
+
+
+def test_failed_refresh_keeps_last_good_roots(radarr, monkeypatch):
+    from disc_ripper.web import films_routes
+    client, conn, config, fake = radarr
+    films_routes._ROOTS.update(roots=[{"path": "/good/Movies"}], at=-1e9)  # stale, so refreshed next
+
+    def down(*args, **kwargs):
+        raise RadarrError("down")
+
+    monkeypatch.setattr(fake, "root_folders", down)
+    client.get("/films")
+    assert films_routes._ROOTS["roots"] == [{"path": "/good/Movies"}]
+
+
+def test_reimport_after_cleanup_undo_reuses_extras(config, setup, tmp_path, monkeypatch):
+    probe(monkeypatch)
+    rip, eid = make_rip(setup, config, extras=[(1, "extra.mkv")])
+    services, fake = services_with(config, tmp_path)
+    run(services, rip)
+    row = row_of(setup, rip)
+    [placed] = [Path(p) for p in json.loads(row["extras"])]
+    film_imports.update(setup, rip, NOW, state="in_jellyfin")  # the rip folder is still there
+    assert asyncio.run(filmundo.undo(services, rip)) == "Undone."
+    assert placed.is_file()
+    run(services, rip)
+    row = row_of(setup, rip)
+    assert row["state"] == "imported", row["error"]
+    assert [Path(p) for p in json.loads(row["extras"])] == [placed]
+    assert not list(placed.parent.glob("*(2)*"))
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "waiting_space"])
+def test_skip_refused_while_rip_job_active(config, setup, tmp_path, state):
+    from disc_ripper import jobs
+    rip, _ = make_rip(setup, config)
+    job = jobs.enqueue(setup, "serial:A", "rip_title", {"rip_id": rip, "title": 1}, uses_drive=True, now="t")
+    with setup:
+        setup.execute("UPDATE jobs SET state = ? WHERE id = ?", (state, job))
+    services, fake = services_with(config, tmp_path)
+    message = asyncio.run(filmundo.skip(services, rip))
+    assert message and "ripping" in message
+    assert (config.downloads_dir / str(rip)).is_dir()

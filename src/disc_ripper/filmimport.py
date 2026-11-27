@@ -38,7 +38,10 @@ def default_root(conn) -> str:
     return settings.get(conn, "radarr_root_folder").strip() or DEFAULT_ROOT
 
 
-def radarr_choices(client, timeout: float = 3.0) -> tuple[list[dict], list[dict]]:
+CHOICES_TIMEOUT = 3.0
+
+
+def radarr_choices(client, timeout: float = CHOICES_TIMEOUT) -> tuple[list[dict], list[dict]]:
     """(root folders, quality profiles) from Radarr, or empty lists when it can't answer quickly.
     Blocks up to about two timeouts: call it off the event loop."""
     try:
@@ -332,6 +335,13 @@ class Flow:
         for src in self._extra_sources():
             if self._already_copied(src, copied):
                 self.log.write(f"extras: {src.name} was already copied")
+                continue
+            same = folder / src.name
+            if same.is_file() and same.stat().st_size == src.stat().st_size:
+                # already in the library (an Undo after clean-up leaves extras there): use it, don't copy again
+                self.log.write(f"extras: {src.name} is already in the library; kept")
+                copied.append(str(same))
+                self.set(extras=copied)
                 continue
             dest = self._free_name(folder, src.name)
             if dest.name != src.name:

@@ -242,6 +242,8 @@ def test_retry_resumes_in_background(radarr):
 def test_skip_removes_rip_folder(radarr):
     client, conn, config, fake = radarr
     rip = film_rip(conn, config)
+    with conn:  # the helper leaves the rip's own job queued; a finished rip's job is done
+        conn.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (rip,))
     set_row(conn, rip, state="needs_identify", candidates=[])
     r = client.post("/films/skip", data={"rip_id": rip})
     assert r.status_code == 200
