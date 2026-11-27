@@ -15,8 +15,6 @@ VALID_FORM = {
     "work_budget_gb": "100",
     "cache_min_free_gb": "20",
     "shutdown_grace_hours": "2.5",
-    "raw_retention_hours": "24",
-    "iso_dir": "/data/ISOs",
     "cd_rip_mode": "secure",
     "cd_retries": "10",
     "video_min_title_seconds": "120",
@@ -40,8 +38,6 @@ def test_defaults_when_empty(conn):
     assert values["cache_min_free_gb"] == 20
     assert values["auto_start_rips"] is True
     assert values["shutdown_grace_hours"] == 3
-    assert values["raw_retention_hours"] == 24
-    assert values["iso_dir"] == "/data/ISOs"
 
 
 def test_parse_form_valid():
@@ -53,16 +49,10 @@ def test_parse_form_valid():
 
 
 def test_parse_form_collects_all_errors():
-    form = {**VALID_FORM, "work_budget_gb": "abc", "cache_min_free_gb": "-1", "iso_dir": "data/../x"}
+    form = {**VALID_FORM, "work_budget_gb": "abc", "cache_min_free_gb": "-1", "radarr_url": "ftp://x"}
     with pytest.raises(settings.SettingsError) as exc:
         settings.parse_form(form)
-    assert set(exc.value.errors) == {"work_budget_gb", "cache_min_free_gb", "iso_dir"}
-
-
-def test_parse_form_rejects_dotdot_in_absolute_path():
-    with pytest.raises(settings.SettingsError) as exc:
-        settings.parse_form({**VALID_FORM, "iso_dir": "/data/../etc"})
-    assert set(exc.value.errors) == {"iso_dir"}
+    assert set(exc.value.errors) == {"work_budget_gb", "cache_min_free_gb", "radarr_url"}
 
 
 def test_save_round_trip(conn):
@@ -187,3 +177,39 @@ def test_settings_raw_keep_until_choice(conn):
     with pytest.raises(settings.SettingsError):
         settings.parse_form({**VALID_FORM, "raw_keep_until": "never"})
     assert by_key["raw_keep_hours"].help.startswith("Used when Keep raw rips is set to hours.")
+
+
+def test_every_setting_has_a_group_in_order():
+    assert all(d.group for d in settings.SETTINGS)
+    order = []
+    for d in settings.SETTINGS:
+        if d.group not in order:
+            order.append(d.group)
+        assert order.index(d.group) == len(order) - 1, f"{d.key} splits the {d.group} group"
+    assert order == ["DVD and Blu-ray", "Encoding", "Radarr", "Jellyfin", "Audio CDs", "Power schedule", "Debug"]
+
+
+def test_removed_settings_are_gone():
+    keys = {d.key for d in settings.SETTINGS}
+    assert "raw_retention_hours" not in keys and "iso_dir" not in keys
+
+
+def test_groups_hold_the_right_settings():
+    by_key = {d.key: d for d in settings.SETTINGS}
+    assert by_key["jellyfin_url"].group == by_key["jellyfin_api_key"].group == "Jellyfin"
+    assert by_key["raw_keep_until"].group == by_key["raw_keep_hours"].group == "Encoding"
+    assert all(d.group == "Audio CDs" for d in settings.SETTINGS if d.key.startswith("cd_"))
+    assert all(d.group == "Power schedule" for d in settings.SETTINGS if d.key.startswith("schedule_"))
+    assert by_key["radarr_root_folder"].group == "Radarr"
+
+
+def test_show_test_jobs_setting(conn):
+    d = {d.key: d for d in settings.SETTINGS}["show_test_jobs"]
+    assert (d.kind, d.default, d.group, d.label) == ("bool", False, "Debug", "Show test-job controls")
+    assert settings.SETTINGS[-1].key == "show_test_jobs"
+    assert settings.get(conn, "show_test_jobs") is False
+
+
+def test_encode_slots_help_says_it_applies_at_once():
+    d = {d.key: d for d in settings.SETTINGS}["encode_slots"]
+    assert "restart" not in d.help

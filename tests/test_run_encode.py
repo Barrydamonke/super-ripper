@@ -270,6 +270,13 @@ def test_standard_clears_the_default_subtitle_flag_afterwards(config, conn, tmp_
     assert not list((config.downloads_dir / "1").glob("*.tmp"))
 
 
+def test_no_subtitle_tracks_skips_the_fix_up(config, conn, tmp_path):
+    raw = make_raw(config, streams=[stream("audio")])
+    go(config, conn, queue(conn, raw))
+    assert len(recorded(tmp_path)) == 1  # HandBrake only: nothing to clear
+    assert (config.downloads_dir / "1" / "Film - Standard.mkv").exists()
+
+
 def test_fast_and_copy_need_no_fix_up(config, conn, tmp_path):
     raw = make_raw(config)
     go(config, conn, queue(conn, raw, preset=3))

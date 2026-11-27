@@ -22,15 +22,6 @@ def output_name(raw: Path, preset_name: str) -> str:
     return f"{raw.stem} - {preset_name}.mkv"
 
 
-def audio_plan(channels: int) -> tuple[int, int]:
-    """(output channels, kb/s): mono stays mono, stereo or unknown is stereo, 3+ channels become 5.1 at 640."""
-    if channels < 1:
-        return 2, 224
-    if channels <= 2:
-        return channels, 224
-    return 6, 640
-
-
 def audio_out(channels: int, s: PresetSettings) -> tuple[int, int]:
     """(output channels, kb/s) for one audio track under the preset's channel rule."""
     if s.audio_channels == "stereo":
@@ -111,7 +102,7 @@ def ffmpeg_prefix() -> list[str]:
 
 
 def priority_prefix() -> list[str]:
-    return ["nice", "-n", "19", "ionice", "-c", "3"] if os.name == "posix" else []
+    return ["nice", "-n", "19", "ionice", "-c", "2", "-n", "7"] if os.name == "posix" else []
 
 
 _HB_AUDIO = {"eac3": "eac3", "ac3": "ac3", "aac": "av_aac", "opus": "opus", "copy": "copy"}
@@ -375,11 +366,6 @@ class ProgressNoise:
         self._depth += text.count("{") - text.count("}")
         self._depth = max(self._depth, 0)
         return True
-
-
-def is_progress_noise(line: str) -> bool:
-    """Stateless check for ffmpeg progress keys only; use ProgressNoise for HandBrake blocks."""
-    return line.strip().startswith(_FFMPEG_NOISE)
 
 
 _IDET = re.compile(r"Multi frame detection:\s*TFF:\s*(\d+)\s*BFF:\s*(\d+)\s*Progressive:\s*(\d+)")

@@ -150,11 +150,11 @@ class FakeRadarr:
 
     # -- settings ------------------------------------------------------------------
 
-    def root_folders(self) -> list[dict]:
+    def root_folders(self, timeout=None) -> list[dict]:
         self._enter("root_folders", "GET", "/api/v3/rootfolder")
         return [{"id": 1, "path": str(self.root)}, {"id": 2, "path": str(self.other_root)}]
 
-    def quality_profiles(self) -> list[dict]:
+    def quality_profiles(self, timeout=None) -> list[dict]:
         self._enter("quality_profiles", "GET", "/api/v3/qualityprofile")
         return json.loads((FIX / "qualityprofile.json").read_text())
 

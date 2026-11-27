@@ -1,9 +1,9 @@
 # super-ripper
 
-A single Docker container for Unraid that rips, encodes and burns discs from its own web UI. The design is in [Disc Ripper – Design Plan.md](Disc%20Ripper%20%E2%80%93%20Design%20Plan.md).
+A single Docker container for Unraid that rips and encodes discs from its own web UI. The design is in [Disc Ripper – Design Plan.md](Disc%20Ripper%20%E2%80%93%20Design%20Plan.md).
 
 Current state: **steps 4 and 6 are built** (DVD and Blu-ray ripping, and encoding), on top of step 3 (audio CD ripping) and step 2 (detection, queues and the shutdown guard). **Step 5 (identification and import into the library) is built, and awaits testing on the server.**
-- **Dashboard** (the home page): shows each enabled drive live, as empty, tray open or disc in, with the disc type and label. It has Eject and Close tray buttons, and lets you queue a *test job*: a pretend job with a chosen length and size that exercises the queue, progress and cache-space check.
+- **Dashboard** (the home page): shows each enabled drive live, as empty, tray open or disc in, with the disc type and label. It has Eject and Close tray buttons, and, once **Show test-job controls** is on in Settings (Debug), lets you queue a *test job*: a pretend job with a chosen length and size that exercises the queue, progress and cache-space check.
 - **Drives page:** labels and enables drives.
 - **Audio CDs:**
   - Insert a CD and it rips to FLAC (cyanrip), checked against AccurateRip, identified on MusicBrainz, tagged, and given its cover.
@@ -101,7 +101,7 @@ When the beta key or version expires, rips fail with an "Update MakeMKV" message
 
 ### Job logs
 
-Every job (scans, rips, test jobs) keeps a log in `/config/logs/job-<id>.log`: what ran, the tool's own messages, progress every 10% and how it ended. A CD rip also keeps cyanrip's own log beside it as `job-<id>-cyanrip.log`. Progress chatter is left out, so a log is usually 10–20 KB. Logs are kept until you delete them. Each job on a drive's card has a **log** link that opens the log in a new tab, and a failed job shows its reason in a box on the card with **Retry** and **View log**.
+Every job (scans, rips, and test jobs when enabled) keeps a log in `/config/logs/job-<id>.log`: what ran, the tool's own messages, progress every 10% and how it ended. A CD rip also keeps cyanrip's own log beside it as `job-<id>-cyanrip.log`. Progress chatter is left out, so a log is usually 10–20 KB. Finished jobs and their logs are deleted after 30 days (jobs a rip, album or film still refers to are kept), checked at start-up and daily. Each job on a drive's card has a **log** link that opens the log in a new tab, and a failed job shows its reason in a box on the card with **Retry** and **View log**.
 
 ### Testing step 4 on the server
 
@@ -125,7 +125,7 @@ After a rip, the main title is encoded to HEVC, and the encode lands **beside th
 The seeded presets give one English audio track, converted to E-AC-3: 5.1 at 640 kb/s when the source has 3 or more channels, otherwise stereo or mono at 224 kb/s. Every English subtitle track, the chapters and the metadata are kept. No subtitle track is marked default (forced flags are kept), so Jellyfin doesn't switch one on by itself and burn it into the picture. Encodes run at the lowest CPU and disk priority.
 
 Settings has an **Encoding** group:
-- **encode_slots:** encodes run at once, 1 or 2 (default 1). A change applies after the container restarts.
+- **encode_slots:** encodes run at once, 1 or 2 (default 1). A change applies at once; encodes already running finish first.
 - **raw_keep_hours:** how long the raw file is kept after a good encode (default 24).
 - **encode_stall_minutes:** stop an encoder that prints nothing for this long (default 10).
 

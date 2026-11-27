@@ -16,6 +16,15 @@
           {% for value, label in d.choices %}<option value="{{ value }}"{% if values[d.key] == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
         </select>
       </label>
+    {% elif d.options_from and options.get(d.key) %}
+      {% set shown = values[d.key] %}
+      <label>{{ d.label }}
+        <select name="{{ d.key }}">
+          <option value=""{% if not shown %} selected{% endif %}>Default</option>
+          {% for value, label in options[d.key] %}<option value="{{ value }}"{% if shown == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+          {% if shown and shown not in options[d.key]|map("first") %}<option value="{{ shown }}" selected>{{ shown }} (not in Radarr)</option>{% endif %}
+        </select>
+      </label>
     {% elif d.kind == "secret" %}
       <label>{{ d.label }}
         <input type="password" name="{{ d.key }}" value="" autocomplete="off"{% if secrets_set.get(d.key) %} placeholder="Set — leave blank to keep"{% endif %}>

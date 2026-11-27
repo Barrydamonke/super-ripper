@@ -22,6 +22,7 @@
   {%- endif %}
 </p>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if wedged %}<p class="error">The drive is stuck. Restart the container (ejecting the disc may also clear it).</p>{% endif %}
 {% for mv in video_moves %}
   <div class="video-move">
     <p class="error">Rip #{{ mv.rip_id }}: {{ mv.message or "Moving the rip to downloads failed." }}</p>
@@ -96,4 +97,4 @@
   </div>
 {% endif %}
 
-{% if new_job_past_grace %}<p class="error">A {{ default_minutes }}-minute test job would finish after the grace period ends ({{ guard.grace_ends_at|hm }}).</p>{% endif %}
+{% if show_test_jobs and new_job_past_grace %}<p class="error">A {{ default_minutes }}-minute test job would finish after the grace period ends ({{ guard.grace_ends_at|hm }}).</p>{% endif %}

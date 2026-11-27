@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 _ACTIVE = "('queued', 'waiting_space', 'running')"
@@ -158,24 +159,41 @@ def blocking_rip(conn: sqlite3.Connection, fingerprint: str, downloads_dir: Path
     return None
 
 
+@contextmanager
+def _files_update(conn: sqlite3.Connection, rip_id: int, now: str | None):
+    """Read a rip's files JSON and write it back as one step: the write lock is taken first, so a
+    concurrent update (the raw sweep) can't be lost. Inside a caller's open transaction it just joins it
+    and does NOT commit: the caller must."""
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+        files = json.loads(row["files"]) if row else {}
+        yield files
+        if now is None:
+            conn.execute("UPDATE video_rips SET files = ? WHERE rip_id = ?", (json.dumps(files), rip_id))
+        else:
+            conn.execute("UPDATE video_rips SET files = ?, updated_at = ? WHERE rip_id = ?",
+                         (json.dumps(files), now, rip_id))
+        if own:
+            conn.commit()
+    except BaseException:
+        if own and conn.in_transaction:
+            conn.rollback()
+        raise
+
+
 def record_file(conn: sqlite3.Connection, rip_id: int, title: int, path: Path, role: str, now: str) -> None:
-    row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
-    files = json.loads(row["files"]) if row else {}
-    files[str(title)] = {"path": str(path), "role": role}
-    with conn:
-        conn.execute("UPDATE video_rips SET files = ?, updated_at = ? WHERE rip_id = ?",
-                     (json.dumps(files), now, rip_id))
+    """Record a file for a title. Commits, unless the caller already has a transaction open (then it doesn't)."""
+    with _files_update(conn, rip_id, now) as files:
+        files[str(title)] = {"path": str(path), "role": role}
 
 
 def mark_raw_deleted(conn: sqlite3.Connection, rip_id: int, title: int, now: str) -> None:
-    row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
-    files = json.loads(row["files"]) if row else {}
-    if str(title) not in files:
-        return
-    files[str(title)]["raw_deleted_at"] = now
-    with conn:
-        conn.execute("UPDATE video_rips SET files = ?, updated_at = ? WHERE rip_id = ?",
-                     (json.dumps(files), now, rip_id))
+    with _files_update(conn, rip_id, now) as files:
+        if str(title) in files:
+            files[str(title)]["raw_deleted_at"] = now
 
 
 def raw_deleted(conn: sqlite3.Connection, rip_id: int, title: int) -> bool:
@@ -185,12 +203,9 @@ def raw_deleted(conn: sqlite3.Connection, rip_id: int, title: int) -> bool:
 
 
 def clear_raw_deleted(conn: sqlite3.Connection, rip_id: int, title: int) -> None:
-    row = conn.execute("SELECT files FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
-    files = json.loads(row["files"]) if row else {}
-    if str(title) in files:
-        files[str(title)].pop("raw_deleted_at", None)
-        with conn:
-            conn.execute("UPDATE video_rips SET files = ? WHERE rip_id = ?", (json.dumps(files), rip_id))
+    with _files_update(conn, rip_id, None) as files:
+        if str(title) in files:
+            files[str(title)].pop("raw_deleted_at", None)
 
 
 def set_state(conn: sqlite3.Connection, rip_id: int, state: str, message: str, now: str) -> None:

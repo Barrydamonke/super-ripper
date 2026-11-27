@@ -22,6 +22,7 @@
 </label>
 {%- endmacro -%}
 {% block content %}
+{% set qmin = 1 if v.mode == "hardware" else 0 %}{% set bmax = 640 if v.audio_codec == "ac3" else 1536 %}
 <h1>{% if preset_id %}Edit preset{% else %}New preset{% endif %}</h1>
 <p><a href="/presets">Back to presets</a></p>
 <form id="preset-form" method="post" action="/presets/save"
@@ -36,8 +37,8 @@
     {{ pick("engine", "Encoder program", ENGINES, {"handbrake": "HandBrake", "ffmpeg": "ffmpeg"}) }}
     {{ pick("mode", "Mode", MODES, {"software": "Software", "hardware": "Hardware (VAAPI)", "copy": "Copy, no re-encode"}) }}
     {{ pick("codec", "Codec", CODECS, CODEC_LABEL) }}
-    {{ num("quality_dvd", "Quality for DVDs (lower is better)", 0, 51) }}
-    {{ num("quality_bluray", "Quality for Blu-rays (lower is better)", 0, 51) }}
+    {{ num("quality_dvd", "Quality for DVDs (lower is better)", qmin, 51) }}
+    {{ num("quality_bluray", "Quality for Blu-rays (lower is better)", qmin, 51) }}
     {{ pick("speed", "Speed", SPEEDS) }}
     {{ pick("max_height", "Largest picture height", MAX_HEIGHTS) }}
     {{ pick("deinterlace", "Deinterlace", DEINTERLACE) }}
@@ -46,8 +47,8 @@
     <h2>Audio</h2>
     {{ pick("audio_codec", "Audio codec", AUDIO_CODECS, AUDIO_LABEL) }}
     {{ pick("audio_channels", "Channels", AUDIO_CHANNELS, {"max51": "Up to 5.1", "stereo": "Stereo", "keep": "Keep as is"}) }}
-    {{ num("bitrate_surround", "Surround bitrate (kb/s)", 64, 1536) }}
-    {{ num("bitrate_stereo", "Stereo bitrate (kb/s)", 64, 1536) }}
+    {{ num("bitrate_surround", "Surround bitrate (kb/s)", 64, bmax) }}
+    {{ num("bitrate_stereo", "Stereo bitrate (kb/s)", 64, bmax) }}
     <label>Audio languages <input type="text" id="f-audio_languages" name="audio_languages" value="{{ v.audio_languages }}">{{ note("audio_languages") }}</label>
     <div class="hint">Three-letter codes in order of preference, such as eng, jpn.</div>
     {{ pick("audio_tracks", "Tracks to keep", AUDIO_TRACKS, {"first_per_language": "First of each language", "all": "All"}) }}

@@ -80,7 +80,11 @@ async def _undo(flow: Flow, row) -> str:
 
     # Each step is recorded on the row as it finishes, so a retry carries on from where this stopped.
     extras = json.loads(row["extras"] or "[]")
-    if extras:
+    if extras and row["state"] == "in_jellyfin":
+        # The rip's folder is gone, so the extras can't come back with the main file: they stay in the library.
+        flow.log.write(f"extras left in the library: {len(extras)} file(s)")
+        flow.set(extras=[])
+    elif extras:
         for extra in extras:
             await asyncio.to_thread(Path(extra).unlink, missing_ok=True)
         if new_path is not None:
@@ -116,6 +120,7 @@ async def _undo(flow: Flow, row) -> str:
             flow.log.write(f"old file restored to {old_path}")
         elif not await asyncio.to_thread(old_path.exists):
             message += " " + BIN_GONE
+        await _restore_monitored(flow, row)
         await flow.call("command", "RescanMovie", movieId=row["movie_id"])
     elif row["added_by_us"]:
         try:
@@ -127,6 +132,7 @@ async def _undo(flow: Flow, row) -> str:
             await asyncio.to_thread(_remove_empty, folder / "extras")
             await asyncio.to_thread(_remove_empty, folder)
     elif row["movie_id"]:  # the owner already had this movie: leave it, and let Radarr see it has no file
+        await _restore_monitored(flow, row)
         await flow.call("command", "RescanMovie", movieId=row["movie_id"])
 
     with flow.conn:
@@ -135,8 +141,18 @@ async def _undo(flow: Flow, row) -> str:
     flow.set(state="undone", message=message)
     flow.set(state="needs_identify", step=film_imports.UNDONE_STEP, message=message, error=None, movie_id=None, encode_id=None,
              new_path=None, old_path=None, old_folder=None, recycled_path=None, extras=[], replace={},
-             imported_at=None, added_by_us=0)
+             imported_at=None, added_by_us=0, prev_monitored=None)
     return message
+
+
+async def _restore_monitored(flow: Flow, row) -> None:
+    """A film the owner already had monitored was unmonitored by the import: monitor it again."""
+    if row["prev_monitored"] != 1:
+        return
+    movie = await flow.call("movie", row["movie_id"])
+    if not movie.get("monitored"):
+        await flow.call("update_movie", {**movie, "monitored": True}, move_files=False)
+        flow.log.write("monitored again")
 
 
 async def skip(services, rip_id: int) -> str | None:
@@ -144,6 +160,12 @@ async def skip(services, rip_id: int) -> str | None:
     async def work():
         conn = db.connect(services.config.db_path)
         try:
+            rip = conn.execute("SELECT state FROM video_rips WHERE rip_id = ?", (rip_id,)).fetchone()
+            if rip is not None and rip["state"] == "ripping":
+                return "This rip is still ripping; wait for it to finish."
+            if conn.execute("SELECT 1 FROM jobs WHERE kind = 'rip_title' AND json_extract(params, '$.rip_id') = ? "
+                            "AND state IN ('queued', 'running', 'waiting_space') LIMIT 1", (rip_id,)).fetchone():
+                return "This rip is still ripping; cancel it on the drive's card first."
             row = film_imports.ensure(conn, rip_id, utc_now())
             if row["state"] == "importing":
                 return "This rip is being imported; wait for it to finish."

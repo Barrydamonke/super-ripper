@@ -41,3 +41,5 @@ table.compare tr.bad th, table.compare tr.bad td { color: #b00020; font-weight: 
 .film-candidate .poster { width: 46px; height: 69px; background: #eee; object-fit: cover; flex: none; }
 .film-candidate-text { flex: 1 1 12rem; }
 .different-film { margin: .5rem 0; }
+
+footer.app-version { margin: 32px 0 16px; font-size: 0.8em; opacity: 0.6; }

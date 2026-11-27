@@ -13,18 +13,19 @@ import logging
 import math
 import os
 import shutil
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from . import cd_rips, cdrip, coverart, db, drives, encodes, film_imports, filmimport, joblog, jobs, presets, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
+from . import cd_rips, cdrip, coverart, db, drives, encodes, film_imports, filmimport, joblog, jobs, presets, prune, schedule_source, settings, titles, video_rips, videorip  # cdrip, videorip register handlers
 from .jellyfin import Jellyfin, RefreshDebouncer
 from .musicbrainz import MusicBrainz
 from .radarr import Radarr
 from .cdrom import CdDrive
 from .cdtoc import Toc, musicbrainz_disc_id
-from .clock import utc_now
+from .clock import parse_utc, utc_now
 from .config import AppConfig
 from .encodepool import EncodePool
 from .events import Broker
@@ -37,6 +38,7 @@ log = logging.getLogger(__name__)
 SCHEDULE_REFRESH_SECONDS = 300
 RAW_SWEEP_SECONDS = 600
 FILM_CONFIRM_SECONDS = 300
+PRUNE_SECONDS = 24 * 3600
 SCAN_MISSING = "The rip's scan is missing, so its length can't be checked; can't encode."
 GUARD_TICK_SECONDS = 60
 CD_BYTES_PER_SECOND = 176_400  # 44.1 kHz, 16-bit stereo
@@ -46,11 +48,6 @@ FLAC_RATIO = 0.75  # generous: FLAC is usually 50-70% of the raw audio
 def drive_key(drive_id: str) -> str:
     """Short stable name for a drive in HTML ids and SSE event names (its ID has ':' and spaces)."""
     return hashlib.sha1(drive_id.encode()).hexdigest()[:10]
-
-
-def _parse_utc(value: str) -> datetime:
-    moment = datetime.fromisoformat(value)
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -729,13 +726,17 @@ class Services:
         Returns why it was refused, or None when the raw is deleted. keep_hours None means "now";
         otherwise the first good encode must have finished that long ago. Only the raw file goes:
         never an encode's output, never a folder."""
-        conn.execute("BEGIN IMMEDIATE")  # the checks and the flag are one step: a queue can't slip between
+        # The checks and the flag are one short transaction (a queue can't slip between), and the flag
+        # then keeps new encodes out. The unlink runs outside it: a huge file can take longer than the
+        # busy timeout, and other writers must not wait on it.
+        conn.execute("BEGIN IMMEDIATE")
         try:
             error, good, raw = self._raw_checks(conn, rip_id, title, now, keep_hours)
             if error is not None:
                 conn.rollback()
                 return error
-            video_rips.mark_raw_deleted(conn, rip_id, title, now.isoformat(timespec="seconds"))  # commits
+            video_rips.mark_raw_deleted(conn, rip_id, title, now.isoformat(timespec="seconds"))
+            conn.commit()
         except BaseException:
             if conn.in_transaction:
                 conn.rollback()
@@ -777,7 +778,7 @@ class Services:
             if encodes.same_file(raw, Path(output)):
                 return "The raw file is also an encode's output, so it is kept.", [], None
         if keep_hours is not None:
-            stamps = [_parse_utc(r["finished_at"]) for r in good if r["finished_at"]]
+            stamps = [parse_utc(r["finished_at"]) for r in good if r["finished_at"]]
             if not stamps:
                 return "The raw rip is kept: it isn't recorded when its encode finished.", [], None
             if now < min(stamps) + timedelta(hours=keep_hours):
@@ -808,6 +809,38 @@ class Services:
             removed += self.delete_raw_sync(conn, p["rip_id"], p["title"], now=now, keep_hours=keep) is None
         return removed
 
+    def _sweep_orphan_raws(self, conn) -> int:
+        """Unlink raw files flagged deleted whose file is still there (a stop between the flag and the
+        unlink). Same safety as a delete: not in use by a queued or running encode, not an encode's output."""
+        removed = 0
+        outputs = None
+        for rip in conn.execute("SELECT rip_id, files FROM video_rips WHERE files LIKE '%raw_deleted_at%'").fetchall():
+            for title, entry in json.loads(rip["files"] or "{}").items():
+                if not entry.get("raw_deleted_at") or not entry.get("path"):
+                    continue
+                raw = Path(entry["path"])
+                if not raw.is_file():
+                    continue
+                if conn.execute("SELECT 1 FROM encodes WHERE rip_id = ? AND title = ? "
+                                "AND state IN ('queued', 'running')", (rip["rip_id"], int(title))).fetchone():
+                    continue
+                if conn.execute("SELECT 1 FROM jobs WHERE kind = 'rip_title' AND state = 'running' "
+                                "AND json_extract(params, '$.rip_id') = ? AND json_extract(params, '$.title') = ?",
+                                (rip["rip_id"], int(title))).fetchone():
+                    continue  # being ripped again: the new file lands at this path before it is recorded
+                if outputs is None:
+                    outputs = [Path(r[0]) for r in conn.execute("SELECT output FROM encodes WHERE output IS NOT NULL")]
+                if any(encodes.same_file(raw, o) for o in outputs):
+                    continue
+                try:
+                    self._unlink_raw(raw)
+                except OSError:
+                    log.exception("video: removing the flagged raw file %s failed", raw)
+                    continue
+                log.info("video: removed raw file %s (flagged deleted, still on disk)", raw)
+                removed += 1
+        return removed
+
     def _cancel_orphaned_disc_jobs(self, conn) -> None:
         """Start-up: queued disc jobs whose disc was taken out while the app was off can never run."""
         ids = [r[0] for r in conn.execute(
@@ -830,12 +863,28 @@ class Services:
             log.info("video: removed the leftover partial folder of job #%s (rip #%s)", job_id, rip_id)
         return len(removed)
 
+    def _prune_old(self, conn) -> None:
+        removed_jobs, removed_logs = prune.prune_old(conn, self.config.config_dir)
+        if removed_jobs or removed_logs:
+            log.info("prune: removed %d old job(s) and %d old log file(s)", removed_jobs, removed_logs)
+
     async def _raw_sweep_loop(self) -> None:
+        last_prune = time.monotonic()  # start-up just pruned
         while True:
+            if time.monotonic() - last_prune >= PRUNE_SECONDS:
+                last_prune = time.monotonic()
+                try:
+                    await asyncio.to_thread(self._db, self._prune_old)
+                except Exception:
+                    log.exception("prune: removing old jobs and logs failed")
             try:
                 await asyncio.to_thread(self._db, self._sweep_partials)
             except Exception:
                 log.exception("video: removing leftover partial folders failed")
+            try:
+                await asyncio.to_thread(self._db, self._sweep_orphan_raws)
+            except Exception:
+                log.exception("video: removing flagged raw files failed")
             try:
                 if await asyncio.to_thread(self._db, self._sweep_raw):
                     await self.encodes_changed()
@@ -1063,7 +1112,9 @@ class Services:
 
     async def on_remove(self, drive_id: str) -> None:
         """The disc left the drive (ejected, or the media monitor saw it go)."""
-        await self.cancel_disc_jobs(drive_id)
+        await self.cancel_disc_jobs(drive_id)  # first: a woken worker must not start the old disc's jobs
+        if self.runner.clear_wedged(drive_id):
+            await self.drive_changed(drive_id)  # the "drive is stuck" note goes
 
     def _hold_video(self, conn, drive_id: str) -> list[int]:
         with conn:
@@ -1118,7 +1169,8 @@ class Services:
             if row is None:
                 return None
             return render_drive_card(conn, row, datetime.now().astimezone(), config=self.config,
-                                     dvd_wait_pending=self.dvd_wait_pending)
+                                     dvd_wait_pending=self.dvd_wait_pending,
+                                     drive_wedged=self.runner.is_wedged)
         finally:
             conn.close()
 
@@ -1227,6 +1279,8 @@ class Services:
                     conn, rip_id, self.config.work_dir, utc_now(), downloads_dir=self.config.downloads_dir))
             guard("cancelling orphaned disc jobs", lambda: self._cancel_orphaned_disc_jobs(conn))
             guard("sweeping partial files", lambda: self._sweep_partials(conn))
+            guard("removing flagged raw files", lambda: self._sweep_orphan_raws(conn))
+            guard("pruning old jobs and logs", lambda: self._prune_old(conn))
             guard("sweeping old work folders",
                   lambda: cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc)))
         finally:

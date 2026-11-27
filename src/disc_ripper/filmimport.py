@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 from . import db, encodes, film_imports, filmid, joblog, presets, settings, video_rips, videofiles
-from .clock import utc_now
+from .clock import parse_utc, utc_now
 from .jellyfin import JellyfinError
 from .radarr import RadarrError, parse_resolution, parse_runtime, to_candidate
 
@@ -31,6 +31,46 @@ NO_RADARR = "Set up Radarr in Settings to import films."
 DEFAULT_ROOT = "Movies"
 STEPS = ("identify", "claim", "add", "replace", "encode", "import", "unmonitor", "extras", "done")
 _CHOOSABLE = {"identifying", "needs_identify", "waiting_other", "needs_replace_ok", "failed", "undone"}
+
+
+def default_root(conn) -> str:
+    """The Radarr root folder to add films to: the setting, or the one named "Movies"."""
+    return settings.get(conn, "radarr_root_folder").strip() or DEFAULT_ROOT
+
+
+CHOICES_TIMEOUT = 3.0
+
+
+def radarr_choices(client, timeout: float = CHOICES_TIMEOUT) -> tuple[list[dict], list[dict]]:
+    """(root folders, quality profiles) from Radarr, or empty lists when it can't answer quickly.
+    Blocks up to about two timeouts: call it off the event loop."""
+    try:
+        roots = client.root_folders(timeout=timeout)
+        profiles = client.quality_profiles(timeout=timeout)
+    except Exception:  # Radarr down, slow, or refusing: the caller falls back to what is stored
+        return [], []
+    return ([r for r in roots or [] if isinstance(r, dict) and r.get("path")],
+            [p for p in profiles or [] if isinstance(p, dict) and p.get("name")])
+
+
+def root_options(roots: list[dict], wanted: str) -> list[dict]:
+    """The "Where to add it" choices: [{"value", "label", "selected"}]. `wanted` (the setting) is selected,
+    else the root named Movies, else the first. Without Radarr's list: the two old names."""
+    if not roots:
+        roots = [{"path": DEFAULT_ROOT}, {"path": "Other movies"}]
+    chosen = find_root(roots, wanted) if wanted else None
+    chosen = chosen or find_root(roots, DEFAULT_ROOT) or roots[0]
+    return [{"value": r["path"], "label": r["path"], "selected": r is chosen} for r in roots]
+
+
+def find_root(roots: list[dict], wanted: str) -> dict | None:
+    """The Radarr root folder whose path (or last folder name) is `wanted`, ignoring case and slash style."""
+    wanted = wanted.replace("\\", "/").rstrip("/").lower()
+    for r in roots:
+        path = r["path"].replace("\\", "/").rstrip("/")
+        if path.lower() == wanted or PurePosixPath(path).name.lower() == wanted:
+            return r
+    return None
 
 
 class FlowError(Exception):
@@ -111,7 +151,7 @@ class Flow:
                       "runtime_ok": s.runtime_ok} for s in scored[:5]]
             self.set(state="needs_identify", candidates=shown, message="Pick the film.")
             raise _Stop
-        self.set(tmdb_id=top.tmdb_id, title=top.title, year=top.year, root_folder=DEFAULT_ROOT, message="")
+        self.set(tmdb_id=top.tmdb_id, title=top.title, year=top.year, root_folder=default_root(self.conn), message="")
 
     async def _step_claim(self) -> None:
         if not film_imports.claim(self.conn, self.rip_id, self.row()["tmdb_id"], utc_now()):
@@ -128,18 +168,27 @@ class Flow:
         added = movie is None
         if movie is None:
             roots = await self.call("root_folders")
-            wanted = (row["root_folder"] or DEFAULT_ROOT).lower()
-            root = next((r for r in roots if PurePosixPath(r["path"].replace("\\", "/")).name.lower() == wanted), None)
+            wanted = row["root_folder"] or default_root(self.conn)
+            root = find_root(roots, wanted)
             if root is None:
-                raise RadarrError(f"Radarr has no root folder named {row['root_folder'] or DEFAULT_ROOT}.")
+                raise RadarrError(f"Radarr has no root folder named {wanted}.")
             profiles = await self.call("quality_profiles")
             if not profiles:
                 raise RadarrError("Radarr has no quality profile.")
+            profile = profiles[0]
+            chosen = settings.get(self.conn, "radarr_quality_profile").strip()
+            if chosen:
+                profile = next((p for p in profiles if str(p.get("name", "")).lower() == chosen.lower()), None)
+                if profile is None:
+                    raise RadarrError(f"Radarr has no quality profile named {chosen}.")
             lookup = await self.call("lookup_tmdb", row["tmdb_id"])
-            movie = await self.call("add_movie", lookup, root["path"], profiles[0]["id"])
+            movie = await self.call("add_movie", lookup, root["path"], profile["id"])
             self.log.write(f"added movie #{movie['id']} to {root['path']}")
         self.movie = movie
-        self.set(movie_id=movie["id"], **({"added_by_us": 1} if added else {}))
+        extra = {"added_by_us": 1} if added else {}
+        if not added and row["prev_monitored"] is None:  # what Undo puts back (an earlier run may have recorded it)
+            extra["prev_monitored"] = 1 if movie.get("monitored") else 0
+        self.set(movie_id=movie["id"], **extra)
 
     async def _step_replace(self) -> None:
         if self.movie is None:
@@ -286,6 +335,13 @@ class Flow:
         for src in self._extra_sources():
             if self._already_copied(src, copied):
                 self.log.write(f"extras: {src.name} was already copied")
+                continue
+            same = folder / src.name
+            if same.is_file() and same.stat().st_size == src.stat().st_size:
+                # already in the library (an Undo after clean-up leaves extras there): use it, don't copy again
+                self.log.write(f"extras: {src.name} is already in the library; kept")
+                copied.append(str(same))
+                self.set(extras=copied)
                 continue
             dest = self._free_name(folder, src.name)
             if dest.name != src.name:
@@ -551,7 +607,7 @@ async def retry_import(services, rip_id: int) -> str | None:
     return await _locked(services, rip_id, work)
 
 
-async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROOT) -> str | None:
+async def choose_film(services, rip_id: int, ref, root_folder: str | None = None) -> str | None:
     """The owner picked the film (a TMDb ID, an IMDb ID or a link): import from the claim step."""
     parsed = filmid.parse_ref(str(ref))
     if parsed is None:
@@ -578,7 +634,8 @@ async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROO
         except (KeyError, TypeError, ValueError):
             return "Radarr doesn't know that film."
         film_imports.ensure(flow.conn, rip_id, utc_now())
-        flow.set(tmdb_id=cand.tmdb_id, title=cand.title, year=cand.year, root_folder=root_folder,
+        flow.set(tmdb_id=cand.tmdb_id, title=cand.title, year=cand.year,
+                 root_folder=root_folder or default_root(flow.conn), prev_monitored=None,
                  state="identifying", movie_id=None, error=None, message="", old_path=None, old_folder=None,
                  recycled_path=None, replace={}, new_path=None, extras=[], encode_id=None, added_by_us=0, step="")
         flow.log.write(f"chosen: {cand.title} ({cand.year}) tmdb {cand.tmdb_id}")
@@ -695,11 +752,6 @@ async def _background(services, rip_id: int) -> None:
 # -- Jellyfin confirmation and clean-up ----------------------------------------------------
 
 
-def _parse_utc(value: str) -> datetime:
-    moment = datetime.fromisoformat(value)
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
-
-
 def _seen_in(sources, path: str, size: int) -> bool:
     """Jellyfin may mount the library elsewhere, so compare the file's name and size, not its folder."""
     name = PurePosixPath(path.replace("\\", "/")).name
@@ -728,7 +780,7 @@ async def _confirm_one(services, rip_id: int, now: datetime) -> None:
         if row is None or row["state"] != "imported" or not row["imported_at"] or not row["new_path"]:
             return
         jlog = joblog.JobLog(services.config.config_dir / joblog.LOG_DIRNAME / f"import-{rip_id}.log")
-        waited = now - _parse_utc(row["imported_at"]) >= timedelta(hours=CONFIRM_HOURS)
+        waited = now - parse_utc(row["imported_at"]) >= timedelta(hours=CONFIRM_HOURS)
         folder = services.config.downloads_dir / str(int(rip_id))
         new = Path(row["new_path"])
         if not await asyncio.to_thread(_library_file_safe, new, folder):

@@ -33,6 +33,7 @@ def test_seeds_round_trip():
     ({"audio_codec": "eac3", "audio_channels": "keep"}, "audio_channels"),
     ({"audio_codec": "ac3", "bitrate_surround": 768}, "bitrate_surround"),
     ({"bitrate_stereo": 32}, "bitrate_stereo"),
+    ({"audio_codec": "ac3", "bitrate_stereo": 768}, "bitrate_stereo"),
     ({"audio_languages": []}, "audio_languages"),
     ({"audio_languages": ["english"]}, "audio_languages"),
     ({"subtitles": "all", "subtitle_languages": []}, "subtitle_languages"),

@@ -217,6 +217,9 @@ def test_live_card_does_not_contain_the_form(dash):
 
     html = dashboard_routes.render_drive_card(conn, row, datetime.now().astimezone(), config=client.app.state.config)
     assert 'name="minutes"' not in html
+    from disc_ripper import settings
+
+    settings.save(conn, {"show_test_jobs": True})
     page = client.get("/").text
     assert page.count('name="minutes"') == 1
     form_at = page.index('name="minutes"')
@@ -274,7 +277,7 @@ def test_rip_again_route(dash):
     _audio_disc(client, conn)
     disc_id = musicbrainz_disc_id(CD_TOC)
     old = jobs.enqueue(conn, "serial:A", "rip_cd", {"disc_id": disc_id}, uses_drive=True, now="t")
-    cd_rips.create(conn, old, disc_id, "t")
+    cd_rips.ensure(conn, old, disc_id, "t")
     jobs.start(conn, old, "t")
     jobs.finish(conn, old, "done", "t")
     cd_rips.update(conn, old, state="filed", summary="Nirvana — Nevermind (1991)")
@@ -292,7 +295,7 @@ def test_rip_again_route(dash):
 def test_card_links_recent_rip_to_music_page(dash):
     client, conn = dash
     j = jobs.enqueue(conn, "serial:A", "rip_cd", {"disc_id": "x"}, uses_drive=True, now="t")
-    cd_rips.create(conn, j, "x", "t")
+    cd_rips.ensure(conn, j, "x", "t")
     jobs.start(conn, j, "t")
     jobs.finish(conn, j, "done", "t")
     cd_rips.update(conn, j, state="needs_look", summary="Unknown album · 9 tracks")
@@ -322,7 +325,7 @@ def test_old_disc_not_shown_after_tray_empties(dash):
     old_toc = Toc(first=1, last=5, offsets=(0, 1, 2, 3, 4), leadout=99999, data_tracks=frozenset())
     old = musicbrainz_disc_id(old_toc)
     j = jobs.enqueue(conn, "serial:A", "rip_cd", {"disc_id": old}, uses_drive=True, now="t")
-    cd_rips.create(conn, j, old, "t")
+    cd_rips.ensure(conn, j, old, "t")
     jobs.start(conn, j, "t")
     jobs.finish(conn, j, "done", "t")
     cd_rips.update(conn, j, state="filed", summary="Old Album")
@@ -605,7 +608,7 @@ def test_job_log_page_shows_the_log_and_kept_tool_logs(dash, config):
     assert "job started" in r.text
     assert f"job-{j}-cyanrip.log" in r.text and "Tracks ripped accurately: 13/13" in r.text
     missing = client.get("/jobs/9999/log")
-    assert missing.status_code == 404 and "No log" in missing.text
+    assert missing.status_code == 404 and missing.text == "No log was kept for this job."
 
 
 def test_job_log_needs_login(client):
@@ -700,3 +703,38 @@ def test_retry_button_disables_itself(dash):
     j = jobs.enqueue(conn, "serial:A", "rip_title", {"rip_id": 1}, now="t")
     jobs.finish(conn, j, "failed", "t2", error="boom")
     assert f'hx-post="/jobs/{j}/retry" hx-target="#drive-{KEY}" hx-disabled-elt="this"' in _page(client)
+
+
+def test_wedged_drive_card_says_so_and_on_remove_clears_it(dash):
+    client, conn = dash
+    from datetime import datetime
+
+    svc = client.app.state.services
+    row = conn.execute("SELECT * FROM drives WHERE id = 'serial:A'").fetchone()
+    now = datetime.now().astimezone()
+    svc.runner._wedged.add("serial:A")
+    html = dashboard_routes.render_drive_card(conn, row, now, config=client.app.state.config,
+                                              drive_wedged=svc.runner.is_wedged)
+    assert "The drive is stuck. Restart the container (ejecting the disc may also clear it)." in html
+    assert "The drive is stuck" in client.get("/").text
+    asyncio.run(svc.on_remove("serial:A"))
+    assert not svc.runner.is_wedged("serial:A")
+    assert "The drive is stuck" not in client.get("/").text
+
+
+def test_test_job_controls_hidden_unless_enabled(dash):
+    from disc_ripper import settings
+
+    client, conn = dash
+    text = _page(client)
+    assert 'class="test-job"' not in text and "test job would finish" not in text
+    settings.save(conn, {"show_test_jobs": True})
+    assert 'class="test-job"' in _page(client)
+
+
+def test_dashboard_swaps_keep_open_menus(dash):
+    client, _ = dash
+    text = _page(client)
+    js = client.get("/static/hold-open.js")
+    assert js.status_code == 200 and "sseBeforeMessage" in js.text and "details[open]" in js.text
+    assert 'src="/static/hold-open.js"' in text

@@ -11,7 +11,7 @@
   {% for card in cards %}
     <section class="drive-card">
       <div id="drive-{{ card.key }}" sse-swap="drive-{{ card.key }}">{{ card.html|safe }}</div>
-      {% include "_test_job_form.html" %}
+      {% if show_test_jobs %}{% include "_test_job_form.html" %}{% endif %}
     </section>
   {% else %}
     <p>No enabled drives. Check the <a href="/drives">Drives</a> page.</p>

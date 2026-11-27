@@ -4,7 +4,7 @@ Like the per-drive runner, but encodes belong to no drive. Before an encode star
 it must fit the shutdown schedule (guard) and the work budget (space); otherwise it
 waits in the queue with a reason (and holds up the ones behind it, so the order stays
 predictable), or fails at once if it could never fit one session. The number of
-slots is read once at start(); changing the setting applies after a restart.
+slots follows the setting: read at start() and again by apply_slots() when it changes.
 """
 
 from __future__ import annotations
@@ -229,7 +229,7 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
         said = " / ".join(tail) or f"The encoder exited with code {code}"
         raise RuntimeError(f"{said}{'' if said.endswith(('.', '!', '?')) else '.'} {SEE_LOG}")
 
-    if s.engine == "handbrake":
+    if s.engine == "handbrake" and plan.subtitles:  # no subtitle tracks, no flag to clear
         await _clear_default_subtitles(ctx, output, stall_minutes, work)
 
     try:
@@ -287,6 +287,7 @@ class EncodePool:
         self.now = now
         self.set_progress = encodes.set_progress  # what JobContext.report writes through
         self._workers: list[asyncio.Task] = []
+        self._target = 0
         self._wakeups: list[asyncio.Event] = []
         self._running: dict[int, asyncio.Task] = {}
         self._user_cancelled: set[int] = set()
@@ -330,10 +331,30 @@ class EncodePool:
     def start(self) -> None:
         if self._workers:
             return
-        slots = max(int(self._call(settings.get, "encode_slots")), 1)
-        for n in range(slots):
+        self._target = self._slots_setting()
+        for n in range(self._target):
             self._wakeups.append(asyncio.Event())
             self._workers.append(asyncio.create_task(self._worker(n), name=f"encode slot {n}"))
+
+    def _slots_setting(self) -> int:
+        return max(int(self._call(settings.get, "encode_slots")), 1)
+
+    def apply_slots(self) -> None:
+        """Follow the encode_slots setting without a restart.
+
+        Growing starts the new slots' loops. Shrinking lets the surplus slots finish any
+        encode they are running, then they stop (an idle one stops at once).
+        """
+        if not self._workers:  # not started (or stopped): start() reads the setting
+            return
+        self._target = self._slots_setting()
+        for n in range(self._target):
+            if n >= len(self._workers):
+                self._wakeups.append(asyncio.Event())
+                self._workers.append(asyncio.create_task(self._worker(n), name=f"encode slot {n}"))
+            elif self._workers[n].done():
+                self._workers[n] = asyncio.create_task(self._worker(n), name=f"encode slot {n}")
+        self.wake()  # surplus slots notice they are surplus
 
     def wake(self) -> None:
         for event in self._wakeups:
@@ -379,7 +400,7 @@ class EncodePool:
         event.clear()
 
     async def _worker(self, slot: int) -> None:
-        while True:
+        while slot < self._target:  # a slot above the setting stops once it has no encode running
             try:
                 await self._step(slot)
             except asyncio.CancelledError:
@@ -432,8 +453,12 @@ class EncodePool:
         return row, "wait", message
 
     async def _step(self, slot: int) -> None:
+        if slot >= self._target:
+            return
         self._wakeups[slot].clear()
         async with self._start_lock:
+            if slot >= self._target:  # a shrink landed while this slot waited for the lock
+                return
             row, outcome, message = await self.db(self._try_start)
         if outcome == "idle":
             await self._wait(slot, None)

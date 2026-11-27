@@ -80,7 +80,7 @@ def enqueue(conn, toc=TOC):
         {"disc_id": musicbrainz_disc_id(toc), "toc": toc.to_json(), "offset": 667, "sr_name": "sr0"},
         uses_drive=True, now="t",
     )
-    cd_rips.create(conn, job_id, musicbrainz_disc_id(toc), "t")
+    cd_rips.ensure(conn, job_id, musicbrainz_disc_id(toc), "t")
     return job_id
 
 
@@ -185,7 +185,7 @@ def test_retry_uses_fresh_work_folder(config, setup, monkeypatch):
     monkeypatch.setenv("FAKE_CYANRIP_MODE", "ok")
     monkeypatch.setattr(cdrip, "after_rip", lambda ctx, **kw: asyncio.sleep(0))
     second = jobs.retry(setup, first, "t2")
-    cd_rips.create(setup, second, DISC_ID, "t2")
+    cd_rips.ensure(setup, second, DISC_ID, "t2")
     run(config, FakeServices(), lambda: jobs.get(setup, second)["state"] in ("done", "failed"))
     assert not (config.work_dir / str(first)).exists()
 

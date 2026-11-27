@@ -162,3 +162,14 @@ def test_invalid_preset_page_is_a_404_not_a_500(client, conn):
     r = client.get("/presets/2")
     assert r.status_code == 404 and "stored settings are invalid" in r.text
     assert client.get("/presets/999").status_code == 404
+
+
+def test_form_limits_follow_the_mode_and_codec(client):
+    soft = client.get("/presets/new?from=1").text
+    assert 'name="quality_bluray" value="' in soft and 'min="0" max="51"' in soft
+    hard = client.get("/presets/new?from=2").text
+    assert 'id="f-quality_dvd" name="quality_dvd" value="' in hard
+    assert 'min="1" max="51"' in hard and 'min="0" max="51"' not in hard
+    r = client.post("/presets/save", data=form_for(1, audio_codec="ac3", bitrate_stereo=768))
+    assert r.status_code == 200 and "Nothing was saved" in r.text
+    assert 'name="bitrate_stereo" value="768" min="64" max="640"' in r.text

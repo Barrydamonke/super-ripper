@@ -150,6 +150,29 @@ def test_start_sweeps_old_work_folders(config, add_sg, monkeypatch):
     assert calls == [config.work_dir]
 
 
+def test_start_prunes_old_jobs_and_a_failing_prune_does_not_block_start(config, add_sg, monkeypatch):
+    import asyncio
+
+    conn = _prepare(config, add_sg)
+    old = jobs.enqueue(conn, "serial:A", "rip_cd", {}, now="2020-01-01T00:00:00+00:00")
+    jobs.start(conn, old, "2020-01-01T00:00:00+00:00")
+    jobs.finish(conn, old, "failed", "2020-01-02T00:00:00+00:00")
+    svc = services.Services(config)
+
+    async def main():
+        await svc.start()
+        await svc.stop()
+
+    asyncio.run(main())
+    assert jobs.get(conn, old) is None
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(services.prune, "prune_old", boom)
+    asyncio.run(main())  # still starts
+
+
 def test_start_reconciles_interrupted_cd_rips(config, add_sg):
     import asyncio
 
@@ -159,11 +182,11 @@ def test_start_reconciles_interrupted_cd_rips(config, add_sg):
 
     conn = _prepare(config, add_sg)
     filing_job = jobs.enqueue(conn, "serial:A", "rip_cd", {}, now="t")
-    cd_rips.create(conn, filing_job, "d1", "t")
+    cd_rips.ensure(conn, filing_job, "d1", "t")
     cd_rips.update(conn, filing_job, state="filing")
     ident_job = jobs.enqueue(conn, "serial:A", "rip_cd", {}, now="t")
     jobs.start(conn, ident_job, "t")  # killed while identifying
-    cd_rips.create(conn, ident_job, "d2", "t")
+    cd_rips.ensure(conn, ident_job, "d2", "t")
     dest = config.downloads_dir / str(ident_job)
     make_flac(dest / "01.flac")
     cd_rips.update(conn, ident_job, downloads_path=str(dest))

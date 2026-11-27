@@ -6,8 +6,6 @@ VALID = {
     "cache_min_free_gb": "20",
     "auto_start_rips": "on",
     "shutdown_grace_hours": "3",
-    "raw_retention_hours": "24",
-    "iso_dir": "/data/ISOs",
     "cd_rip_mode": "secure",
     "cd_retries": "10",
     "video_min_title_seconds": "120",
@@ -96,7 +94,6 @@ def test_settings_page_shows_defaults(logged_in_client):
     assert r.status_code == 200
     assert 'name="work_budget_gb"' in r.text
     assert 'value="60"' in r.text
-    assert 'value="/data/ISOs"' in r.text
 
 
 def test_settings_save_and_errors(logged_in_client):
@@ -105,12 +102,12 @@ def test_settings_save_and_errors(logged_in_client):
     assert "Settings saved." in r.text
     assert 'value="100"' in logged_in_client.get("/settings").text
 
-    bad = {**VALID, "work_budget_gb": "abc", "iso_dir": "/somewhere/else"}
+    bad = {**VALID, "work_budget_gb": "abc", "radarr_url": "ftp://x"}
     r = logged_in_client.post("/settings", data=bad)
     assert r.status_code == 400
     assert "Must be a whole number." in r.text
     assert 'value="abc"' in r.text
-    assert 'value="/somewhere/else"' in r.text
+    assert 'value="ftp://x"' in r.text
     assert "Settings saved." not in r.text
     # nothing from the bad post was stored
     assert 'value="100"' in logged_in_client.get("/settings").text
@@ -196,3 +193,33 @@ def test_settings_page_shows_groups(logged_in_client):
     assert text.count("<h2>DVD and Blu-ray</h2>") == 1
     assert text.index("<h2>DVD and Blu-ray</h2>") < text.index('name="makemkv_key"')
     assert "app_DefaultSelectionString" in text and "--profile" not in text
+
+
+def test_settings_page_has_no_removed_settings(logged_in_client):
+    text = logged_in_client.get("/settings").text
+    assert 'name="iso_dir"' not in text and 'name="raw_retention_hours"' not in text
+    assert text.index("<h2>Jellyfin</h2>") < text.index('name="jellyfin_url"')
+    assert text.index("<h2>Debug</h2>") > text.index('name="radarr_url"')
+    assert 'name="show_test_jobs"' in text
+
+
+def test_settings_save_tells_the_encode_pool(logged_in_client, config):
+    calls = []
+    pool = logged_in_client.app.state.services.encoder
+    original = pool.apply_slots
+    pool.apply_slots = lambda: (calls.append(1), original())[1]
+    r = logged_in_client.post("/settings", data=VALID)
+    assert r.status_code == 200 and calls == [1]
+    bad = logged_in_client.post("/settings", data={**VALID, "work_budget_gb": "abc"})
+    assert bad.status_code == 400 and calls == [1]
+
+
+def test_footer_shows_version_and_sha(logged_in_client, monkeypatch):
+    from disc_ripper import __version__
+
+    monkeypatch.setenv("GIT_SHA", "0123456789abcdef0123")
+    text = logged_in_client.get("/settings").text
+    assert f"v{__version__}" in text and "0123456789ab" in text and "0123456789abc" not in text
+    monkeypatch.delenv("GIT_SHA")
+    text = logged_in_client.get("/settings").text
+    assert f"v{__version__}" in text and "0123456789ab" not in text

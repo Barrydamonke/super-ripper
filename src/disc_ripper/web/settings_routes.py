@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from typing import Any
@@ -24,10 +25,23 @@ def _display(value: Any) -> Any:
     return str(value)
 
 
+def _radarr_options(request: Request) -> dict[str, list[tuple[str, str]]]:
+    """Radarr's own root folders and quality profiles for the two dropdowns; empty when Radarr isn't set up
+    or doesn't answer quickly (the page then shows the stored value in a text box). Blocks: run off the loop."""
+    services = getattr(request.app.state, "services", None)
+    client = services.radarr() if services is not None else None
+    if client is None:
+        return {}
+    roots, profiles = filmimport.radarr_choices(client)
+    return {"radarr_root_folder": [(r["path"], r["path"]) for r in roots],
+            "radarr_quality_profile": [(p["name"], p["name"]) for p in profiles]}
+
+
 def _render(
     request: Request,
     conn: sqlite3.Connection,
     *,
+    options: dict[str, list[tuple[str, str]]] | None = None,
     values: dict[str, Any] | None = None,
     errors: dict[str, str] | None = None,
     message: str | None = None,
@@ -44,6 +58,7 @@ def _render(
             "definitions": settings.SETTINGS,
             "values": values,
             "errors": errors or {},
+            "options": options or {},
             "message": message,
             "password_error": password_error,
             "password_message": password_message,
@@ -55,8 +70,8 @@ def _render(
 
 
 @router.get("/settings")
-def settings_page(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
-    return _render(request, conn)
+async def settings_page(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    return _render(request, conn, options=await asyncio.to_thread(_radarr_options, request))
 
 
 @router.post("/settings")
@@ -70,15 +85,23 @@ async def settings_save(request: Request, conn: sqlite3.Connection = Depends(get
             if d.kind == "secret":
                 continue  # never echo a secret back, even a rejected one
             submitted[d.key] = d.key in form if d.kind == "bool" else form.get(d.key, "")
-        return _render(request, conn, values=submitted, errors=exc.errors, status_code=400)
+        options = await asyncio.to_thread(_radarr_options, request)
+        return _render(request, conn, values=submitted, errors=exc.errors, options=options, status_code=400)
     settings.save(conn, parsed)
     services = getattr(request.app.state, "services", None)
+    pool = getattr(services, "encoder", None)
+    if pool is not None:  # "Encodes at once" applies without a restart
+        try:
+            pool.apply_slots()
+        except Exception:
+            log.exception("encodes: applying the slot count failed")
     if services is not None:  # Radarr may be set up now: import the films that were waiting for it
         try:
             await filmimport.sweep_ready(services)
         except Exception:
             log.exception("film import: looking for rips ready to import failed")
-    return _render(request, conn, message="Settings saved.")
+    options = await asyncio.to_thread(_radarr_options, request)
+    return _render(request, conn, message="Settings saved.", options=options)
 
 
 @router.post("/settings/password")
@@ -100,7 +123,7 @@ def change_password(
         except ValueError as exc:
             error = str(exc)
     if error:
-        return _render(request, conn, password_error=error, status_code=400)
-    response = _render(request, conn, password_message="Password changed.")
+        return _render(request, conn, password_error=error, options=_radarr_options(request), status_code=400)
+    response = _render(request, conn, password_message="Password changed.", options=_radarr_options(request))
     set_session_cookie(request, response, version)
     return response

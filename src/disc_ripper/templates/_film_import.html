@@ -88,7 +88,7 @@
       {{ post_button("/films/import/retry", rip, "Retry") }} {{ log_link(rip) }}</div>
     {{ different_film(rip) }}
   {% elif state in ("imported", "in_jellyfin") %}
-    <p class="ok">{{ imp.title }}{% if imp.year %} ({{ imp.year }}){% endif %}: {{ "In Jellyfin; the rip's files were cleaned up." if state == "in_jellyfin" else "Imported; waiting for Jellyfin to show it." }}
+    <p class="ok">{{ imp.title }}{% if imp.year %} ({{ imp.year }}){% endif %}: {% if state == "in_jellyfin" %}{{ "In Jellyfin" if jellyfin_set_up else "Imported" }}; the rip's files were cleaned up.{% elif jellyfin_set_up %}Imported; waiting for Jellyfin to show it.{% else %}Imported.{% endif %}
       {% if imp.message %}<span class="error">{{ imp.message }}</span>{% endif %} {{ log_link(rip) }}</p>
   {% elif state == "skipped" %}
     <p class="hint">Skipped.</p>

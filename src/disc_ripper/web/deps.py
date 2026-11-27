@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -28,6 +29,16 @@ def _hm(value: str | datetime | None) -> str:
 
 
 templates.env.filters["hm"] = _hm
+
+
+def _app_version() -> dict[str, str]:
+    """The package version and the short git sha the image was built from (the GIT_SHA build arg)."""
+    from .. import __version__
+
+    return {"number": __version__, "sha": os.environ.get("GIT_SHA", "").strip()[:12]}
+
+
+templates.env.globals["app_version"] = _app_version
 templates.env.filters["fromjson"] = json.loads
 
 
