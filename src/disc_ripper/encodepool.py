@@ -457,6 +457,8 @@ class EncodePool:
             return
         self._wakeups[slot].clear()
         async with self._start_lock:
+            if slot >= self._target:  # a shrink landed while this slot waited for the lock
+                return
             row, outcome, message = await self.db(self._try_start)
         if outcome == "idle":
             await self._wait(slot, None)
