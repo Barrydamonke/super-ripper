@@ -168,3 +168,23 @@ def test_get_preset_invalid_row_is_none(conn):
         conn.execute("UPDATE presets SET settings = ? WHERE id = 2", ('{"engine": "nope"}',))
     assert presets.get_preset(conn, 2) is None
     assert presets.get_preset(conn, 1) is not None
+
+
+def test_in_use_by_interrupted_encode(conn):
+    eid = queue(conn, 1, "Standard")
+    with conn:
+        conn.execute("UPDATE encodes SET state = 'interrupted' WHERE id = ?", (eid,))
+    assert "an interrupted encode" in presets.uses(conn, 1)
+    assert "interrupted encode" in presets.delete_preset(conn, 1)
+
+
+@pytest.mark.parametrize("state,used", [("ripping", True), ("ripped", False), ("move_failed", True),
+                                        ("failed", False)])
+def test_in_use_by_unfinished_rip(conn, state, used):
+    conn.execute("INSERT INTO drives (id, id_source, first_seen, last_seen) VALUES ('serial:A', 'serial', 't', 't')")
+    conn.execute("INSERT INTO jobs (id, drive_id, kind, state, params, created_at) "
+                 "VALUES (7, 'serial:A', 'rip_title', 'done', '{}', 't')")
+    conn.execute("INSERT INTO video_rips (rip_id, fingerprint, state, encode_preset, created_at, updated_at) "
+                 "VALUES (7, 'fp', ?, '3', 't', 't')", (state,))
+    conn.commit()
+    assert presets.uses(conn, 3) == (["a rip in progress"] if used else [])

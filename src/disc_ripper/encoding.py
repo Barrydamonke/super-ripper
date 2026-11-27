@@ -111,7 +111,7 @@ def ffmpeg_prefix() -> list[str]:
 
 
 def priority_prefix() -> list[str]:
-    return ["nice", "-n", "19", "ionice", "-c", "3"] if os.name == "posix" else []
+    return ["nice", "-n", "19", "ionice", "-c", "2", "-n", "7"] if os.name == "posix" else []
 
 
 _HB_AUDIO = {"eac3": "eac3", "ac3": "ac3", "aac": "av_aac", "opus": "opus", "copy": "copy"}

@@ -116,7 +116,7 @@ class PresetSettings:
             if key in ("quality_dvd", "quality_bluray"):
                 _int(key, v[key], 1 if v["mode"] == "hardware" else 0, 51)
             elif key in ("bitrate_surround", "bitrate_stereo"):
-                top = 640 if key == "bitrate_surround" and v["audio_codec"] == "ac3" else 1536
+                top = 640 if v["audio_codec"] == "ac3" else 1536
                 _int(key, v[key], 64, top)
             elif key == "max_height":
                 _choice(key, v[key], MAX_HEIGHTS)
@@ -487,12 +487,12 @@ def uses(conn: sqlite3.Connection, preset_id: int) -> list[str]:
     """Human phrases for what still uses this preset (empty: nothing does)."""
     key = str(preset_id)
     out = []
-    for state in ("queued", "running"):
+    for state in ("queued", "running", "interrupted"):
         if conn.execute("SELECT 1 FROM encodes WHERE preset_id = ? AND state = ?", (preset_id, state)).fetchone():
-            out.append(f"a {state} encode")
+            out.append(f"{'an' if state == 'interrupted' else 'a'} {state} encode")
     for r in conn.execute("SELECT label, model FROM drives WHERE encode_choice = ? ORDER BY id", (key,)):
         out.append(f"the {r['label'] or r['model']} dropdown")
-    if conn.execute("SELECT 1 FROM video_rips WHERE encode_preset = ? AND state = 'ripping'", (key,)).fetchone():
+    if conn.execute("SELECT 1 FROM video_rips WHERE encode_preset = ? AND state IN ('ripping', 'move_failed')", (key,)).fetchone():
         out.append("a rip in progress")
     if default_choice(conn) == key:
         out.append("After ripping")

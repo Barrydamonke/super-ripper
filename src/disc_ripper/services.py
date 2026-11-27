@@ -735,16 +735,19 @@ class Services:
             if error is not None:
                 conn.rollback()
                 return error
-            video_rips.mark_raw_deleted(conn, rip_id, title, now.isoformat(timespec="seconds"))  # commits
+            # Unlink first, then flag, all under the write lock: a failed unlink leaves the record alone,
+            # and a crash in between leaves a file the next delete simply finds already gone.
+            try:
+                self._unlink_raw(raw)
+            except OSError as exc:
+                conn.rollback()
+                return f"Couldn't delete the raw rip: {exc.strerror or exc}."
+            video_rips.mark_raw_deleted(conn, rip_id, title, now.isoformat(timespec="seconds"))
+            conn.commit()
         except BaseException:
             if conn.in_transaction:
                 conn.rollback()
             raise
-        try:
-            self._unlink_raw(raw)
-        except OSError as exc:
-            video_rips.clear_raw_deleted(conn, rip_id, title)
-            return f"Couldn't delete the raw rip: {exc.strerror or exc}."
         joblog.JobLog(self.config.config_dir / "logs" / f"encode-{good[-1]['id']}.log").write(
             f"raw rip deleted: {raw}")
         return None

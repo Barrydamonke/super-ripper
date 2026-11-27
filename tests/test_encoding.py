@@ -51,7 +51,7 @@ def test_idet_argv():
 
 def test_priority_prefix_posix_only(monkeypatch):
     monkeypatch.setattr(os, "name", "posix")
-    assert encoding.priority_prefix() == ["nice", "-n", "19", "ionice", "-c", "3"]
+    assert encoding.priority_prefix() == ["nice", "-n", "19", "ionice", "-c", "2", "-n", "7"]
     monkeypatch.setattr(os, "name", "nt")
     assert encoding.priority_prefix() == []
 

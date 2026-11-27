@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -221,7 +222,55 @@ def test_queue_refused_without_scan_length(config, setup, filed):
     assert [r["state"] for r in encodes_of(setup)] == ["failed"]
 
 
-def test_queue_between_flag_and_unlink_is_refused(filed, setup, monkeypatch):
+def test_failing_unlink_leaves_the_record_unmarked(filed, setup, monkeypatch):
+    services, rip, raw, out, enc = filed
+    marked = []
+    real = video_rips.mark_raw_deleted
+    monkeypatch.setattr(video_rips, "mark_raw_deleted", lambda *a: (marked.append(a), real(*a)))
+
+    def broken(path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Services, "_unlink_raw", staticmethod(broken))
+    assert "Couldn't delete" in services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0)
+    assert marked == [] and raw.exists()
+    assert not setup.in_transaction
+
+
+def test_missing_raw_still_marks_deleted(filed, setup):
+    services, rip, raw, out, enc = filed
+    raw.unlink()
+    assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0) is None
+    assert "raw_deleted_at" in files_of(setup, rip)["0"]
+
+
+def test_record_file_and_mark_raw_deleted_hold_the_write_lock_first(filed, setup, tmp_path):
+    services, rip, raw, out, enc = filed
+    for run in (lambda: video_rips.record_file(setup, rip, 5, tmp_path / "x.mkv", "extra", "t"),
+                lambda: video_rips.mark_raw_deleted(setup, rip, 0, "t"),
+                lambda: video_rips.clear_raw_deleted(setup, rip, 0)):
+        seen = []
+        setup.set_trace_callback(seen.append)
+        run()
+        setup.set_trace_callback(None)
+        assert seen[0] == "BEGIN IMMEDIATE"  # read-modify-write is one transaction
+        assert not setup.in_transaction
+
+
+def test_interleaved_updates_both_survive(filed, setup, tmp_path):
+    services, rip, raw, out, enc = filed
+    other = db.connect(services.config.db_path)
+    try:
+        video_rips.record_file(setup, rip, 5, tmp_path / "x.mkv", "extra", "t")
+        video_rips.mark_raw_deleted(other, rip, 0, "t")
+        video_rips.record_file(setup, rip, 6, tmp_path / "y.mkv", "extra", "t")
+    finally:
+        other.close()
+    files = files_of(setup, rip)
+    assert "raw_deleted_at" in files["0"] and "5" in files and "6" in files
+
+
+def test_queue_during_delete_is_locked_out(filed, setup, monkeypatch):
     services, rip, raw, out, enc = filed
     scan = {"titles": [{"number": 0, "seconds": 60, "audio": 1}]}
     with setup:
@@ -230,17 +279,24 @@ def test_queue_between_flag_and_unlink_is_refused(filed, setup, monkeypatch):
     real = Services._unlink_raw
 
     def racing_unlink(path):
-        seen.append(services._db(services._queue_encode, rip, 0, "2"))  # a queue lands mid-delete
+        other = db.connect(services.config.db_path)
+        other.execute("PRAGMA busy_timeout=0")
+        try:
+            other.execute("BEGIN IMMEDIATE")  # a queue lands mid-delete: the write lock is held, so it can't
+        except sqlite3.OperationalError:
+            seen.append("locked out")
+        finally:
+            other.close()
         real(path)
 
     monkeypatch.setattr(Services, "_unlink_raw", staticmethod(racing_unlink))
     assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0) is None
-    assert seen[0][0] is None
+    assert seen == ["locked out"]
     assert [r["state"] for r in encodes_of(setup)] == ["done"]
     assert not raw.exists()
 
 
-def test_unlink_failure_rolls_the_flag_back(filed, setup, monkeypatch):
+def test_unlink_failure_leaves_the_flag_unset(filed, setup, monkeypatch):
     services, rip, raw, out, enc = filed
 
     def broken(path):

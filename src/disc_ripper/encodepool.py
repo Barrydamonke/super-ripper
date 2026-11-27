@@ -229,7 +229,7 @@ async def _encode(ctx: JobContext, row, work: Path) -> None:
         said = " / ".join(tail) or f"The encoder exited with code {code}"
         raise RuntimeError(f"{said}{'' if said.endswith(('.', '!', '?')) else '.'} {SEE_LOG}")
 
-    if s.engine == "handbrake":
+    if s.engine == "handbrake" and plan.subtitles:  # no subtitle tracks, no flag to clear
         await _clear_default_subtitles(ctx, output, stall_minutes, work)
 
     try:
