@@ -492,8 +492,10 @@ def uses(conn: sqlite3.Connection, preset_id: int) -> list[str]:
             out.append(f"{'an' if state == 'interrupted' else 'a'} {state} encode")
     for r in conn.execute("SELECT label, model FROM drives WHERE encode_choice = ? ORDER BY id", (key,)):
         out.append(f"the {r['label'] or r['model']} dropdown")
-    if conn.execute("SELECT 1 FROM video_rips WHERE encode_preset = ? AND state IN ('ripping', 'move_failed')", (key,)).fetchone():
+    if conn.execute("SELECT 1 FROM video_rips WHERE encode_preset = ? AND state = 'ripping'", (key,)).fetchone():
         out.append("a rip in progress")
+    if conn.execute("SELECT 1 FROM video_rips WHERE encode_preset = ? AND state = 'move_failed'", (key,)).fetchone():
+        out.append("a rip waiting to be moved (Move again or Remove it on the Films page)")
     if default_choice(conn) == key:
         out.append("After ripping")
     return out

@@ -224,16 +224,12 @@ def test_queue_refused_without_scan_length(config, setup, filed):
 
 def test_failing_unlink_leaves_the_record_unmarked(filed, setup, monkeypatch):
     services, rip, raw, out, enc = filed
-    marked = []
-    real = video_rips.mark_raw_deleted
-    monkeypatch.setattr(video_rips, "mark_raw_deleted", lambda *a: (marked.append(a), real(*a)))
-
     def broken(path):
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(Services, "_unlink_raw", staticmethod(broken))
     assert "Couldn't delete" in services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0)
-    assert marked == [] and raw.exists()
+    assert raw.exists() and "raw_deleted_at" not in files_of(setup, rip)["0"]  # flagged, then put back
     assert not setup.in_transaction
 
 
@@ -270,7 +266,7 @@ def test_interleaved_updates_both_survive(filed, setup, tmp_path):
     assert "raw_deleted_at" in files["0"] and "5" in files and "6" in files
 
 
-def test_queue_during_delete_is_locked_out(filed, setup, monkeypatch):
+def test_queue_during_unlink_is_refused_and_lock_not_held(filed, setup, monkeypatch):
     services, rip, raw, out, enc = filed
     scan = {"titles": [{"number": 0, "seconds": 60, "audio": 1}]}
     with setup:
@@ -282,18 +278,57 @@ def test_queue_during_delete_is_locked_out(filed, setup, monkeypatch):
         other = db.connect(services.config.db_path)
         other.execute("PRAGMA busy_timeout=0")
         try:
-            other.execute("BEGIN IMMEDIATE")  # a queue lands mid-delete: the write lock is held, so it can't
+            other.execute("BEGIN IMMEDIATE")  # any writer can get in: no transaction spans the unlink
+            other.rollback()
+            seen.append("writable")
         except sqlite3.OperationalError:
             seen.append("locked out")
         finally:
             other.close()
+        seen.append(services._db(services._queue_encode, rip, 0, "2")[0])  # a queue lands mid-delete
         real(path)
 
     monkeypatch.setattr(Services, "_unlink_raw", staticmethod(racing_unlink))
     assert services.delete_raw_sync(setup, rip, 0, now=NOW, keep_hours=0) is None
-    assert seen == ["locked out"]
+    assert seen == ["writable", None]
     assert [r["state"] for r in encodes_of(setup)] == ["done"]
     assert not raw.exists()
+
+
+def flag(conn, rip, title=0):
+    video_rips.mark_raw_deleted(conn, rip, title, "t")
+
+
+def test_orphan_flagged_raw_is_removed_by_the_sweep(filed, setup):
+    services, rip, raw, out, enc = filed
+    flag(setup, rip)  # flagged, but the process died before the unlink
+    assert raw.exists()
+    assert services._sweep_orphan_raws(setup) == 1
+    assert not raw.exists() and out.exists()
+
+
+def test_orphan_sweep_leaves_encode_output_and_in_use_files(filed, setup, tmp_path):
+    services, rip, raw, out, enc = filed
+    flag(setup, rip)
+    with setup:  # the flagged file is an encode's output
+        setup.execute("UPDATE encodes SET output = ? WHERE id = ?", (str(raw), enc))
+    assert services._sweep_orphan_raws(setup) == 0 and raw.exists()
+    with setup:
+        setup.execute("UPDATE encodes SET output = ? WHERE id = ?", (str(out), enc))
+    other = encodes.create(setup, rip_id=rip, title=0, role="main", source=raw, disc_type="dvd", source_seconds=60,
+                           source_bytes=3, source_audio=1, preset_id=1, preset_name="Standard", now="t")
+    assert services._sweep_orphan_raws(setup) == 0 and raw.exists()  # a queued encode reads it
+    with setup:
+        setup.execute("UPDATE encodes SET state = 'failed' WHERE id = ?", (other,))
+    assert services._sweep_orphan_raws(setup) == 1 and not raw.exists()
+
+
+def test_orphan_sweep_skips_unflagged_and_missing(filed, setup):
+    services, rip, raw, out, enc = filed
+    assert services._sweep_orphan_raws(setup) == 0 and raw.exists()
+    flag(setup, rip)
+    raw.unlink()
+    assert services._sweep_orphan_raws(setup) == 0
 
 
 def test_unlink_failure_leaves_the_flag_unset(filed, setup, monkeypatch):

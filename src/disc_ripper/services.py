@@ -729,25 +729,26 @@ class Services:
         Returns why it was refused, or None when the raw is deleted. keep_hours None means "now";
         otherwise the first good encode must have finished that long ago. Only the raw file goes:
         never an encode's output, never a folder."""
-        conn.execute("BEGIN IMMEDIATE")  # the checks and the flag are one step: a queue can't slip between
+        # The checks and the flag are one short transaction (a queue can't slip between), and the flag
+        # then keeps new encodes out. The unlink runs outside it: a huge file can take longer than the
+        # busy timeout, and other writers must not wait on it.
+        conn.execute("BEGIN IMMEDIATE")
         try:
             error, good, raw = self._raw_checks(conn, rip_id, title, now, keep_hours)
             if error is not None:
                 conn.rollback()
                 return error
-            # Unlink first, then flag, all under the write lock: a failed unlink leaves the record alone,
-            # and a crash in between leaves a file the next delete simply finds already gone.
-            try:
-                self._unlink_raw(raw)
-            except OSError as exc:
-                conn.rollback()
-                return f"Couldn't delete the raw rip: {exc.strerror or exc}."
             video_rips.mark_raw_deleted(conn, rip_id, title, now.isoformat(timespec="seconds"))
             conn.commit()
         except BaseException:
             if conn.in_transaction:
                 conn.rollback()
             raise
+        try:
+            self._unlink_raw(raw)
+        except OSError as exc:
+            video_rips.clear_raw_deleted(conn, rip_id, title)
+            return f"Couldn't delete the raw rip: {exc.strerror or exc}."
         joblog.JobLog(self.config.config_dir / "logs" / f"encode-{good[-1]['id']}.log").write(
             f"raw rip deleted: {raw}")
         return None
@@ -811,6 +812,34 @@ class Services:
             removed += self.delete_raw_sync(conn, p["rip_id"], p["title"], now=now, keep_hours=keep) is None
         return removed
 
+    def _sweep_orphan_raws(self, conn) -> int:
+        """Unlink raw files flagged deleted whose file is still there (a stop between the flag and the
+        unlink). Same safety as a delete: not in use by a queued or running encode, not an encode's output."""
+        removed = 0
+        outputs = None
+        for rip in conn.execute("SELECT rip_id, files FROM video_rips WHERE files LIKE '%raw_deleted_at%'").fetchall():
+            for title, entry in json.loads(rip["files"] or "{}").items():
+                if not entry.get("raw_deleted_at") or not entry.get("path"):
+                    continue
+                raw = Path(entry["path"])
+                if not raw.is_file():
+                    continue
+                if conn.execute("SELECT 1 FROM encodes WHERE rip_id = ? AND title = ? "
+                                "AND state IN ('queued', 'running')", (rip["rip_id"], int(title))).fetchone():
+                    continue
+                if outputs is None:
+                    outputs = [Path(r[0]) for r in conn.execute("SELECT output FROM encodes WHERE output IS NOT NULL")]
+                if any(encodes.same_file(raw, o) for o in outputs):
+                    continue
+                try:
+                    self._unlink_raw(raw)
+                except OSError:
+                    log.exception("video: removing the flagged raw file %s failed", raw)
+                    continue
+                log.info("video: removed raw file %s (flagged deleted, still on disk)", raw)
+                removed += 1
+        return removed
+
     def _cancel_orphaned_disc_jobs(self, conn) -> None:
         """Start-up: queued disc jobs whose disc was taken out while the app was off can never run."""
         ids = [r[0] for r in conn.execute(
@@ -839,6 +868,10 @@ class Services:
                 await asyncio.to_thread(self._db, self._sweep_partials)
             except Exception:
                 log.exception("video: removing leftover partial folders failed")
+            try:
+                await asyncio.to_thread(self._db, self._sweep_orphan_raws)
+            except Exception:
+                log.exception("video: removing flagged raw files failed")
             try:
                 if await asyncio.to_thread(self._db, self._sweep_raw):
                     await self.encodes_changed()
@@ -1233,6 +1266,7 @@ class Services:
                     conn, rip_id, self.config.work_dir, utc_now(), downloads_dir=self.config.downloads_dir))
             guard("cancelling orphaned disc jobs", lambda: self._cancel_orphaned_disc_jobs(conn))
             guard("sweeping partial files", lambda: self._sweep_partials(conn))
+            guard("removing flagged raw files", lambda: self._sweep_orphan_raws(conn))
             guard("sweeping old work folders",
                   lambda: cdrip.sweep_work(conn, self.config.work_dir, datetime.now(timezone.utc)))
         finally:

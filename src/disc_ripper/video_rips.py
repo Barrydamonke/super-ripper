@@ -162,7 +162,8 @@ def blocking_rip(conn: sqlite3.Connection, fingerprint: str, downloads_dir: Path
 @contextmanager
 def _files_update(conn: sqlite3.Connection, rip_id: int, now: str | None):
     """Read a rip's files JSON and write it back as one step: the write lock is taken first, so a
-    concurrent update (the raw sweep) can't be lost. Inside a caller's transaction it just joins it."""
+    concurrent update (the raw sweep) can't be lost. Inside a caller's open transaction it just joins it
+    and does NOT commit: the caller must."""
     own = not conn.in_transaction
     if own:
         conn.execute("BEGIN IMMEDIATE")
@@ -184,6 +185,7 @@ def _files_update(conn: sqlite3.Connection, rip_id: int, now: str | None):
 
 
 def record_file(conn: sqlite3.Connection, rip_id: int, title: int, path: Path, role: str, now: str) -> None:
+    """Record a file for a title. Commits, unless the caller already has a transaction open (then it doesn't)."""
     with _files_update(conn, rip_id, now) as files:
         files[str(title)] = {"path": str(path), "role": role}
 
