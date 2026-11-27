@@ -205,7 +205,7 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
             "in_library": rip["rip_id"] in in_library,
             "failed_title": (ft := _failed_title(conn, rip, imports)),
             "failed_interrupted": ft is not None and ft[1] == "encode" and bool(
-                [e["state"] for e in rows if e["title"] == ft[0]][-1:] == ["interrupted"]),
+                (mine := [e for e in rows if e["title"] == ft[0]]) and max(mine, key=lambda e: e["id"])["state"] == "interrupted"),
             "can_encode_all": rip["rip_id"] not in in_library and any(not f["deleted"] for f in views),
             # A rip with no choice of its own follows the setting only while it's still ripping.
             "encode_with": choice_names.get(

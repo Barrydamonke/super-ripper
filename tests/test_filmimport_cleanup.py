@@ -213,3 +213,24 @@ def test_restart_marks_identifying_failed_and_retry_works(config, setup, tmp_pat
     assert row_of(setup, other)["state"] == "failed"
     assert asyncio.run(filmimport.retry_import(services, other)) is None
     assert row_of(setup, other)["state"] == "needs_replace_ok"  # it identified; the film now has the first rip's file
+
+
+def test_stale_interrupted_encode_with_newer_row_does_not_block_cleanup(config, setup, tmp_path):
+    from disc_ripper import encodes
+    rip, services, row = imported(config, setup, tmp_path)
+    src = config.downloads_dir / str(rip) / "title_t01.mkv"
+    old = encodes.create(setup, rip_id=rip, title=1, role="extra", source=src, disc_type="dvd", source_seconds=300,
+                         source_bytes=50, source_audio=2, preset_id=1, preset_name="Standard", now="t")
+    encodes.start(setup, old, "t")
+    encodes.mark_interrupted(setup, "t")
+    assert filmimport._disc_has_work(setup, rip)  # the newest row for the title is interrupted
+    new = encodes.create(setup, rip_id=rip, title=1, role="extra", source=src, disc_type="dvd", source_seconds=300,
+                         source_bytes=50, source_audio=2, preset_id=1, preset_name="Standard", now="t")
+    encodes.start(setup, new, "t")
+    encodes.finish(setup, new, "done", "t", output=str(src), output_bytes=1)
+    assert encodes.get(setup, old)["state"] == "interrupted" and not filmimport._disc_has_work(setup, rip)
+    path = Path(row["new_path"])
+    jf = FakeJellyfin([(str(path), path.stat().st_size)])
+    services.jellyfin = lambda: jf
+    confirm(services, at(row, 0.1))
+    assert row_of(setup, rip)["state"] == "in_jellyfin" and not (config.downloads_dir / str(rip)).exists()

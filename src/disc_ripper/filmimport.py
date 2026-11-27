@@ -784,8 +784,11 @@ def _disc_has_work(conn, rip_id: int, retry_pending=None) -> bool:
                     "AND (jobs.state = 'running' OR (jobs.state IN ('queued', 'waiting_space') "
                     "AND drives.media_state = 'disc')) LIMIT 1", (rip_id,)).fetchone():
         return True
-    return conn.execute("SELECT 1 FROM encodes WHERE rip_id = ? AND state IN ('queued', 'running', 'interrupted') LIMIT 1",
-                        (rip_id,)).fetchone() is not None
+    # An interrupted encode counts only while it is the newest for its title (a Retry inserts a newer row).
+    return conn.execute(
+        "SELECT 1 FROM encodes e WHERE e.rip_id = ? AND (e.state IN ('queued', 'running') OR (e.state = 'interrupted' "
+        "AND NOT EXISTS (SELECT 1 FROM encodes n WHERE n.rip_id = e.rip_id AND n.title = e.title AND n.id > e.id))) "
+        "LIMIT 1", (rip_id,)).fetchone() is not None
 
 
 def _library_file_safe(new: Path, folder: Path) -> bool:
