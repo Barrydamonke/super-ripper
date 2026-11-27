@@ -71,10 +71,14 @@ def prune_old(conn: sqlite3.Connection, config_dir: Path, now: datetime | None =
         except ValueError:
             continue
     if doomed:
-        with conn:
-            conn.executemany("DELETE FROM jobs WHERE id = ?", [(i,) for i in doomed])
-        removed_jobs = len(doomed)
-    gone = set(doomed)
+        gone = set()
+        with conn:  # re-check the references in the DELETE: a row added since the SELECT must never cascade
+            for i in doomed:
+                if conn.execute(f"DELETE FROM jobs WHERE id = ? AND NOT ({_REFERENCED})", (i,)).rowcount:  # noqa: S608
+                    gone.add(i)
+        removed_jobs = len(gone)
+    else:
+        gone = set()
 
     if not logs_dir.is_dir():
         return removed_jobs, removed_logs
