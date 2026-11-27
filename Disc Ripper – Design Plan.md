@@ -1,8 +1,8 @@
 # Disc Ripper – Design Plan
 
-Nov 13, 2026 · @Joseph · updated Nov 26, 2026
+Nov 13, 2026 · @Joseph · updated Nov 27, 2026
 
-## Where the project is now (Nov 26, 2026)
+## Where the project is now (Nov 27, 2026)
 
 This plan was written before any code. The sections below still describe the full vision. Where the built app differs, a **Built:** note in that section says how. Each step's detailed design is in `docs/superpowers/specs/`, and `README.md` describes the app as it works today.
 
@@ -26,7 +26,7 @@ This plan was written before any code. The sections below still describe the ful
 - **When identification happens.** Films are identified after the disc is ripped and encoded, not at insert. Discs are never held for a duplicate. When Radarr already has the film, the import waits for the owner's OK before replacing it (setting "Ask before replacing").
 - **Where rips go.**
   - DVD and Blu-ray rips are written straight into `/data/downloads/disc-ripper/<rip>/.partial/<job>/` and renamed into place, so a Blu-ray needs its size on the cache once, not twice. CD rips and encodes still use `/work`.
-  - Raw rips are deleted as soon as an encode of them passes its check (setting "Keep raw rips for", default 0 hours).
+  - Raw rips are kept by the setting "Keep raw rips": either for N hours after a good encode (default 0, meaning straight away), or until the film is in Jellyfin. In that mode a film still waiting for the owner keeps its raw, while undone, skipped and TV rips use the hours. A raw whose encode lost subtitles is always kept.
   - A film's whole rip folder is deleted once Jellyfin shows the imported file.
 - **Choosing the main title.**
   - The longest title is the main one; Radarr's runtime is not used.
@@ -35,11 +35,29 @@ This plan was written before any code. The sections below still describe the ful
   - A MakeMKV that prints nothing for 10 minutes is stopped, and retried by itself after 3 minutes, up to twice.
   - Only one MakeMKV at a time does its start-up drive scan, because two together could hang.
   - A drive's brief "unknown" reading no longer cancels its queue.
+  - A Retry clicked twice queues only one job.
+  - Leftover `.partial` folders from interrupted rips are swept at start-up and hourly. A finished title waiting to be moved is never swept.
+  - At start-up, queued jobs for a disc that was taken out while the app was off are cancelled.
+- **Space checks.** DVD and Blu-ray rips check free space on the downloads disk and are not counted in the work-area budget; CD rips and encodes still use `/work` and the budget.
+- **Already ripped.** A disc whose film is already in the library, or was skipped, is held as already ripped rather than ripped again.
 - **Presets.**
   - Presets are rows in the database, edited on the Presets page. The seeds are Standard, Fast and Copy only, with today's defaults.
   - Rips keep every audio and subtitle language, and each preset chooses which go into the encode.
   - HandBrake QSV is not offered; the hardware path is VAAPI through ffmpeg.
 - **Import timing.** A film is imported only when its whole disc is ripped and no encode of it is queued or running, so every extra is included.
+  - **Failed titles:** if a title failed to rip, or its encode failed or was interrupted, the import waits. The Films page names the title and offers **Import anyway**.
+  - **Missed imports:** a sweep at start-up and every 5 minutes imports any ready film that was missed, for example after a restart or because Radarr was set up later.
+  - **Clean-up:** it never deletes a rip folder while the disc still has work going.
+- **Encodes.**
+  - A rough (history-free) "too long for a session" guess waits instead of failing.
+  - An encode interrupted twice stops and waits for Retry.
+  - A preset whose stored settings no longer validate fails only its own encode, with a message.
+- **Robustness of the container.**
+  - The Unraid template sets `--restart=unless-stopped`.
+  - Python prints a crash trace (`PYTHONFAULTHANDLER`), and the app keeps a rotating log in `/config/logs/app.log`, with its version at start-up.
+  - Each start-up step is guarded, so one bad row can't stop the app booting, and a device-setup failure no longer stops the container.
+  - Python dependencies are pinned in `constraints.txt`.
+  - The database is backed up to `/config/backups/` before any upgrade changes it, keeping the last 5.
 
 ## Goals and scope
 
@@ -129,7 +147,7 @@ Moving from `/work` to `/data` crosses two mounts, so it is a copy and then a de
 - **Rip folders** are `downloads/disc-ripper/<rip_id>/`, where the rip ID is the main title's job ID, with extras in `extras/`.
 - **DVD and Blu-ray rips** are written into the rip's hidden `.partial/<job>/` folder and renamed into place, so there is no copy. If a rename fails, it falls back to a copy, with **Move again** if that copy fails.
 - **Encodes** are written in `/work/encode-<id>/` and copied into the rip folder.
-- **Raw rips** are deleted as soon as an encode of them passes its check. The setting is "Keep raw rips for", in hours, default 0.
+- **Raw rips** are kept by the setting "Keep raw rips": N hours after a good encode (default 0), or until the film is in Jellyfin.
 - **Imported films:** the whole rip folder is deleted once Jellyfin shows the imported file, or 24 hours after the import without Jellyfin.
 
 **Cache budget.** Two settings: the work-area budget (default 60 GB) and a minimum free space on the cache pool (default 20 GB, read from the pool itself). Before a rip starts, the size MakeMKV reports for the selected titles must fit both. If it doesn't, the disc waits in its drive as "waiting for cache space" and starts when encodes finish and raw files are deleted. The free-space floor matters because `Barry-server` writes also land on the cache until the mover runs.
@@ -450,7 +468,7 @@ Each step gives something usable on its own, so you can test on real discs early
 - [x] **Audio and subtitles.** The seeded presets keep English audio (main track to E-AC-3 5.1 at 640 kb/s) and English subtitles, and drop commentary. Other languages are set per preset.
 - [x] **Quality.** x265 preset slow at RF 20 (Blu-ray) and RF 18 (DVD).
 - [x] **Unmonitor after import.**
-- [x] **Raw-file clean-up.** Changed: a raw rip is deleted as soon as an encode of it passes its check, and a film's whole rip folder is deleted once Jellyfin shows it.
+- [x] **Raw-file clean-up.** Changed: a raw rip is kept for N hours after a good encode (default 0) or until the film is in Jellyfin, the owner's choice. A film's whole rip folder is deleted once Jellyfin shows it.
 - [x] **Cache budget.** 60 GB for the work area and 20 GB kept free on the pool. DVD and Blu-ray rips no longer count against the work budget, because they are written into downloads.
 
 **To test on the real box**
@@ -462,7 +480,10 @@ Each step gives something usable on its own, so you can test on real discs early
 - [x] **Radarr Swagger.** ManualImport with an explicit quality, and moving a film's folder with `moveFiles=true`. Confirmed on Radarr 7.0.3.
 - [ ] **HandBrake with non-English tracks.** How it labels them on a real disc. The track check is tolerant meanwhile.
 
-**Known issues before the mass rip** (Nov 26)
+**Known issues before the mass rip** (Nov 27)
 
 - [ ] **MakeMKV 2.0 stalls on the LG BH10LS38** on Linux. It is mitigated by the stall watchdog and automatic retry, and by the start-up gate (two discs inserted together were one cause). If stalls continue on single discs, try MakeMKV's `sdf_Stop` setting.
-- [ ] **A container exited with code 139** (a segmentation fault) once, right after an update. Add `--restart unless-stopped` to the container's Extra Parameters, and check the log if it happens again.
+- [ ] **A container exited with code 139** (a segmentation fault) once, right after an update. New installs get `--restart=unless-stopped` from the template; add it by hand to the existing container's Extra Parameters. The next crash leaves a trace in `docker logs` and `/config/logs/app.log`.
+- [ ] **Pinned dependencies.** Confirm the first image build with `constraints.txt` passes in CI.
+
+Further ideas from the Nov 26 audit, not yet chosen, are listed in `docs/change-ideas.md`.
