@@ -507,3 +507,12 @@ def test_sweep_partials_keeps_a_done_jobs_mkv_whatever_the_rip_state(config, set
     (folder / "t.mkv").write_bytes(b"x")
     assert video_rips.sweep_partials(setup, config.downloads_dir) == []
     assert (folder / "t.mkv").is_file()
+
+
+def test_orphan_sweep_leaves_a_title_being_ripped_again(filed, setup):
+    services, rip, raw, out, enc = filed
+    flag(setup, rip)
+    with setup:
+        setup.execute("INSERT INTO jobs (drive_id, kind, state, params, needs_bytes, uses_drive, created_at) "
+                      "VALUES ('serial:A', 'rip_title', 'running', ?, 0, 1, 't')", (json.dumps({"rip_id": rip, "title": 0}),))
+    assert services._sweep_orphan_raws(setup) == 0 and raw.exists()

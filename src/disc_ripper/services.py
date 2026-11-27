@@ -827,6 +827,10 @@ class Services:
                 if conn.execute("SELECT 1 FROM encodes WHERE rip_id = ? AND title = ? "
                                 "AND state IN ('queued', 'running')", (rip["rip_id"], int(title))).fetchone():
                     continue
+                if conn.execute("SELECT 1 FROM jobs WHERE kind = 'rip_title' AND state = 'running' "
+                                "AND json_extract(params, '$.rip_id') = ? AND json_extract(params, '$.title') = ?",
+                                (rip["rip_id"], int(title))).fetchone():
+                    continue  # being ripped again: the new file lands at this path before it is recorded
                 if outputs is None:
                     outputs = [Path(r[0]) for r in conn.execute("SELECT output FROM encodes WHERE output IS NOT NULL")]
                 if any(encodes.same_file(raw, o) for o in outputs):
