@@ -712,7 +712,7 @@ def test_wedged_drive_card_says_so_and_on_remove_clears_it(dash):
     svc.runner._wedged.add("serial:A")
     html = dashboard_routes.render_drive_card(conn, row, now, config=client.app.state.config,
                                               drive_wedged=svc.runner.is_wedged)
-    assert "The drive is stuck. Eject the disc or restart the container." in html
+    assert "The drive is stuck. Restart the container (ejecting the disc may also clear it)." in html
     assert "The drive is stuck" in client.get("/").text
     asyncio.run(svc.on_remove("serial:A"))
     assert not svc.runner.is_wedged("serial:A")

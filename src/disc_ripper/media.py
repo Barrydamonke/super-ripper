@@ -143,7 +143,7 @@ class MediaMonitor:
         swap_check = False
         if state == "disc" and target.previous == "disc" and not first:
             # A disc is back after a transient reading: the same disc, or was it swapped?
-            swap_check = self._lost_since.pop(target.drive_id, None) is not None
+            swap_check = target.drive_id in self._lost_since  # kept until a probe has run
         disc_type: str | None = None
         label = ""
         inserted = state == "disc" and (first or target.previous != "disc")
@@ -180,11 +180,19 @@ class MediaMonitor:
             result = await asyncio.wait_for(asyncio.to_thread(self._probe, target), self.probe_timeout)
         except Exception:
             log.exception("media: probing %s failed", target.drive_id)
+            self._lost_since.pop(target.drive_id, None)
             return  # can't tell: assume the same disc
         if result is _BUSY:
-            return
+            return  # keep the mark; check again next poll
+        self._lost_since.pop(target.drive_id, None)
         disc_type, label = result
-        if (disc_type, label) == (target.disc_type, target.label):
+        # Only a positive difference counts. discprobe degrades to ("unknown", "") while a drive
+        # spins up, which says nothing. Audio CDs all have label "", so a CD-to-CD swap inside the
+        # debounce window on a slot drive goes unnoticed (tray drives report tray_open, which acts at once).
+        known = ("unknown", "data", None)
+        type_differs = target.disc_type not in known and disc_type not in known and disc_type != target.disc_type
+        label_differs = bool(target.label) and bool(label) and label != target.label
+        if not (type_differs or label_differs):
             return
         log.info("media: %s: disc swapped (%r -> %r)", target.drive_id, target.label, label)
         await asyncio.to_thread(self._store, target.drive_id, "empty", None, "")

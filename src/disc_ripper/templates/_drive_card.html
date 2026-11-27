@@ -22,7 +22,7 @@
   {%- endif %}
 </p>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
-{% if wedged %}<p class="error">The drive is stuck. Eject the disc or restart the container.</p>{% endif %}
+{% if wedged %}<p class="error">The drive is stuck. Restart the container (ejecting the disc may also clear it).</p>{% endif %}
 {% for mv in video_moves %}
   <div class="video-move">
     <p class="error">Rip #{{ mv.rip_id }}: {{ mv.message or "Moving the rip to downloads failed." }}</p>

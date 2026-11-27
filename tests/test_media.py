@@ -385,3 +385,32 @@ def test_skipped_poll_while_a_job_holds_the_drive_breaks_the_run(config, setup):
         setup.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (j,))
     _poll(m)  # not_ready after it: a fresh first reading, not a removal
     assert events == []
+
+
+def test_reprobe_unknown_after_blip_is_same_disc(config, setup):
+    m, events = _monitor(config, ["disc", "not_ready", "disc", "disc"], [("dvd", "MOVIE"), ("unknown", "")])
+    _poll(m, first=True)
+    _poll(m)
+    _poll(m)
+    _poll(m)
+    assert events == []
+    assert row(setup, "serial:A")["disc_label"] == "MOVIE"
+
+
+def test_busy_reprobe_keeps_the_swap_check_for_next_poll(config, setup):
+    m, events = _monitor(config, ["disc", "not_ready", "disc", "disc"], [("dvd", "OLD"), ("dvd", "NEW")])
+    real = m._locked
+    busy = [True]
+
+    def locked(target, fn):
+        if busy and fn == m.probe and busy.pop():
+            return media._BUSY
+        return real(target, fn)
+
+    _poll(m, first=True)
+    m._locked = locked
+    _poll(m)
+    _poll(m)  # probe busy: nothing yet
+    assert events == []
+    _poll(m)  # probe runs now
+    assert events == ["remove", "insert"]

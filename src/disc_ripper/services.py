@@ -1099,9 +1099,9 @@ class Services:
 
     async def on_remove(self, drive_id: str) -> None:
         """The disc left the drive (ejected, or the media monitor saw it go)."""
+        await self.cancel_disc_jobs(drive_id)  # first: a woken worker must not start the old disc's jobs
         if self.runner.clear_wedged(drive_id):
             await self.drive_changed(drive_id)  # the "drive is stuck" note goes
-        await self.cancel_disc_jobs(drive_id)
 
     def _hold_video(self, conn, drive_id: str) -> list[int]:
         with conn:
