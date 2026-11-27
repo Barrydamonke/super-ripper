@@ -11,9 +11,9 @@
         with {{ imp.replace.new.resolution or "?" }}{% if imp.replace.new.size %}, {{ imp.replace.new.size|gb }}{% endif %}
         {% if imp.undo_until %}<span class="hint">· Undo available until {{ imp.undo_until|day }}</span>{% endif %}
       {% endif %}
-      {% if imp.state == "in_jellyfin" %}<span class="hint">· in Jellyfin</span>{% endif %}
+      {% if imp.state == "in_jellyfin" and jellyfin_set_up %}<span class="hint">· in Jellyfin</span>{% endif %}
       {% if imp.message %}<span class="error"> {{ imp.message }}</span>{% endif %}
-      <button hx-post="/films/undo" hx-vals='{"rip_id": {{ imp.rip_id }}}' hx-target="#films" hx-confirm="Undo this import?">Undo</button>
+      <button hx-post="/films/undo" hx-vals='{"rip_id": {{ imp.rip_id }}}' hx-target="#films" hx-confirm="Undo this import?{% if imp.state == "in_jellyfin" %} The extras stay in the library.{% endif %}">Undo</button>
       <a class="hint" href="/films/import/{{ imp.rip_id }}/log" target="_blank">import log</a>
     </div>
   {% endfor %}
@@ -43,7 +43,7 @@
       <div class="film-file">
         <strong>{{ f.name }}</strong>
         {% if f.seconds %} · {{ f.seconds|hms }}{% endif %}
-        · {% if rip.in_library %}in the library{% elif f.deleted %}raw deleted{% elif f.size is not none %}{{ f.size|gb }} raw{% else %}raw missing{% endif %}
+        · {% if rip.in_library %}in the library{% elif rip.skipped %}skipped{% elif f.deleted %}raw deleted{% elif f.size is not none %}{{ f.size|gb }} raw{% else %}raw missing{% endif %}
         {% for e in f.encodes %}
           <div class="encode-row">
             {% if e.state == "done" %}
@@ -64,7 +64,7 @@
             {% endif %}
           </div>
         {% endfor %}
-        {% if not rip.in_library %}
+        {% if not rip.in_library and not rip.skipped %}
         {% if f.no_intact %}<span class="hint">raw kept: no intact encode</span>{% endif %}
         {% if f.lost_subs %}<span class="hint">raw kept: the encode lost subtitles</span>{% endif %}
         {% if f.until_jellyfin %}<span class="hint">raw kept until the film is in Jellyfin{% if f.jellyfin_note %} ({{ f.jellyfin_note }}){% endif %}</span>{% endif %}

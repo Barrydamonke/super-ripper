@@ -8,8 +8,7 @@
       {% if c.runtime_min %} · {{ c.runtime_min }} min{% endif %}
       {% if c.in_library %} · <span class="hint">in your library</span>{% endif %}</span>
     <select name="root" aria-label="Where to add it">
-      <option value="Movies" selected>Movies</option>
-      <option value="Other movies">Other movies</option>
+      {% for o in root_options %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
     </select>
     <button type="submit">Use this film</button>
   </form>

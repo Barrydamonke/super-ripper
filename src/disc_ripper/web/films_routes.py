@@ -28,6 +28,9 @@ _STARTING: set[int] = set()
 # Radarr's recycle bin cleanup days, for "Undo available until"; refreshed when the page is asked for.
 _BIN_DAYS: dict = {"days": None, "at": -1e9}
 _BIN_DAYS_TTL = 600.0
+# Radarr's root folders for the "Where to add it" dropdown; refreshed (short timeout) when the page is asked for.
+_ROOTS: dict = {"roots": [], "at": -1e9}
+_ROOTS_TTL = 60.0
 
 
 def _hms(seconds) -> str:
@@ -149,6 +152,10 @@ def _import_view(row: sqlite3.Row) -> dict:
     return item
 
 
+def _jellyfin_set_up(conn: sqlite3.Connection) -> bool:
+    return bool(settings.get(conn, "jellyfin_url") and settings.get(conn, "jellyfin_api_key"))
+
+
 def _radarr_set_up(conn: sqlite3.Connection) -> bool:
     return bool(settings.get(conn, "radarr_url") and settings.get(conn, "radarr_api_key"))
 
@@ -175,6 +182,7 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
     imports = {r["rip_id"]: _import_view(r) for r in import_rows}
     # Imported: the files went to the library and the rip folder is cleaned up, so no raw/encode controls.
     in_library = {r["rip_id"] for r in import_rows if r["state"] in ("imported", "in_jellyfin")}
+    skipped = {r["rip_id"] for r in import_rows if r["state"] == "skipped"}
     for rip in conn.execute("SELECT * FROM video_rips ORDER BY rip_id DESC").fetchall():
         disc = conn.execute("SELECT disc_type, label, scan FROM video_discs WHERE fingerprint = ?",
                             (rip["fingerprint"],)).fetchone()
@@ -202,11 +210,11 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
             "disc_type": DISC_NAMES.get(disc["disc_type"], "") if disc else "",
             "created_at": rip["created_at"], "files": views, "logs": logs,
             "imp": imports.get(rip["rip_id"]), "starting": rip["rip_id"] in _STARTING,
-            "in_library": rip["rip_id"] in in_library,
+            "in_library": rip["rip_id"] in in_library, "skipped": rip["rip_id"] in skipped,
             "failed_title": (ft := _failed_title(conn, rip, imports)),
             "failed_interrupted": ft is not None and ft[1] == "encode" and bool(
                 (mine := [e for e in rows if e["title"] == ft[0]]) and max(mine, key=lambda e: e["id"])["state"] == "interrupted"),
-            "can_encode_all": rip["rip_id"] not in in_library and any(not f["deleted"] for f in views),
+            "can_encode_all": rip["rip_id"] not in in_library and rip["rip_id"] not in skipped and any(not f["deleted"] for f in views),
             # A rip with no choice of its own follows the setting only while it's still ripping.
             "encode_with": choice_names.get(
                 rip["encode_preset"] or (default_choice if rip["state"] == "ripping" else ""), ""),
@@ -214,6 +222,8 @@ def films_context(conn: sqlite3.Connection, *, now: datetime | None = None, erro
     recent = [imports[r["rip_id"]] for r in film_imports.recent(conn)]
     return {"active": _active_rows(conn), "rips": rips, "presets": [c for c in presets.choices(conn) if c[0] != "off"],
             "recent": recent, "radarr_set_up": _radarr_set_up(conn), "no_radarr": filmimport.NO_RADARR,
+            "jellyfin_set_up": _jellyfin_set_up(conn),
+            "root_options": filmimport.root_options(_ROOTS["roots"], filmimport.default_root(conn)),
             "error": error, "notice": notice, "oob": oob}
 
 
@@ -261,10 +271,24 @@ async def _refresh_bin_days(request: Request) -> None:
     _BIN_DAYS["at"] = time.monotonic()
 
 
+async def _refresh_roots(request: Request) -> None:
+    """Ask Radarr for its root folders (short timeout; the old list stays when it doesn't answer)."""
+    if time.monotonic() - _ROOTS["at"] < _ROOTS_TTL:
+        return
+    client = _services(request).radarr()
+    if client is None:
+        _ROOTS["roots"] = []
+        return
+    roots, _profiles = await asyncio.to_thread(filmimport.radarr_choices, client)
+    if roots:
+        _ROOTS["roots"], _ROOTS["at"] = roots, time.monotonic()
+
+
 async def _respond(request: Request, *, error: str | None = None, notice: str | None = None,
                    status_code: int = 200) -> HTMLResponse:
     """The re-rendered films list, or just the dashboard panel when the action came from there."""
     await _refresh_bin_days(request)
+    await _refresh_roots(request)
     if request.headers.get("HX-Target") == "encodes":
         html = await asyncio.to_thread(_with_conn, request, render_encodes)
     else:
@@ -283,6 +307,7 @@ def _preset_error(conn, preset: str) -> str | None:
 @router.get("/films")
 async def films_page(request: Request):
     await _refresh_bin_days(request)
+    await _refresh_roots(request)
     html = await asyncio.to_thread(_with_conn, request, render_films)
     return templates.TemplateResponse(request, "films.html", {"films_html": html})
 
@@ -409,8 +434,9 @@ def _claim(services, rip_id: int) -> str | None:
     return None
 
 
-def _results_html(rip_id: int, found: list[dict], error: str | None = None) -> str:
-    return templates.get_template("_film_results.html").render(rip_id=rip_id, cands=found, error=error, searched=True)
+def _results_html(rip_id: int, found: list[dict], error: str | None = None, root_options: list | None = None) -> str:
+    return templates.get_template("_film_results.html").render(
+        rip_id=rip_id, cands=found, error=error, searched=True, root_options=root_options or [])
 
 
 def _candidate_dict(lookup: dict) -> dict:
@@ -467,12 +493,14 @@ async def identify_search(request: Request, rip_id: int = Form(...), q: str = Fo
         found = await asyncio.to_thread(_search, client, query)
     except RadarrError as exc:
         return HTMLResponse(_results_html(rip_id, [], str(exc)))
-    return HTMLResponse(_results_html(rip_id, found))
+    await _refresh_roots(request)
+    wanted = await asyncio.to_thread(_with_conn, request, filmimport.default_root)
+    return HTMLResponse(_results_html(rip_id, found, root_options=filmimport.root_options(_ROOTS["roots"], wanted)))
 
 
 @router.post("/films/identify/choose")
 async def identify_choose(request: Request, rip_id: int = Form(...), tmdb_id: str = Form(...),
-                          root: str = Form(filmimport.DEFAULT_ROOT)):
+                          root: str = Form("")):
     services = _services(request)
     if filmid.parse_ref(tmdb_id) is None:
         return await _respond(request, error="Enter an IMDb ID, a TMDb ID or a TMDb/IMDb link.", status_code=400)
@@ -491,9 +519,10 @@ async def identify_choose(request: Request, rip_id: int = Form(...), tmdb_id: st
             _STARTING.discard(rip_id)
     if refusal:
         return await _respond(request, error=refusal, status_code=409)
-    if root not in ("Movies", "Other movies"):
-        root = filmimport.DEFAULT_ROOT
-    _start(request, rip_id, lambda s: filmimport.choose_film(s, rip_id, tmdb_id, root))
+    root = root.strip()
+    if len(root) > 500 or len(root.splitlines()) > 1:
+        root = ""  # not a folder: use the default
+    _start(request, rip_id, lambda s: filmimport.choose_film(s, rip_id, tmdb_id, root or None))
     return await _respond(request)
 
 

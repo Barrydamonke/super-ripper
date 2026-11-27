@@ -33,6 +33,43 @@ STEPS = ("identify", "claim", "add", "replace", "encode", "import", "unmonitor",
 _CHOOSABLE = {"identifying", "needs_identify", "waiting_other", "needs_replace_ok", "failed", "undone"}
 
 
+def default_root(conn) -> str:
+    """The Radarr root folder to add films to: the setting, or the one named "Movies"."""
+    return settings.get(conn, "radarr_root_folder").strip() or DEFAULT_ROOT
+
+
+def radarr_choices(client, timeout: float = 3.0) -> tuple[list[dict], list[dict]]:
+    """(root folders, quality profiles) from Radarr, or empty lists when it can't answer quickly.
+    Blocks up to about two timeouts: call it off the event loop."""
+    try:
+        roots = client.root_folders(timeout=timeout)
+        profiles = client.quality_profiles(timeout=timeout)
+    except Exception:  # Radarr down, slow, or refusing: the caller falls back to what is stored
+        return [], []
+    return ([r for r in roots or [] if isinstance(r, dict) and r.get("path")],
+            [p for p in profiles or [] if isinstance(p, dict) and p.get("name")])
+
+
+def root_options(roots: list[dict], wanted: str) -> list[dict]:
+    """The "Where to add it" choices: [{"value", "label", "selected"}]. `wanted` (the setting) is selected,
+    else the root named Movies, else the first. Without Radarr's list: the two old names."""
+    if not roots:
+        roots = [{"path": DEFAULT_ROOT}, {"path": "Other movies"}]
+    chosen = find_root(roots, wanted) if wanted else None
+    chosen = chosen or find_root(roots, DEFAULT_ROOT) or roots[0]
+    return [{"value": r["path"], "label": r["path"], "selected": r is chosen} for r in roots]
+
+
+def find_root(roots: list[dict], wanted: str) -> dict | None:
+    """The Radarr root folder whose path (or last folder name) is `wanted`, ignoring case and slash style."""
+    wanted = wanted.replace("\\", "/").rstrip("/").lower()
+    for r in roots:
+        path = r["path"].replace("\\", "/").rstrip("/")
+        if path.lower() == wanted or PurePosixPath(path).name.lower() == wanted:
+            return r
+    return None
+
+
 class FlowError(Exception):
     """A step failed for a reason the owner can read; no traceback needed."""
 
@@ -111,7 +148,7 @@ class Flow:
                       "runtime_ok": s.runtime_ok} for s in scored[:5]]
             self.set(state="needs_identify", candidates=shown, message="Pick the film.")
             raise _Stop
-        self.set(tmdb_id=top.tmdb_id, title=top.title, year=top.year, root_folder=DEFAULT_ROOT, message="")
+        self.set(tmdb_id=top.tmdb_id, title=top.title, year=top.year, root_folder=default_root(self.conn), message="")
 
     async def _step_claim(self) -> None:
         if not film_imports.claim(self.conn, self.rip_id, self.row()["tmdb_id"], utc_now()):
@@ -128,18 +165,27 @@ class Flow:
         added = movie is None
         if movie is None:
             roots = await self.call("root_folders")
-            wanted = (row["root_folder"] or DEFAULT_ROOT).lower()
-            root = next((r for r in roots if PurePosixPath(r["path"].replace("\\", "/")).name.lower() == wanted), None)
+            wanted = row["root_folder"] or default_root(self.conn)
+            root = find_root(roots, wanted)
             if root is None:
-                raise RadarrError(f"Radarr has no root folder named {row['root_folder'] or DEFAULT_ROOT}.")
+                raise RadarrError(f"Radarr has no root folder named {wanted}.")
             profiles = await self.call("quality_profiles")
             if not profiles:
                 raise RadarrError("Radarr has no quality profile.")
+            profile = profiles[0]
+            chosen = settings.get(self.conn, "radarr_quality_profile").strip()
+            if chosen:
+                profile = next((p for p in profiles if str(p.get("name", "")).lower() == chosen.lower()), None)
+                if profile is None:
+                    raise RadarrError(f"Radarr has no quality profile named {chosen}.")
             lookup = await self.call("lookup_tmdb", row["tmdb_id"])
-            movie = await self.call("add_movie", lookup, root["path"], profiles[0]["id"])
+            movie = await self.call("add_movie", lookup, root["path"], profile["id"])
             self.log.write(f"added movie #{movie['id']} to {root['path']}")
         self.movie = movie
-        self.set(movie_id=movie["id"], **({"added_by_us": 1} if added else {}))
+        extra = {"added_by_us": 1} if added else {}
+        if not added and row["prev_monitored"] is None:  # what Undo puts back (an earlier run may have recorded it)
+            extra["prev_monitored"] = 1 if movie.get("monitored") else 0
+        self.set(movie_id=movie["id"], **extra)
 
     async def _step_replace(self) -> None:
         if self.movie is None:
@@ -551,7 +597,7 @@ async def retry_import(services, rip_id: int) -> str | None:
     return await _locked(services, rip_id, work)
 
 
-async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROOT) -> str | None:
+async def choose_film(services, rip_id: int, ref, root_folder: str | None = None) -> str | None:
     """The owner picked the film (a TMDb ID, an IMDb ID or a link): import from the claim step."""
     parsed = filmid.parse_ref(str(ref))
     if parsed is None:
@@ -578,7 +624,8 @@ async def choose_film(services, rip_id: int, ref, root_folder: str = DEFAULT_ROO
         except (KeyError, TypeError, ValueError):
             return "Radarr doesn't know that film."
         film_imports.ensure(flow.conn, rip_id, utc_now())
-        flow.set(tmdb_id=cand.tmdb_id, title=cand.title, year=cand.year, root_folder=root_folder,
+        flow.set(tmdb_id=cand.tmdb_id, title=cand.title, year=cand.year,
+                 root_folder=root_folder or default_root(flow.conn), prev_monitored=None,
                  state="identifying", movie_id=None, error=None, message="", old_path=None, old_folder=None,
                  recycled_path=None, replace={}, new_path=None, extras=[], encode_id=None, added_by_us=0, step="")
         flow.log.write(f"chosen: {cand.title} ({cand.year}) tmdb {cand.tmdb_id}")

@@ -10,7 +10,7 @@ from . import settings
 _COLUMNS = {
     "state", "step", "candidates", "tmdb_id", "movie_id", "title", "year", "root_folder", "encode_id", "replace",
     "old_path", "old_folder", "recycled_path", "new_path", "extras", "message", "error", "imported_at",
-    "added_by_us",
+    "added_by_us", "prev_monitored",
 }
 _JSON_COLUMNS = {"candidates", "replace", "extras"}
 
@@ -103,6 +103,8 @@ def jellyfin_hold(conn: sqlite3.Connection, rip_id: int) -> str | None:
         return None
     if row["state"] == "needs_identify" and row["step"] == UNDONE_STEP:
         return None
+    if row["state"] == "imported" and not (settings.get(conn, "jellyfin_url") and settings.get(conn, "jellyfin_api_key")):
+        return "imported; waiting for clean-up"  # nothing to wait for from Jellyfin
     return _JELLYFIN_NOTES.get(row["state"], "")
 
 

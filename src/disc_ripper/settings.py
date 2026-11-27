@@ -32,6 +32,8 @@ class SettingDef:
     # (value, label) pairs for kind "choice"
     choices: tuple[tuple[str, str], ...] = ()
     group: str = ""
+    # "radarr_roots" / "radarr_profiles": the page offers Radarr's own list as a dropdown when it can fetch it
+    options_from: str = ""
 
 
 SETTINGS: tuple[SettingDef, ...] = (
@@ -147,6 +149,16 @@ SETTINGS: tuple[SettingDef, ...] = (
         "radarr_api_key", "Radarr API key", "secret", "",
         help="Radarr Settings → General → API Key. Never shown again once saved.",
         group="Radarr",
+    ),
+    SettingDef(
+        "radarr_root_folder", "Radarr root folder", "text", "",
+        help="Where new films are added. Blank: the root folder named Movies.",
+        group="Radarr", options_from="radarr_roots",
+    ),
+    SettingDef(
+        "radarr_quality_profile", "Radarr quality profile", "text", "",
+        help="The quality profile for films added to Radarr. Blank: the first one Radarr lists.",
+        group="Radarr", options_from="radarr_profiles",
     ),
     SettingDef(
         "ask_before_replace", "Ask before replacing", "bool", True,

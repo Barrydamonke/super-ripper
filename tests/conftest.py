@@ -108,3 +108,12 @@ def make_flac(path: Path, seconds: float = 1.0) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"fLaC" + header + streaminfo)
     return path
+
+
+@pytest.fixture(autouse=True)
+def reset_radarr_roots_cache():
+    from disc_ripper.web import films_routes
+
+    films_routes._ROOTS.update(roots=[], at=-1e9)
+    yield
+    films_routes._ROOTS.update(roots=[], at=-1e9)

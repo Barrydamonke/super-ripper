@@ -151,11 +151,11 @@ class Radarr:
         self._call("DELETE", f"/api/v3/movie/{int(movie_id)}?deleteFiles={flag}&addImportExclusion=false")
 
     # settings
-    def root_folders(self) -> list[dict]:
-        return self._call("GET", "/api/v3/rootfolder")
+    def root_folders(self, timeout: float = TIMEOUT) -> list[dict]:
+        return self._call("GET", "/api/v3/rootfolder", timeout=timeout)
 
-    def quality_profiles(self) -> list[dict]:
-        return self._call("GET", "/api/v3/qualityprofile")
+    def quality_profiles(self, timeout: float = TIMEOUT) -> list[dict]:
+        return self._call("GET", "/api/v3/qualityprofile", timeout=timeout)
 
     def quality_definitions(self) -> list[dict]:
         return self._call("GET", "/api/v3/qualitydefinition")
