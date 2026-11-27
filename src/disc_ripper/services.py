@@ -547,9 +547,7 @@ class Services:
 
     def _remove_rows(self, conn, rip_id: int) -> list[str]:
         """Delete the rip's rows (jobs and logs stay as history); returns the drives its jobs ran on."""
-        drives_ = [r[0] for r in conn.execute(
-            "SELECT DISTINCT drive_id FROM jobs WHERE kind = 'rip_title' "
-            "AND json_extract(params, '$.rip_id') = ? AND drive_id IS NOT NULL", (rip_id,))]
+        drives_ = self._rip_drives(conn, rip_id)
         with conn:
             conn.execute("DELETE FROM encodes WHERE rip_id = ?", (rip_id,))
             conn.execute("DELETE FROM film_imports WHERE rip_id = ?", (rip_id,))
@@ -570,11 +568,11 @@ class Services:
             if refusal is None:
                 drive_ids = await asyncio.to_thread(self._db, self._remove_rows, rip_id)
                 log.info("films: removed rip #%s", rip_id)
-        if refusal is None or job_ids or encode_ids:  # even a failed delete may have cancelled queued work
-            self.films_changed()
-            await self.encodes_changed()
-            for drive_id in drive_ids or await asyncio.to_thread(self._db, self._rip_drives, rip_id):
-                await self.drive_changed(drive_id)
+        # Always publish: a refusal may follow cancelling some queued work.
+        self.films_changed()
+        await self.encodes_changed()
+        for drive_id in drive_ids or await asyncio.to_thread(self._db, self._rip_drives, rip_id):
+            await self.drive_changed(drive_id)
         return refusal
 
     @staticmethod
@@ -952,7 +950,9 @@ class Services:
                 same_disc = current is not None and current["fingerprint"] == params.get("fingerprint")
             elif same_disc:
                 same_disc = drive["disc_label"] == params.get("label", "")
-            if newer or not same_disc:
+            gone = row["kind"] == "rip_title" and conn.execute(
+                "SELECT 1 FROM video_rips WHERE rip_id = ?", (params.get("rip_id"),)).fetchone() is None
+            if newer or not same_disc or gone:  # (gone: the rip was removed while the retry waited)
                 conn.rollback()
                 return None
             params["auto_retry"] = int(params.get("auto_retry", 0)) + 1

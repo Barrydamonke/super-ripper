@@ -83,6 +83,9 @@ def test_stalled_rip_is_retried_while_its_disc_is_in(config, setup):
     setup.commit()
     j = failed_job(setup, kind="rip_title", params={"fingerprint": "fp1", "title": 0, "rip_id": 1, "role": "main"},
                    queued_with={"fingerprint": "fp1", "title": 3, "rip_id": 1, "role": "extra"})
+    setup.execute("INSERT INTO video_rips (rip_id, fingerprint, state, created_at, updated_at) "
+                  "VALUES (1, 'fp1', 'ripping', 't', 't')")
+    setup.commit()
     end(config, j)
     extra, retry = newer_jobs(setup, j)  # the extra queued with it doesn't count as the owner acting
     assert retry["kind"] == "rip_title" and json.loads(retry["params"])["auto_retry"] == 1
@@ -107,3 +110,28 @@ def test_pending_retry_is_recorded_before_the_card_is_rendered(config, setup):
 
     asyncio.run(main())
     assert seen and seen[0] is True
+
+
+def test_no_retry_for_a_rip_removed_while_it_waited(config, setup):
+    drives.set_media(setup, "serial:A", "disc", "dvd", "FILM_LABEL", "t1")
+    setup.execute(
+        "INSERT INTO video_discs (fingerprint, disc_type, label, scan, minlength, held, drive_id, last_seen) "
+        "VALUES ('fp1', 'dvd', 'FILM_LABEL', '{\"titles\": []}', 120, '[]', 'serial:A', 't1')")
+    setup.commit()
+    j = failed_job(setup, kind="rip_title", params={"fingerprint": "fp1", "title": 0, "rip_id": 1, "role": "main"})
+    setup.execute("INSERT INTO video_rips (rip_id, fingerprint, state, created_at, updated_at) "
+                  "VALUES (1, 'fp1', 'ripping', 't', 't')")
+    setup.commit()
+    services = Services(config)
+    services.auto_retry_wait = 0.3
+
+    async def main():
+        await services.job_ended(j)
+        assert services.retry_pending(1)
+        assert await services.remove_rip(1) is None
+        while services._auto_retries:
+            await asyncio.sleep(0.02)
+
+    asyncio.run(main())
+    assert newer_jobs(setup, j) == []
+    assert not (config.downloads_dir / "1").exists()
