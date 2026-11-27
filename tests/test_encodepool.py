@@ -424,8 +424,7 @@ async def test_slots_grow_and_shrink_live(config, conn, monkeypatch):
     await asyncio.sleep(0.05)
     assert state(conn, ids[0]) == "running" and state(conn, ids[1]) == "running"  # running ones finish
     release.set()
-    await wait_until(lambda: state(conn, ids[2]) == "done")
-    assert all(state(conn, i) == "done" for i in ids)
+    await wait_until(lambda: all(state(conn, i) == "done" for i in ids))
     # the surplus slot stopped once idle: two more encodes now run one at a time
     release.clear()
     running.clear()
